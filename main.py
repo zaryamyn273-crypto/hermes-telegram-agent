@@ -101,9 +101,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Resets conversational session context."""
     chat = update.effective_chat
-    if chat:
-        clear_session(chat.id)
-    await update.effective_message.reply_text("🧹 حافظه نشست جاری با موفقیت پاکسازی و از نو مقداردهی شد.")
+    user = update.effective_user
+    msg = update.effective_message
+
+    if not chat or not msg:
+        return
+
+    # In groups, only authorized admins can clear bot conversation memory
+    if chat.type != ChatType.PRIVATE:
+        if not user or not is_admin(user.id):
+            await msg.reply_text("⛔ تنها مدیران مجاز به پاکسازی حافظه نشست پرومته در گروه‌ها هستند.")
+            return
+
+    clear_session(chat.id)
+    await msg.reply_text("🧹 حافظه نشست جاری با موفقیت پاکسازی و از نو مقداردهی شد.")
 
 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
