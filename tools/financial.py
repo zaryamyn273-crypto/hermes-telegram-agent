@@ -1,8 +1,10 @@
 """
 Specialized Persian Financial Market Tool for Prometheus:
 Provides real-time rates for Free-Market USD (دلار آزاد), Tether (تتر), Euro (یورو),
-Dirham (درهم), Gold 18k (طلای ۱۸ عیار), Emami Coin (سکه امامی), and Top Cryptocurrencies.
-Uses multi-source scraping (TGJU, Nobitex, Wallex) with Cloudflare KV & L1 RAM caching.
+Dirham (درهم), Gold 18k (طلای ۱۸ عیار), Emami Coin (سکه امامی), Bahar Coin (بهار آزادی),
+Half/Quarter Coins, and Top Cryptocurrencies.
+Uses multi-source resilient scraping (TGJU, Wallex, Nobitex, KuCoin, CoinGecko)
+with Cloudflare KV & L1 RAM caching.
 """
 
 import re
@@ -22,7 +24,7 @@ KV_KEY_FIAT_GOLD = "PROMETHEUS_FIAT_GOLD_RATES"
 KV_KEY_CRYPTO_PREFIX = "PROMETHEUS_CRYPTO_"
 
 _FINANCIAL_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
@@ -44,7 +46,7 @@ def _safe_toman(val: Any) -> int:
 
 async def get_fiat_and_gold_rates(force_refresh: bool = False) -> str:
     """
-    Fetches live rates for USD, Tether, Euro, Dirham, Gold 18k, and Emami Coin.
+    Fetches live rates for USD, Tether, Euro, Dirham, Gold 18k, and Coins.
     Returns clean Persian formatted text.
     """
     if not force_refresh:
@@ -54,51 +56,67 @@ async def get_fiat_and_gold_rates(force_refresh: bool = False) -> str:
 
     rates: Dict[str, int] = {}
 
-    # Source 1: TGJU Scrape
+    # Source 1: TGJU Fast Stream Scrape
     try:
-        async with httpx.AsyncClient(timeout=4.0, headers=_FINANCIAL_HEADERS) as client:
-            resp = await client.get("https://www.tgju.org/")
-            if resp.status_code == 200:
-                html = resp.text
-                keys_map = {
-                    "price_dollar_rl": "usd",
-                    "price_eur": "eur",
-                    "price_aed": "aed",
-                    "geram18": "gold18",
-                    "sekee": "emami_coin",
-                    "sekeb": "bahar_coin",
-                    "nim": "half_coin",
-                    "rob": "quarter_coin",
-                }
-                for k, label in keys_map.items():
-                    m = re.search(rf'data-market-row="{k}"[\s\S]{{1,1500}}?data-price="([^"]+)"', html)
-                    if m:
-                        rates[label] = _safe_toman(m.group(1))
+        keys_needed = {
+            "price_dollar_rl": "usd",
+            "price_eur": "eur",
+            "price_aed": "aed",
+            "geram18": "gold18",
+            "sekee": "emami_coin",
+            "sekeb": "bahar_coin",
+            "nim": "half_coin",
+            "rob": "quarter_coin",
+        }
+        buf = ""
+        async with httpx.AsyncClient(headers=_FINANCIAL_HEADERS, timeout=7.0, follow_redirects=True) as client:
+            async with client.stream("GET", "https://www.tgju.org/") as resp:
+                if resp.status_code == 200:
+                    async for chunk in resp.aiter_text():
+                        buf += chunk
+                        for tag, label in list(keys_needed.items()):
+                            m = re.search(rf'data-market-row="{tag}"[\s\S]{{1,1500}}?data-price="([^"]+)"', buf)
+                            if m:
+                                rates[label] = _safe_toman(m.group(1))
+                                del keys_needed[tag]
+                        if not keys_needed or len(buf) > 400000:
+                            break
     except Exception as e:
         logger.debug(f"TGJU fetch error: {e}")
 
-    # Source 2: Nobitex Tether Price
+    # Source 2: Wallex USDT Toman Price
     tether_toman = 0
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            nob_resp = await client.get("https://api.nobitex.ir/v2/orderbook/USDTIRT")
-            if nob_resp.status_code == 200:
-                data = nob_resp.json()
-                last_trade = data.get("lastTradePrice")
-                if last_trade:
-                    # Nobitex is in Rials -> convert to Tomans
-                    tether_toman = int(float(last_trade)) // 10
+        async with httpx.AsyncClient(timeout=4.0, headers=_FINANCIAL_HEADERS) as client:
+            wallex_resp = await client.get("https://api.wallex.ir/v1/markets")
+            if wallex_resp.status_code == 200:
+                data = wallex_resp.json()
+                usdt_market = data.get("result", {}).get("symbols", {}).get("USDTTMN", {})
+                last_p = usdt_market.get("stats", {}).get("lastPrice")
+                if last_p:
+                    tether_toman = int(float(last_p))
     except Exception as e:
-        logger.debug(f"Nobitex fetch error: {e}")
+        logger.debug(f"Wallex fetch error: {e}")
 
-    usd_val = rates.get("usd", 0)
+    # Source 3: Nobitex Fallback for USDT
+    if tether_toman == 0:
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                nob_resp = await client.get("https://api.nobitex.ir/v2/orderbook/USDTIRT")
+                if nob_resp.status_code == 200:
+                    data = nob_resp.json()
+                    last_trade = data.get("lastTradePrice")
+                    if last_trade:
+                        tether_toman = int(float(last_trade)) // 10
+        except Exception as e:
+            logger.debug(f"Nobitex fetch error: {e}")
+
     if tether_toman > 0:
         rates["usdt"] = tether_toman
-        if usd_val == 0:
+        if not rates.get("usd"):
             rates["usd"] = tether_toman
 
-    if not rates.get("usd") and not rates.get("gold18"):
-        # Fallback if both primary sources fail
+    if not rates.get("usd") and not rates.get("gold18") and not rates.get("usdt"):
         return "⚠️ در حال حاضر به دلیل اختلال موقت در سامانه‌های مبدا، دریافت نرخ لحظه‌ای ارز و طلا مقدور نیست. لطفاً دقایقی دیگر مجدداً تلاش نمایید."
 
     # Format result in clean Persian
@@ -107,10 +125,10 @@ async def get_fiat_and_gold_rates(force_refresh: bool = False) -> str:
     eur_str = f"{rates['eur']:,} تومان" if rates.get("eur") else "نامشخص"
     aed_str = f"{rates['aed']:,} تومان" if rates.get("aed") else "نامشخص"
     gold_str = f"{rates['gold18']:,} تومان" if rates.get("gold18") else "نامشخص"
-    coin_str = f"{rates['sekee']:,} تومان" if rates.get("sekee") else "نامشخص"
-    bahar_str = f"{rates['sekeb']:,} تومان" if rates.get("sekeb") else "نامشخص"
-    nim_str = f"{rates['nim']:,} تومان" if rates.get("nim") else "نامشخص"
-    rob_str = f"{rates['rob']:,} تومان" if rates.get("rob") else "نامشخص"
+    coin_str = f"{rates['emami_coin']:,} تومان" if rates.get("emami_coin") else "نامشخص"
+    bahar_str = f"{rates['bahar_coin']:,} تومان" if rates.get("bahar_coin") else "نامشخص"
+    nim_str = f"{rates['half_coin']:,} تومان" if rates.get("half_coin") else "نامشخص"
+    rob_str = f"{rates['quarter_coin']:,} تومان" if rates.get("quarter_coin") else "نامشخص"
 
     text = (
         "📊 **نرخ لحظه‌ای ارز و طلای بازار آزاد ایران:**\n\n"
@@ -133,6 +151,7 @@ async def get_fiat_and_gold_rates(force_refresh: bool = False) -> str:
 async def get_crypto_price(symbol: str = "BTC") -> str:
     """
     Fetches cryptocurrency price in USD and Toman (via live Tether rate).
+    Supports KuCoin, Binance, and CoinGecko with multi-tier failover.
     """
     sym = symbol.strip().upper()
     cache_key = f"{KV_KEY_CRYPTO_PREFIX}{sym}"
@@ -142,65 +161,96 @@ async def get_crypto_price(symbol: str = "BTC") -> str:
         return cached
 
     # 1. Fetch live USDT toman rate
-    usdt_toman = 65000
+    usdt_toman = 75000
     try:
-        async with httpx.AsyncClient(timeout=2.5) as client:
-            resp = await client.get("https://api.nobitex.ir/v2/orderbook/USDTIRT")
-            if resp.status_code == 200:
-                p = resp.json().get("lastTradePrice")
-                if p:
-                    usdt_toman = int(float(p)) // 10
+        # Check Wallex
+        async with httpx.AsyncClient(timeout=3.0, headers=_FINANCIAL_HEADERS) as client:
+            wallex_resp = await client.get("https://api.wallex.ir/v1/markets")
+            if wallex_resp.status_code == 200:
+                data = wallex_resp.json()
+                usdt_market = data.get("result", {}).get("symbols", {}).get("USDTTMN", {})
+                last_p = usdt_market.get("stats", {}).get("lastPrice")
+                if last_p:
+                    usdt_toman = int(float(last_p))
     except Exception:
         pass
 
-    # 2. Fetch crypto price from Binance or CoinGecko
-    price_usd = 0.0
-    change_24h = 0.0
-    name = sym
+    usd_price: Optional[float] = None
+    change_24h: Optional[float] = None
 
+    # 2. Source A: KuCoin API (Fast, no geoblock)
     try:
-        async with httpx.AsyncClient(timeout=3.5) as client:
-            binance_resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT")
-            if binance_resp.status_code == 200:
-                b_data = binance_resp.json()
-                price_usd = float(b_data.get("lastPrice", 0))
-                change_24h = float(b_data.get("priceChangePercent", 0))
+        async with httpx.AsyncClient(timeout=4.0, headers=_FINANCIAL_HEADERS) as client:
+            resp = await client.get(f"https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={sym}-USDT")
+            if resp.status_code == 200:
+                data = resp.json()
+                p = data.get("data", {}).get("price")
+                if p:
+                    usd_price = float(p)
     except Exception as e:
-        logger.debug(f"Binance fetch error for {sym}: {e}")
+        logger.debug(f"KuCoin fetch error for {sym}: {e}")
 
-    if price_usd <= 0.0:
-        # Fallback to CoinGecko simple price
-        cg_map = {
-            "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
-            "BNB": "binancecoin", "TON": "the-open-network", "DOGE": "dogecoin",
-            "XRP": "ripple", "ADA": "cardano", "TRX": "tron", "SUI": "sui"
+    # 3. Source B: CoinGecko Fallback
+    if usd_price is None:
+        coingecko_id_map = {
+            "BTC": "bitcoin",
+            "ETH": "ethereum",
+            "SOL": "solana",
+            "TON": "the-open-network",
+            "DOGE": "dogecoin",
+            "XRP": "ripple",
+            "ADA": "cardano",
+            "BNB": "binancecoin",
+            "TRX": "tron",
+            "SHIB": "shiba-inu",
+            "AVAX": "avalanche-2",
+            "DOT": "polkadot",
+            "NEAR": "near",
+            "LTC": "litecoin",
         }
-        coin_id = cg_map.get(sym, sym.lower())
+        cg_id = coingecko_id_map.get(sym, sym.lower())
         try:
-            async with httpx.AsyncClient(timeout=3.5) as client:
-                cg_resp = await client.get(
-                    f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
-                )
-                if cg_resp.status_code == 200:
-                    cg_data = cg_resp.json().get(coin_id, {})
-                    price_usd = float(cg_data.get("usd", 0))
-                    change_24h = float(cg_data.get("usd_24h_change", 0))
+            async with httpx.AsyncClient(timeout=4.0, headers=_FINANCIAL_HEADERS) as client:
+                cg_url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true"
+                resp = await client.get(cg_url)
+                if resp.status_code == 200:
+                    data = resp.json().get(cg_id, {})
+                    if "usd" in data:
+                        usd_price = float(data["usd"])
+                        change_24h = data.get("usd_24h_change")
+        except Exception as e:
+            logger.debug(f"CoinGecko fetch error for {sym}: {e}")
+
+    # 4. Source C: Binance Fallback
+    if usd_price is None:
+        try:
+            async with httpx.AsyncClient(timeout=3.0, headers=_FINANCIAL_HEADERS) as client:
+                resp = await client.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}USDT")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    usd_price = float(data["price"])
         except Exception:
             pass
 
-    if price_usd <= 0.0:
-        return f"⚠️ نماد رمزارز `{sym}` یافت نشد یا در حال حاضر امکان استعلام قیمت آن وجود ندارد."
+    if usd_price is None:
+        return f"⚠️ استعلام نرخ رمزارز `{sym}` با خطا مواجه شد. لطفاً از صحت نماد اختصاری اطمینان حاصل کنید."
 
-    price_toman = int(price_usd * usdt_toman)
-    trend_emoji = "🟢" if change_24h >= 0 else "🔴"
-    sign = "+" if change_24h >= 0 else ""
+    toman_price = int(usd_price * usdt_toman)
+    formatted_usd = f"${usd_price:,.4f}" if usd_price < 1.0 else f"${usd_price:,.2f}"
+    formatted_toman = f"{toman_price:,} تومان"
+
+    change_str = ""
+    if change_24h is not None:
+        sign = "+" if change_24h > 0 else ""
+        icon = "🟢" if change_24h >= 0 else "🔴"
+        change_str = f"\n{icon} **تغییرات ۲۴ ساعته:** `{sign}{change_24h:.2f}%`"
 
     text = (
         f"🪙 **نرخ لحظه‌ای رمزارز {sym}:**\n\n"
-        f"💵 **قیمت دلاری:** `${price_usd:,.2f}`\n"
-        f"🇮🇷 **معادل تومانی:** `{price_toman:,} تومان`\n"
-        f"{trend_emoji} **تغییرات ۲۴ ساعته:** `{sign}{change_24h:.2f}%`\n\n"
-        "⚡ *استعلام زنده از بازارهای جهانی توسط پرومته*"
+        f"💵 **قیمت دلاری:** `{formatted_usd}`\n"
+        f"🇮🇷 **معادل تومانی:** `{formatted_toman}`"
+        f"{change_str}\n\n"
+        f"⚡ *استعلام زنده توسط پرومته (محاسبه بر مبنای تتر {usdt_toman:,} تومان)*"
     )
 
     await database.kv_set(cache_key, text, ttl_sec=60)

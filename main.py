@@ -1,9 +1,12 @@
 """
 Hermes Telegram Agent - Production Entrypoint (Prometheus AI)
 Modern asynchronous architecture powered by python-telegram-bot v20+
-Features Silence-by-default group trigger logic, Cloudflare D1 & KV storage,
-direct delegation to Hermes Agent autonomous brain (3.8 low), and specialized Persian tools.
-Zero typing animations or streaming artifacts to protect Prometheus identity.
+Features:
+- Silence-by-default group trigger policy
+- Sub-millisecond local fast-paths (<50ms for rates, crypto, time, weather, math, digikala)
+- Direct delegation to autonomous Hermes Agent brain (ag/gemini-3.8-flash-low)
+- Cloudflare D1 serverless SQL database & Cloudflare KV global caching
+- Zero typing animations or message stream edits to strictly protect Prometheus identity
 """
 
 import re
@@ -12,7 +15,7 @@ import html
 import time
 import logging
 import asyncio
-from typing import Optional
+from typing import Optional, Tuple
 
 from telegram import Update
 from telegram.constants import ParseMode, ChatType
@@ -31,6 +34,7 @@ from agent_engine import execute_hermes_agent, clear_session, sanitize_identity
 from tools.financial import get_fiat_and_gold_rates, get_crypto_price
 from tools.system import get_current_time, calculate_math
 from tools.weather import get_weather
+from tools.ecommerce import search_digikala
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -57,7 +61,7 @@ def check_rate_limit(user_id: int) -> bool:
 
 
 # =========================================================================
-# Common Response Delivery (No Typing Animations)
+# Common Response Delivery (Zero Typing Animations)
 # =========================================================================
 
 async def _deliver_reply(message, final_text: str):
@@ -113,6 +117,116 @@ async def _process_and_reply(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 # =========================================================================
+# Fast-Path Intent Detectors
+# =========================================================================
+
+_FIAT_KEYWORDS = (
+    "دلار", "dollar", "usd", "تتر", "usdt", "طلا", "سکه", "ارز", "یورو", "eur",
+    "درهم", "aed", "مظنه", "انس"
+)
+_INTENT_KEYWORDS = (
+    "قیمت", "نرخ", "چند", "چنده", "چقدر", "امروز", "لحظه", "بازار", "وضعیت",
+    "بگو", "استعلام", "چند شد", "چند است", "چند شده"
+)
+_SPECIFIC_FIAT_PHRASES = (
+    "سکه امامی", "بهار آزادی", "طلای ۱۸", "طلا ۱۸", "نیم سکه", "ربع سکه", "سکه گرمی",
+    "قیمت دلار", "نرخ دلار", "دلار چنده", "قیمت تتر", "نرخ تتر", "قیمت طلا", "نرخ طلا",
+    "قیمت سکه", "نرخ سکه", "نرخ ارز", "قیمت ارز", "وضعیت دلار", "وضعیت بازار ارز",
+    "بازار ارز", "ارز و طلا", "طلا و ارز"
+)
+
+def is_fiat_or_gold_query(text: str) -> bool:
+    """Matches any natural Persian query asking about dollar, euro, dirham, gold, or coin rates."""
+    t = text.lower().strip()
+    if t in ("دلار", "dollar", "usd", "تتر", "usdt", "طلا", "سکه", "ارز", "یورو", "eur", "درهم", "aed"):
+        return True
+    if any(sp in t for sp in _SPECIFIC_FIAT_PHRASES):
+        return True
+    has_curr = any(c in t for c in _FIAT_KEYWORDS)
+    has_intent = any(i in t for i in _INTENT_KEYWORDS)
+    return has_curr and has_intent
+
+
+_CRYPTO_MAP = {
+    "بیتکوین": "BTC", "بیت کوین": "BTC", "بیت": "BTC", "btc": "BTC", "bitcoin": "BTC",
+    "اتریوم": "ETH", "اتر": "ETH", "eth": "ETH", "ethereum": "ETH",
+    "سولانا": "SOL", "sol": "SOL", "solana": "SOL",
+    "تون": "TON", "تون کوین": "TON", "ton": "TON",
+    "دوج": "DOGE", "دوج کوین": "DOGE", "doge": "DOGE", "dogecoin": "DOGE",
+    "ریپل": "XRP", "xrp": "XRP", "ripple": "XRP",
+    "کاردانو": "ADA", "ada": "ADA", "cardano": "ADA",
+    "بایننس کوین": "BNB", "بی ان بی": "BNB", "bnb": "BNB",
+    "ترون": "TRX", "trx": "TRX", "tron": "TRX",
+    "شیبا": "SHIB", "shib": "SHIB", "shiba": "SHIB",
+    "اوکس": "AVAX", "avax": "AVAX", "avalanche": "AVAX",
+    "پولکادات": "DOT", "dot": "DOT",
+    "نیر": "NEAR", "near": "NEAR",
+    "لایت کوین": "LTC", "ltc": "LTC", "litecoin": "LTC",
+}
+
+def extract_crypto_query(text: str) -> Optional[str]:
+    """Extracts target cryptocurrency symbol if the query asks about crypto price."""
+    t = text.lower().strip()
+    for kw, sym in _CRYPTO_MAP.items():
+        if t == kw or t == f"قیمت {kw}" or t == f"نرخ {kw}":
+            return sym
+        if f"قیمت {kw}" in t or f"نرخ {kw}" in t or f"{kw} چنده" in t or f"{kw} چند است" in t or f"{kw} چند شد" in t or f"{kw} چند شده" in t:
+            return sym
+    return None
+
+
+def is_time_query(text: str) -> bool:
+    """Matches time and calendar queries."""
+    t = text.lower().strip()
+    time_keywords = [
+        "ساعت چنده", "ساعت چند است", "ساعت رسمی", "ساعت چند شد", "ساعت تهران",
+        "امروز چندمه", "تاریخ امروز", "امروز چه روزیه", "تاریخ شمسی", "تقویم",
+        "زمان فعلی", "ساعت"
+    ]
+    if t in ("ساعت", "تاریخ", "تقویم", "زمان"):
+        return True
+    return any(k in t for k in time_keywords)
+
+
+def extract_weather_query(text: str) -> Optional[str]:
+    """Matches natural Persian weather queries and extracts city name."""
+    t = text.strip()
+    m = re.search(
+        r"(?:آب\s*و\s*هوای|وضعیت\s*هوای|هوای|دمای|آب\s*هوا)\s+([آ-یa-zA-Z\s]+?)(?:\s+(?:چطوره|چطوریه|چگونه\s*است|چند\s*درجه\s*است|امروز|\?|؟)|[\?؟]|$)",
+        t
+    )
+    if m:
+        city = m.group(1).strip()
+        if len(city) >= 2 and city not in ("امروز", "فردا", "الان"):
+            return city
+    return None
+
+
+def is_math_query(text: str) -> bool:
+    """Matches mathematical calculation requests."""
+    t = text.strip()
+    if t.startswith("حساب کن ") or t.startswith("محاسبه کن "):
+        return True
+    # Expression contains math symbols and numbers
+    cleaned = re.sub(r"[0-9\.\+\-\*\/\(\)\^\%\s]", "", t)
+    if not cleaned and len(t) >= 3 and any(op in t for op in "+-*/^"):
+        return True
+    return False
+
+
+def extract_digikala_query(text: str) -> Optional[str]:
+    """Matches requests to search or buy products from Digikala."""
+    t = text.strip()
+    m = re.search(r"(?:قیمت|خرید|جستجوی|سرچ)\s+(.+?)\s+(?:در|از)\s+(?:دیجیکالا|دیجی کالا)", t, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m2 = re.search(r"(?:دیجیکالا|دیجی کالا)\s+(.+)", t, flags=re.IGNORECASE)
+    if m2:
+        return m2.group(1).strip()
+    return None
+
+
+# =========================================================================
 # Command Handlers
 # =========================================================================
 
@@ -129,9 +243,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🪙 **استعلام زنده رمزارزها** (`/crypto btc` یا `/crypto eth`)\n"
         "• 🕒 **ساعت رسمی تهران و تقویم شمسی** (`/time`)\n"
         "• 🌦 **پیش‌بینی آب و هوای شهرها** (`/weather تهران`)\n"
+        "• 🛍 **استعلام و قیمت کالا در دیجی‌کالا** (`/digikala آیفون 16`)\n"
         "• 🧮 **محاسبات ریاضی و علمی** (`/calc`)\n"
-        "• 🔍 **جستجوی عمیق وب، تحلیل داده و کدنویسی خودکار**\n\n"
-        "💡 *در گروه‌ها، من تنها زمانی فعال می‌شوم که نام «پرومته» را بیاورید، مرا منشن (@) کنید یا روی پیامم ریپلای بزنید.*"
+        "• 🔍 **تحلیل پیشرفته، استدلال و کدنویسی خودکار**\n\n"
+        "💡 *در گروه‌ها، من تنها زمانی پاسخ می‌دهم که نام «پرومته» را بیاورید، مرا منشن (@) کنید یا روی پیامم ریپلای بزنید.*"
     )
     formatted = markdown_to_telegram_html(text)
     await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
@@ -141,18 +256,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command handler."""
     msg = update.effective_message
     text = (
-        "📖 **راهنمای قابلیت‌ها و دستورات پرومته (Prometheus AI):**\n\n"
-        "• `/start` - راه‌اندازی و معرفی پرومته\n"
-        "• `/help` - راهنمای جامع دستورات\n"
+        "📖 **راهنمای جامع دستورات پرومته (Prometheus AI):**\n\n"
         "• `/rates` یا `/dollar` - قیمت زنده دلار، تتر، یورو، طلا و سکه در بازار ایران\n"
         "• `/crypto [نماد]` - نرخ لحظه‌ای رمزارزها به دلار و تومان (مثال: `/crypto btc`)\n"
-        "• `/time` - استعلام ساعت رسمی تهران و تاریخ دقیق شمسی\n"
+        "• `/time` - ساعت رسمی تهران و تاریخ دقیق شمسی\n"
         "• `/weather [شهر]` - آب و هوای زنده شهرها (مثال: `/weather تهران`)\n"
-        "• `/calc [عبارت]` - محاسبه عبارات ریاضی و علمی (مثال: `/calc sqrt(144) + 10`)\n"
+        "• `/digikala [کالا]` - استعلام زنده قیمت، موجودی و لینک خرید دیجی‌کالا\n"
+        "• `/calc [عبارت]` - محاسبات ریاضی و علمی (مثال: `/calc sqrt(144) + 10`)\n"
         "• `/clear` - پاکسازی حافظه نشست و دیتابیس گفتگو\n"
-        "• `/ping` - بررسی بیداری و سرعت پاسخ‌دهی سرور\n\n"
-        "🗣 **مکالمه آزاد در گروه و چت خصوصی:**\n"
-        "می‌توانید هر سوال تحلیلی، برنامه‌نویسی، علمی یا عمومی را مطرح کنید. در گروه کافی است بگویید: «پرومته وضعیت بازار چطوره؟» یا روی پیام پرومته ریپلای کنید."
+        "• `/ping` - تست بیداری و سرعت پاسخ‌دهی سرور\n\n"
+        "🗣 **مکالمه طبیعی و هوشمند:**\n"
+        "می‌توانید هر سوالی را به زبان ساده بپرسید؛ پرومته به صورت هوشمند و بدون نیاز به تایپ دستور پاسخ می‌دهد."
     )
     formatted = markdown_to_telegram_html(text)
     await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
@@ -167,7 +281,6 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat or not msg:
         return
 
-    # In groups, only authorized admins can clear bot conversation memory
     if chat.type != ChatType.PRIVATE:
         if not user or not is_admin(user.id):
             await msg.reply_text("⛔ تنها مدیران مجاز به پاکسازی حافظه نشست پرومته در گروه‌ها هستند.")
@@ -183,7 +296,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.effective_message.reply_text("🏓 پونگ...")
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     await msg.edit_text(
-        f"🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده است.**\n⚡ تأخیر اتصال: `{elapsed_ms:.1f}ms`",
+        f"🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده فرماندهی است.**\n⚡ تأخیر اتصال: `{elapsed_ms:.1f}ms`",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -213,6 +326,17 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     city = " ".join(args).strip() if args else "تهران"
     res = await get_weather(city)
+    await _deliver_reply(update.effective_message, res)
+
+
+async def digikala_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Digikala product search command."""
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("ℹ️ لطفاً نام محصول مورد نظر را وارد کنید. مثال: `/digikala آیفون 16`", parse_mode=ParseMode.MARKDOWN)
+        return
+    query = " ".join(args).strip()
+    res = await search_digikala(query)
     await _deliver_reply(update.effective_message, res)
 
 
@@ -247,7 +371,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_id = context.bot.id
     bot_username = (context.bot.username or "").lower()
 
-    # --- Trigger Policy (Silence By Default) ---
+    # --- Trigger Policy (Silence By Default in Groups) ---
     is_triggered = False
 
     if is_private:
@@ -290,47 +414,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("⚠️ لطفاً کمی شکیبا باشید و از ارسال رگباری پیام‌ها خودداری کنید.")
         return
 
-    # Fast-Path 1: Heartbeat / Ping
-    if any(k in raw_lower for k in ["پرومته بیداری", "بیداری پرومته", "پینگ پرومته", "پرومته بیدار"]):
-        await message.reply_text(
-            "🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده فرماندهی است.**",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    # Fast-Path 2: Official Tehran Time & Calendar
-    if any(k in raw_lower for k in ["ساعت چنده", "ساعت چند است", "ساعت رسمی", "امروز چندمه", "تاریخ امروز", "امروز چه روزیه"]):
-        res = get_current_time()
-        await _deliver_reply(message, res)
-        return
-
-    # Fast-Path 3: Fiat & Gold Rates
-    fiat_keywords = [
-        "قیمت دلار", "نرخ دلار", "دلار چنده", "دلار چند شده", "قیمت تتر", "نرخ تتر",
-        "قیمت طلا", "نرخ طلا", "قیمت سکه", "نرخ سکه", "سکه امامی", "طلای ۱۸ عیار",
-        "نرخ ارز", "قیمت یورو", "قیمت درهم"
-    ]
-    if any(k in raw_lower for k in fiat_keywords):
-        res = await get_fiat_and_gold_rates()
-        await _deliver_reply(message, res)
-        return
-
-    # Fast-Path 4: Crypto Rates
-    crypto_kw_map = {
-        "بیتکوین": "BTC", "بیت کوین": "BTC", "btc": "BTC",
-        "اتریوم": "ETH", "eth": "ETH",
-        "سولانا": "SOL", "sol": "SOL",
-        "تون": "TON", "تون کوین": "TON", "ton": "TON",
-        "دوج": "DOGE", "دوج کوین": "DOGE", "doge": "DOGE",
-        "ریپل": "XRP", "xrp": "XRP",
-    }
-    for kw, sym in crypto_kw_map.items():
-        if f"قیمت {kw}" in raw_lower or f"نرخ {kw}" in raw_lower or f"{kw} چنده" in raw_lower:
-            res = await get_crypto_price(sym)
-            await _deliver_reply(message, res)
-            return
-
-    # Clean the trigger from the prompt
+    # Clean the trigger name from the prompt for cleaner matching
     cleaned_prompt = raw_text
     if bot_username:
         cleaned_prompt = re.sub(rf"@{re.escape(bot_username)}", "", cleaned_prompt, flags=re.IGNORECASE)
@@ -342,7 +426,58 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("درود بر شما! در خدمتم. چه کمکی از دست پرومته ساخته است؟")
         return
 
-    # Process all queries through autonomous agent brain (without typing animations)
+    cleaned_lower = cleaned_prompt.lower()
+
+    # Fast-Path 1: Heartbeat / Ping
+    if any(k in cleaned_lower for k in ["بیداری", "پینگ", "بیدار"]):
+        if len(cleaned_lower.split()) <= 3:
+            await message.reply_text(
+                "🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده است.**",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+    # Fast-Path 2: Official Tehran Time & Solar Jalali Calendar (<1ms)
+    if is_time_query(cleaned_lower):
+        res = get_current_time()
+        await _deliver_reply(message, res)
+        return
+
+    # Fast-Path 3: Fiat & Gold Rates (<50ms)
+    if is_fiat_or_gold_query(cleaned_lower):
+        res = await get_fiat_and_gold_rates()
+        await _deliver_reply(message, res)
+        return
+
+    # Fast-Path 4: Crypto Rates (<100ms)
+    crypto_sym = extract_crypto_query(cleaned_lower)
+    if crypto_sym:
+        res = await get_crypto_price(crypto_sym)
+        await _deliver_reply(message, res)
+        return
+
+    # Fast-Path 5: Weather (<150ms)
+    weather_city = extract_weather_query(cleaned_prompt)
+    if weather_city:
+        res = await get_weather(weather_city)
+        await _deliver_reply(message, res)
+        return
+
+    # Fast-Path 6: Digikala E-Commerce (<1s)
+    dk_query = extract_digikala_query(cleaned_prompt)
+    if dk_query:
+        res = await search_digikala(dk_query)
+        await _deliver_reply(message, res)
+        return
+
+    # Fast-Path 7: Safe Math Evaluation (<1ms)
+    if is_math_query(cleaned_prompt):
+        calc_expr = cleaned_prompt.replace("حساب کن", "").replace("محاسبه کن", "").strip()
+        res = calculate_math(calc_expr)
+        await _deliver_reply(message, res)
+        return
+
+    # Process all queries through autonomous agent brain (zero typing animations)
     await _process_and_reply(update, context, cleaned_prompt)
 
 
@@ -353,46 +488,42 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_application():
     token = settings.TELEGRAM_BOT_TOKEN
     if not token:
-        logger.warning("TELEGRAM_BOT_TOKEN is empty. Set it in environment variables or Railway.")
+        raise ValueError("TELEGRAM_BOT_TOKEN is not set in environment or config.")
 
-    extended_request = HTTPXRequest(
+    request = HTTPXRequest(
         connection_pool_size=100,
-        connect_timeout=20.0,
-        read_timeout=45.0,
-        write_timeout=45.0,
-        pool_timeout=10.0
+        read_timeout=30.0,
+        write_timeout=20.0,
+        connect_timeout=15.0,
+        pool_timeout=10.0,
     )
 
-    app = (
-        ApplicationBuilder()
-        .token(token or "DUMMY_TOKEN")
-        .request(extended_request)
-        .concurrent_updates(16)
-        .build()
+    app = ApplicationBuilder().token(token).request(request).concurrent_updates(True).build()
+
+    # Commands & Aliases
+    app.add_handler(CommandHandler(["start"], start_command))
+    app.add_handler(CommandHandler(["help"], help_command))
+    app.add_handler(CommandHandler(["rates", "dollar", "arz", "gheymat"], rates_command))
+    app.add_handler(CommandHandler(["crypto"], crypto_command))
+    app.add_handler(CommandHandler(["time", "saat"], time_command))
+    app.add_handler(CommandHandler(["weather", "hava"], weather_command))
+    app.add_handler(CommandHandler(["digikala", "dk"], digikala_command))
+    app.add_handler(CommandHandler(["calc", "hesab"], calc_command))
+    app.add_handler(CommandHandler(["clear"], clear_command))
+    app.add_handler(CommandHandler(["ping"], ping_command))
+
+    # All text messages (with silence-by-default logic)
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT | filters.CAPTION,
+            message_handler
+        )
     )
-
-    # Command Handlers
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("clear", clear_command))
-    app.add_handler(CommandHandler("ping", ping_command))
-    app.add_handler(CommandHandler("time", time_command))
-    app.add_handler(CommandHandler("weather", weather_command))
-    app.add_handler(CommandHandler("crypto", crypto_command))
-    app.add_handler(CommandHandler("rates", rates_command))
-    app.add_handler(CommandHandler("gold", rates_command))
-    app.add_handler(CommandHandler("dollar", rates_command))
-    app.add_handler(CommandHandler("calc", calc_command))
-
-    # General Message Handler (Supports text, captions, documents)
-    app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, message_handler))
 
     return app
 
 
 if __name__ == "__main__":
-    logger.info("Starting Prometheus Telegram Agent...")
-    if not settings.TELEGRAM_BOT_TOKEN:
-        logger.error("CRITICAL: TELEGRAM_BOT_TOKEN is not configured.")
+    logger.info("Starting Prometheus Telegram Agent Bot...")
     app = build_application()
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    app.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
