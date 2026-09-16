@@ -58,20 +58,20 @@ def check_rate_limit(user_id: int) -> bool:
 # =========================================================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command handler with Hermes intro."""
+    """Start command handler with Prometheus intro."""
     msg = update.effective_message
     user = update.effective_user
     u_name = user.first_name if user else "کاربر"
 
     text = (
-        f"⚡ **درود {u_name}! به هرمس ایجنت (Hermes Agent) خوش آمدید.**\n\n"
-        "من دستیار هوشمند و خودمختار شما هستم؛ مجهز به مدل‌های پیشرفته استدلال و ابزارهای بلادرنگ:\n"
-        "• 📊 **نرخ زنده رمزارزها، دلار و طلا**\n"
-        "• 🌦 **پیش‌بینی لحظه‌ای آب و هوا**\n"
-        "• 🔍 **جستجوی وب و مطالعه لینک‌ها**\n"
+        f"⚡ **درود {u_name}! به پرومته (Prometheus AI) خوش آمدید.**\n\n"
+        "من **پرومته** هستم؛ دستیار هوش مصنوعی پیشرفته، پرسرعت و خودمختار شما که مجهز به ابزارهای بلادرنگ و مغز استدلال ایجنتیک است:\n\n"
+        "• 📊 **نرخ زنده رمزارزها، دلار و طلا** (`/rates`, `/crypto btc`)\n"
+        "• 🌦 **پیش‌بینی لحظه‌ای آب و هوا** (`/weather تهران`)\n"
+        "• 🔍 **جستجوی وب و مطالعه عمیق لینک‌ها**\n"
         "• 🧮 **محاسبات ریاضی و علمی**\n"
-        "• 🕒 **زمان رسمی و تقویم شمسی/میلادی**\n\n"
-        "💡 *در گروه‌ها، تنها در صورتی پاسخ می‌دهم که من را منشن کنید یا روی پیامم ریپلای بزنید.*"
+        "• 🕒 **زمان رسمی تهران و تاریخ دقیق** (`/time`)\n\n"
+        "💡 *در گروه‌ها، من فقط زمانی فعال می‌شوم که نام «پرومته» را در پیامتان بیاورید، مرا منشن (@) کنید یا روی پیامم ریپلای بزنید.*"
     )
     formatted = markdown_to_telegram_html(text)
     await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
@@ -81,14 +81,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command handler."""
     msg = update.effective_message
     text = (
-        "📖 **راهنمای استفاده از هرمس ایجنت:**\n\n"
-        "• `/start` - راه‌اندازی و معرفی ربات\n"
-        "• `/clear` - پاکسازی سابقه گفتگو و ریست نشست\n"
-        "• `/ping` - استعلام وضعیت سلامت و اتصال سرور\n"
-        "• `/time` - نمایش ساعت رسمی تهران و تاریخ خورشیدی\n"
-        "• `/weather [شهر]` - استعلام وضعیت آب و هوا\n"
-        "• `/crypto [نماد]` - نرخ لحظه‌ای رمزارزها (مثال: `/crypto btc`)\n\n"
-        "✨ *همچنین می‌توانید هر سوال، مسئله برنامه‌نویسی یا متن تحلیلی را به زبان فارسی مطرح نمایید.*"
+        "📖 **راهنمای قابلیت‌ها و دستورات پرومته (Prometheus AI):**\n\n"
+        "• `/start` - راه‌اندازی و معرفی پرومته\n"
+        "• `/help` - راهنمای دستورات\n"
+        "• `/clear` - پاکسازی حافظه گفتگو و شروع نشست تازه\n"
+        "• `/ping` - بررسی بیداری و سرعت پاسخ‌دهی سرور\n"
+        "• `/time` - استعلام ساعت رسمی تهران و تقویم شمسی\n"
+        "• `/rates` - قیمت لحظه‌ای دلار، تتر، یورو و درهم\n"
+        "• `/crypto [نماد]` - نرخ لحظه‌ای ارز دیجیتال (مثال: `/crypto btc` یا `/crypto eth`)\n"
+        "• `/weather [شهر]` - آب و هوای زنده شهرها (مثال: `/weather تهران`)\n\n"
+        "🗣 **مکالمه آزاد در گروه و چت خصوصی:**\n"
+        "می‌توانید هر سوال تحلیلی، برنامه‌نویسی، متنی یا علمی را مستقیماً بپرسید. در گروه کافی است بگویید: «پرومته وضعیت بازار چطوره؟» یا روی پیام پرومته ریپلای کنید."
     )
     formatted = markdown_to_telegram_html(text)
     await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
@@ -107,13 +110,36 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t0 = time.perf_counter()
     msg = await update.effective_message.reply_text("🏓 پونگ...")
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    await msg.edit_text(f"🏓 **پونگ! هرمس ایجنت آنلاین و آماده است.**\n⚡ تأخیر اتصال: `{elapsed_ms:.1f}ms`", parse_mode=ParseMode.MARKDOWN)
+    await msg.edit_text(f"🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده فرماندهی است.**\n⚡ تأخیر اتصال: `{elapsed_ms:.1f}ms`", parse_mode=ParseMode.MARKDOWN)
 
 
 async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Official time fast-path."""
     res = get_current_time()
     await update.effective_message.reply_text(markdown_to_telegram_html(res), parse_mode=ParseMode.HTML)
+
+
+async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct weather lookup."""
+    args = context.args or []
+    city = " ".join(args).strip() if args else "تهران"
+    res = await get_weather(city)
+    await update.effective_message.reply_text(markdown_to_telegram_html(res), parse_mode=ParseMode.HTML)
+
+
+async def crypto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct crypto price lookup."""
+    args = context.args or []
+    sym = args[0].strip().upper() if args else "BTC"
+    res = await get_crypto_price(sym)
+    await update.effective_message.reply_text(markdown_to_telegram_html(res), parse_mode=ParseMode.HTML)
+
+
+async def rates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct fiat & gold rates lookup."""
+    res = await get_fiat_and_gold_rates()
+    await update.effective_message.reply_text(markdown_to_telegram_html(res), parse_mode=ParseMode.HTML)
+
 
 
 # =========================================================================
@@ -153,8 +179,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if bot_username and f"@{bot_username}" in raw_text.lower():
             is_triggered = True
 
-        # c) Explicit trigger names
-        trigger_names = ["hermes", "هرمس", "پرومته", "prometheus"]
+        # c) Explicit trigger names (PROMETHEUS ONLY)
+        trigger_names = ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس", "پرومتـه"]
         if any(name in raw_text.lower() for name in trigger_names):
             is_triggered = True
 
@@ -162,20 +188,55 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Strictly remain silent in groups for all other messages
         return
 
+    # Check Silence / Stop Triggers
+    raw_lower = raw_text.lower().strip()
+    silence_triggers = [
+        "پرومته ساکت", "پرومته ساکت شو", "پرومته بسه", "پرومته بس کن",
+        "سکوت پرومته", "پرومته خفه", "پرومته خفه شو", "ربات ساکت", "ربات ساکت شو"
+    ]
+    if any(st in raw_lower for st in silence_triggers):
+        await message.reply_text("🤐 *چشم، سکوت می‌کنم.* هر زمان نیاز به کمک داشتید، با صدا زدن نام «پرومته» یا ریپلای روی پیامم در خدمت شما هستم.", parse_mode=ParseMode.MARKDOWN)
+        return
+
     if not check_rate_limit(user.id):
         await message.reply_text("⚠️ لطفاً کمی شکیبا باشید و از ارسال رگباری پیام‌ها خودداری کنید.")
         return
+
+    # Fast-Path 1: Heartbeat / Ping
+    if any(k in raw_lower for k in ["پرومته بیداری", "بیداری پرومته", "پینگ پرومته", "پرومته بیدار"]):
+        await message.reply_text("🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده فرماندهی است.**", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # Fast-Path 2: Official Time
+    if any(k in raw_lower for k in ["ساعت چنده", "ساعت چند است", "ساعت رسمی", "امروز چندمه", "تاریخ امروز"]):
+        res = get_current_time()
+        await message.reply_text(markdown_to_telegram_html(res), parse_mode=ParseMode.HTML)
+        return
+
+    # Fast-Path 3: Fiat & Gold Rates
+    if any(k in raw_lower for k in ["قیمت دلار", "قیمت تتر", "نرخ دلار", "نرخ طلا", "قیمت طلا", "قیمت سکه", "نرخ ارز"]):
+        res = await get_fiat_and_gold_rates()
+        await message.reply_text(markdown_to_telegram_html(res), parse_mode=ParseMode.HTML)
+        return
+
+    # Fast-Path 4: Crypto Rates
+    crypto_kw_map = {"بیتکوین": "BTC", "بیت کوین": "BTC", "btc": "BTC", "اتریوم": "ETH", "eth": "ETH", "سولانا": "SOL", "sol": "SOL", "دوج": "DOGE", "doge": "DOGE"}
+    for kw, sym in crypto_kw_map.items():
+        if f"قیمت {kw}" in raw_lower or f"نرخ {kw}" in raw_lower:
+            res = await get_crypto_price(sym)
+            await message.reply_text(markdown_to_telegram_html(res), parse_mode=ParseMode.HTML)
+            return
 
     # Clean the trigger from the prompt
     cleaned_prompt = raw_text
     if bot_username:
         cleaned_prompt = re.sub(rf"@{re.escape(bot_username)}", "", cleaned_prompt, flags=re.IGNORECASE)
-    for name in ["hermes", "هرمس", "پرومته", "prometheus"]:
+    for name in ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس", "پرومتـه"]:
         cleaned_prompt = re.sub(rf"\b{re.escape(name)}\b", "", cleaned_prompt, flags=re.IGNORECASE)
     cleaned_prompt = cleaned_prompt.strip()
 
     if not cleaned_prompt:
-        await message.reply_text("بفرمایید، در خدمتم. چه کمکی از دست من ساخته است؟")
+        await message.reply_text("درود بر شما! در خدمتم. چه کمکی از دست پرومته ساخته است؟")
         return
 
     # Send Initial Placeholder
@@ -196,7 +257,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # Execute Hermes Agent with streaming
+    # Execute Prometheus Agent with streaming
     try:
         await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
         final_answer = await execute_hermes_agent(
@@ -205,7 +266,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             on_stream_delta=on_stream_delta
         )
     except Exception as e:
-        logger.error(f"Error executing Hermes Agent: {e}")
+        logger.error(f"Error executing Prometheus Agent: {e}")
         final_answer = f"❌ متأسفانه خطایی در پردازش پاسخ رخ داد: {str(e)}"
 
     # Deliver final resolved response
@@ -222,11 +283,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for ch in chunks[1:]:
                 await message.reply_text(ch, parse_mode=ParseMode.HTML)
     except Exception as e:
-        logger.error(f"Error finalizing message delivery: {e}")
-        try:
-            await placeholder.edit_text(final_answer[:3900])
-        except Exception:
-            pass
+        logger.error(f"Failed to deliver final message: {e}")
+        await message.reply_text(final_answer[:3900])
 
 
 # =========================================================================
@@ -260,6 +318,11 @@ def build_application():
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CommandHandler("ping", ping_command))
     app.add_handler(CommandHandler("time", time_command))
+    app.add_handler(CommandHandler("weather", weather_command))
+    app.add_handler(CommandHandler("crypto", crypto_command))
+    app.add_handler(CommandHandler("rates", rates_command))
+    app.add_handler(CommandHandler("gold", rates_command))
+    app.add_handler(CommandHandler("dollar", rates_command))
 
     # General Message Handler (Supports text, captions, documents)
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, message_handler))
@@ -268,7 +331,7 @@ def build_application():
 
 
 if __name__ == "__main__":
-    logger.info("Starting Hermes Telegram Agent...")
+    logger.info("Starting Prometheus Telegram Agent...")
     if not settings.TELEGRAM_BOT_TOKEN:
         logger.error("CRITICAL: TELEGRAM_BOT_TOKEN is not configured.")
     app = build_application()
