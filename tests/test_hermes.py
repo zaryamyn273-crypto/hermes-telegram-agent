@@ -765,3 +765,110 @@ def test_vision_helpers():
     url = build_reconstruction_image_url("cyberpunk futuristic tehran cityscape")
     assert "pollinations.ai" in url
     assert "cyberpunk" in url
+
+
+def test_markdown_table_converter():
+    from utils.formatter import convert_markdown_tables_to_box, markdown_to_telegram_html
+
+    sample_table = (
+        "متن مقدماتی:\n\n"
+        "| نام مدل | شرکت | امتیاز |\n"
+        "|:---|:---:|---:|\n"
+        "| GPT-4o | OpenAI | 88.7 |\n"
+        "| Claude 3.5 | Anthropic | 88.3 |\n\n"
+        "متن نهایی."
+    )
+
+    box_text = convert_markdown_tables_to_box(sample_table)
+    assert "┌" in box_text
+    assert "┬" in box_text
+    assert "└" in box_text
+    assert "OpenAI" in box_text
+    assert "Anthropic" in box_text
+    assert "متن مقدماتی:" in box_text
+    assert "متن نهایی." in box_text
+
+    # Test full HTML output
+    html_out = markdown_to_telegram_html(sample_table)
+    assert "<pre>" in html_out or "<pre><code>" in html_out
+    assert "┌" in html_out
+    assert "OpenAI" in html_out
+
+
+def test_twitter_tool():
+    from tools.twitter import (
+        extract_tweet_url_and_id,
+        parse_twitter_request,
+        format_tweet_report,
+        format_profile_report,
+    )
+
+    # 1. URL extraction
+    u1, tid1 = extract_tweet_url_and_id("این لینک را ببین https://x.com/jack/status/20")
+    assert u1 == "jack"
+    assert tid1 == "20"
+
+    u2, tid2 = extract_tweet_url_and_id("بررسی https://twitter.com/elonmusk/status/1880123456789012345 توییت")
+    assert u2 == "elonmusk"
+    assert tid2 == "1880123456789012345"
+
+    u3, tid3 = extract_tweet_url_and_id("متن بدون لینک")
+    assert u3 is None
+    assert tid3 is None
+
+    # 2. Parse requests
+    m1, act1, t1 = parse_twitter_request("https://x.com/jack/status/20")
+    assert m1 is True
+    assert act1 == "tweet"
+    assert t1 == "jack:20"
+
+    m2, act2, t2 = parse_twitter_request("/twitter @sama")
+    assert m2 is True
+    assert act2 == "profile"
+    assert t2 == "sama"
+
+    m3, act3, t3 = parse_twitter_request("توی توییتر سرچ کن درباره هوش مصنوعی")
+    assert m3 is True
+    assert act3 == "search"
+    assert "هوش مصنوعی" in t3
+
+    # 3. Format mock tweet report
+    mock_tweet = {
+        "id": "20",
+        "text": "just setting up my twttr",
+        "created_at": "Tue Mar 21 20:50:14 +0000 2006",
+        "likes": 150000,
+        "retweets": 80000,
+        "replies": 10000,
+        "views": 500000,
+        "author": {
+            "name": "jack",
+            "screen_name": "jack",
+            "followers": 12000000,
+            "verification": {"verified": True},
+        },
+        "media": None,
+    }
+    tweet_html = format_tweet_report(mock_tweet)
+    assert "@jack" in tweet_html
+    assert "just setting up my twttr" in tweet_html
+    assert "150,000" in tweet_html
+    assert "12,000,000" in tweet_html
+
+    # 4. Format mock profile report
+    mock_profile = {
+        "name": "Elon Musk",
+        "screen_name": "elonmusk",
+        "description": "Tesla & SpaceX",
+        "followers": 200000000,
+        "following": 500,
+        "tweets": 45000,
+        "joined": "June 2009",
+        "verification": {"verified": True},
+    }
+    profile_html = format_profile_report(mock_profile)
+    assert "Elon Musk" in profile_html
+    assert "@elonmusk" in profile_html
+    assert "200,000,000" in profile_html
+    assert "Tesla &amp; SpaceX" in profile_html
+

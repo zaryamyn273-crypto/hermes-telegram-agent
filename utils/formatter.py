@@ -21,6 +21,68 @@ def strip_thinking(text: str) -> str:
     return cleaned
 
 
+def convert_markdown_tables_to_box(text: str) -> str:
+    """
+    Detects Markdown pipe tables (| a | b |) and converts them into
+    aligned Unicode box-drawing tables enclosed in monospace code blocks
+    for optimal presentation in Telegram clients.
+    """
+    table_regex = re.compile(
+        r"((?:^[ \t]*\|[^\n]+\|[ \t]*\n)"
+        r"(?:^[ \t]*\|[\s\-:|]+\|[ \t]*\n)"
+        r"(?:^[ \t]*\|[^\n]+\|[ \t]*(?:\n|$))+)",
+        re.MULTILINE
+    )
+
+    def _replace_table(match):
+        raw_table = match.group(1)
+        lines = [l.strip() for l in raw_table.strip().split("\n") if l.strip()]
+        if len(lines) < 2:
+            return raw_table
+
+        rows = []
+        for line in lines:
+            if line.startswith("|") and line.endswith("|"):
+                line = line[1:-1]
+            cells = [c.strip() for c in line.split("|")]
+            # Skip separator line (e.g. |---|:---|)
+            if all(set(c).issubset({"-", ":", " "}) for c in cells):
+                continue
+            rows.append(cells)
+
+        if not rows or len(rows) < 2:
+            return raw_table
+
+        num_cols = max(len(r) for r in rows)
+        for r in rows:
+            while len(r) < num_cols:
+                r.append("")
+
+        col_widths = [0] * num_cols
+        for r in rows:
+            for i, c in enumerate(r):
+                col_widths[i] = max(col_widths[i], len(c) + 2)
+
+        top = "┌" + "┬".join("─" * w for w in col_widths) + "┐"
+        mid = "├" + "┼".join("─" * w for w in col_widths) + "┤"
+        bot = "└" + "┴".join("─" * w for w in col_widths) + "┘"
+
+        out = [top]
+        header_cells = [f" {c} ".center(col_widths[i]) for i, c in enumerate(rows[0])]
+        out.append("│" + "│".join(header_cells) + "│")
+        out.append(mid)
+
+        for r in rows[1:]:
+            row_cells = [f" {c} ".center(col_widths[i]) for i, c in enumerate(r)]
+            out.append("│" + "│".join(row_cells) + "│")
+        out.append(bot)
+
+        box_table = "\n".join(out)
+        return "\n```\n" + box_table + "\n```\n"
+
+    return table_regex.sub(_replace_table, text)
+
+
 def markdown_to_telegram_html(text: str) -> str:
     """
     Converts standard Markdown to Telegram-compatible HTML.
@@ -30,6 +92,9 @@ def markdown_to_telegram_html(text: str) -> str:
         return ""
 
     text = strip_thinking(text)
+
+    # Convert raw markdown tables to aligned Unicode box tables
+    text = convert_markdown_tables_to_box(text)
 
     # 1. Protect code blocks (```code```)
     code_blocks = []

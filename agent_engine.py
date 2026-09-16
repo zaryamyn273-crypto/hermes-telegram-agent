@@ -98,8 +98,24 @@ Operating Directives:
 - When webpage content is provided, analyze, summarize, or extract the requested details thoroughly and accurately.
 - Deliver concrete, factual, and verified data.
 
-5. Formatting:
-- Use clean Markdown: bold important numbers/names, bullet points for lists, and code blocks for code or structured data.
+5. Formatting & Telegram Table Presentation:
+- Telegram DOES NOT render raw Markdown pipe tables (| a | b |) properly on mobile and desktop devices.
+- When presenting comparisons, matrices, schedules, or tabular data, you MUST use one of these two clean formats:
+  Format A (Best for Mobile): Structured Card / Bullet List:
+  🔹 **[عنوان آیتم]**
+  ▫️ **مشخصه ۱:** مقدار
+  ▫️ **مشخصه ۲:** مقدار
+  ▫️ **وضعیت:** فعال
+
+  Format B (For Numerical / Dense Tabular Data): Aligned Monospaced Box Table inside a code block (```):
+  ```
+  ┌──────────┬────────────┬────────┐
+  │ ردیف     │ مشخصه      │ وضعیت  │
+  ├──────────┼────────────┼────────┤
+  │ ۱        │ مقدار الف  │ فعال   │
+  └──────────┴────────────┴────────┘
+  ```
+- NEVER output raw unformatted pipe tables outside code blocks!
 """
 
 # Destructive command patterns

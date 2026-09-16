@@ -59,6 +59,15 @@ from tools.vision import (
     is_reconstruction_query,
     build_reconstruction_image_url,
 )
+from tools.twitter import (
+    fetch_tweet_data,
+    format_tweet_report,
+    fetch_twitter_profile,
+    format_profile_report,
+    search_twitter_live,
+    parse_twitter_request,
+    extract_tweet_url_and_id,
+)
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -526,6 +535,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🆔 **استخراج آیدی عددی و مشخصات چت:** `/id` یا `/myid` (کپی فوری با یک لمس)\n"
         "• 📷 **درک تصویر، OCR و بازسازی بصری:** ارسال مستقیم عکس یا ریپلای روی عکس\n"
         "• 🏁 **ساخت بارکد و QR Code:** `/qr [متن]` یا `/barcode [کد]`\n"
+        "• 🐦 **کاوشگر و خواننده X (توییتر):** `/twitter [اکانت یا جستجو]` یا ارسال لینک توییت\n"
         "• 📊 **نرخ لحظه‌ای دلار، تتر، طلا و سکه:** `/rates` یا `/dollar`\n"
         "• 🪙 **استعلام زنده رمزارزها:** `/crypto btc` یا `/crypto eth`\n"
         "• 🎵 **دانلود و آپلود مستقیم موزیک ۳۲۰:** `/music نام ترانه`\n"
@@ -556,6 +566,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/qr [متن/لینک]` - ساخت کیوآر کد اختصاصی با کیفیت فوق‌العاده بالا\n"
         "• `/barcode [کد]` - ساخت بارکد میله‌ای استاندارد تجاری (Code128)\n"
         "• 📷 **بینایی ماشین (Vision):** ارسال هر تصویر یا ریپلای روی تصویر با سوال، استخراج متن (OCR)، تحلیل اشیاء یا درخواست «بازسازی تصویر»\n"
+        "• `/tweet [لینک توییت]` - استخراج متن، آمار، رسانه‌ها و ترجمه توییت از X (توییتر)\n"
+        "• `/twitter [یوزرنیم یا موضوع]` - مشاهده پروفایل، بیوگرافی و جستجوی زنده در X\n"
         "• `/rates` یا `/dollar` - قیمت زنده دلار، تتر، یورو، طلا و سکه در بازار ایران\n"
         "• `/crypto [نماد]` - نرخ لحظه‌ای رمزارزها به دلار و تومان (مثال: `/crypto btc`)\n"
         "• `/music [نام ترانه]` - جستجو و ارسال فایل کامل MP3 با کیفیت اصلی ۳۲۰\n"
@@ -954,6 +966,72 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+async def twitter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /twitter, /tweet, /x commands for reading tweets, profiles, or searching."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    args = context.args or []
+    query = " ".join(args).strip()
+
+    if not query:
+        guide = (
+            "🐦 **راهنمای کاوشگر و خواننده X (توییتر) پرومته:**\n\n"
+            "• **خواندن و تحلیل کامل یک توییت:**\n"
+            "`/tweet https://x.com/username/status/123456...`\n\n"
+            "• **مشاهده پروفایل و آمار یک کاربر:**\n"
+            "`/twitter @elonmusk`\n\n"
+            "• **جستجو در جدیدترین توییت‌ها و مباحث:**\n"
+            "`/twitter هوش مصنوعی جدید`\n\n"
+            "💡 *همچنین می‌توانید لینک هر توییت را مستقیماً در چت بفرستید یا بپرسید «این توییت چی میگه؟»*"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    t0 = time.perf_counter()
+
+    is_m, act, target = parse_twitter_request(query)
+    if not is_m or not target:
+        target = query
+        act = "search"
+
+    if act == "tweet":
+        sn, tid = target.split(":", 1)
+        tweet_data = await fetch_tweet_data(sn, tid)
+        if tweet_data:
+            report = format_tweet_report(tweet_data)
+            record_chat_latency(chat.id, time.perf_counter() - t0, f"استخراج توییت (@{sn})")
+            await _deliver_reply(msg, report)
+            return
+        else:
+            await msg.reply_text("❌ متأسفانه دریافت اطلاعات این توییت میسر نشد (ممکن است توییت خصوصی، حذف‌شده یا آدرس نادرست باشد).")
+            return
+
+    elif act == "profile":
+        profile_data = await fetch_twitter_profile(target)
+        if profile_data:
+            report = format_profile_report(profile_data)
+            record_chat_latency(chat.id, time.perf_counter() - t0, f"پروفایل توییتر (@{target})")
+            await _deliver_reply(msg, report)
+            return
+        else:
+            await msg.reply_text(f"❌ پروفایل کاربری @{target} در توییتر/X یافت نشد یا در دسترس نیست.")
+            return
+
+    elif act == "search":
+        search_res = await search_twitter_live(target, max_results=4)
+        if search_res:
+            record_chat_latency(chat.id, time.perf_counter() - t0, f"جستجوی زنده توییتر ({target})")
+            await _deliver_reply(msg, search_res)
+            return
+        else:
+            await msg.reply_text(f"🔍 نتیجه‌ای برای جستجوی «{query}» در شبکه X یافت نشد.")
+            return
+
+
 # =========================================================================
 # Main Message Handler with Silence-By-Default Trigger Logic
 # =========================================================================
@@ -1185,6 +1263,54 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except asyncio.CancelledError:
                 pass
 
+    # Fast-Path 7.9: Twitter / X Explorer & Tweet Reader (<500ms)
+    is_tw, tw_act, tw_target = parse_twitter_request(cleaned_prompt)
+    if is_tw and tw_target:
+        t0 = time.perf_counter()
+        if tw_act == "tweet":
+            sn, tid = tw_target.split(":", 1)
+            tweet_data = await fetch_tweet_data(sn, tid)
+            if tweet_data:
+                # If user asked for translation / summary / analysis
+                if any(k in cleaned_lower for k in ["ترجمه", "خلاصه", "تحلیل", "نظرت", "معنی"]):
+                    agent_prompt = f"این توییت از طرف @{sn} در شبکه X (توییتر) منتشر شده است:\n\"\"\"\n{tweet_data.get('text')}\n\"\"\"\n\nدستور کاربر: {cleaned_prompt}"
+                    await _process_and_reply(update, context, agent_prompt)
+                    return
+                report = format_tweet_report(tweet_data)
+                record_chat_latency(chat.id, time.perf_counter() - t0, f"استخراج توییت (@{sn})")
+                await _deliver_reply(message, report)
+                return
+        elif tw_act == "profile":
+            profile_data = await fetch_twitter_profile(tw_target)
+            if profile_data:
+                report = format_profile_report(profile_data)
+                record_chat_latency(chat.id, time.perf_counter() - t0, f"پروفایل توییتر (@{tw_target})")
+                await _deliver_reply(message, report)
+                return
+        elif tw_act == "search":
+            search_res = await search_twitter_live(tw_target, max_results=4)
+            if search_res:
+                record_chat_latency(chat.id, time.perf_counter() - t0, f"جستجوی زنده توییتر ({tw_target})")
+                await _deliver_reply(message, search_res)
+                return
+
+    # Fast-Path 7.95: Check if user replied to a message containing a Tweet link
+    if message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
+        reply_raw = message.reply_to_message.text or message.reply_to_message.caption or ""
+        r_sn, r_tid = extract_tweet_url_and_id(reply_raw)
+        if r_sn and r_tid and any(k in cleaned_lower for k in ["توییت", "چی میگه", "بخون", "ترجمه", "خلاصه", "tweet", "تحلیل", "معنی"]):
+            t0 = time.perf_counter()
+            tweet_data = await fetch_tweet_data(r_sn, r_tid)
+            if tweet_data:
+                if any(k in cleaned_lower for k in ["ترجمه", "خلاصه", "تحلیل", "نظرت", "معنی"]):
+                    agent_prompt = f"این توییت از طرف @{r_sn} در شبکه X (توییتر) منتشر شده است:\n\"\"\"\n{tweet_data.get('text')}\n\"\"\"\n\nدستور کاربر: {cleaned_prompt}"
+                    await _process_and_reply(update, context, agent_prompt)
+                    return
+                report = format_tweet_report(tweet_data)
+                record_chat_latency(chat.id, time.perf_counter() - t0, f"استخراج توییت ریپلای‌شده (@{r_sn})")
+                await _deliver_reply(message, report)
+                return
+
     # Fast-Path 8: Telegraph Article Publishing
     if any(k in cleaned_lower for k in ["تلگراف", "telegraph", "telegra.ph"]):
         # Case A: Reply to another message asking to publish to telegraph
@@ -1263,6 +1389,7 @@ def build_application():
     app.add_handler(CommandHandler(["id", "myid", "info", "chatid", "whoami"], id_command))
     app.add_handler(CommandHandler(["qr", "qrcode"], barcode_command))
     app.add_handler(CommandHandler(["barcode", "bar"], barcode_command))
+    app.add_handler(CommandHandler(["twitter", "tweet", "x"], twitter_command))
     app.add_handler(CommandHandler(["delete", "del", "pak"], delete_command))
     app.add_handler(CommandHandler(["ping"], ping_command))
 
