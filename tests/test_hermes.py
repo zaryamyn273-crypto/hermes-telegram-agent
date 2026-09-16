@@ -542,3 +542,82 @@ def test_should_search_web_and_extract_search_query():
     assert should_search_web("سلام چطوری") is False
     assert should_search_web("درود") is False
     assert should_search_web("یک تابع فیبوناچی در پایتون بنویس") is False
+
+
+def test_improved_time_and_calendar_queries():
+    from main import is_time_query
+    from tools.system import get_system_time_context
+
+    # All conversational variations Iranians ask for today's date & time
+    assert is_time_query("امروز چندمه") is True
+    assert is_time_query("امروز چندمه؟") is True
+    assert is_time_query("امروز چندم است") is True
+    assert is_time_query("تاریخ امروز چیه") is True
+    assert is_time_query("تاریخ امروز چیست") is True
+    assert is_time_query("امروز چه روزی است") is True
+    assert is_time_query("امروز چه روزیه") is True
+    assert is_time_query("امروز چند شنبه است") is True
+    assert is_time_query("تاریخ روز رو بگو") is True
+    assert is_time_query("تاریخ شمسی امروز چنده") is True
+    assert is_time_query("تاریخ شمسی چیه") is True
+    assert is_time_query("امروز چندم ماهه") is True
+    assert is_time_query("الان چندمه") is True
+    assert is_time_query("امروز چنده") is True
+    assert is_time_query("تاریخ امروز به شمسی") is True
+    assert is_time_query("تاریخ الان چیه") is True
+    assert is_time_query("سال چندیم") is True
+    assert is_time_query("امسال چه سالیه") is True
+
+    # Real-time system time context injection
+    ctx = get_system_time_context()
+    assert "Today is" in ctx
+    assert "SH" in ctx
+    assert "Tehran Time" in ctx
+
+
+def test_is_delete_request():
+    from main import is_delete_request
+
+    assert is_delete_request("/del") is True
+    assert is_delete_request("/delete") is True
+    assert is_delete_request("/پاک") is True
+    assert is_delete_request("پاک کن") is True
+    assert is_delete_request("این رو پاک کن") is True
+    assert is_delete_request("این پیام رو پاک کن") is True
+    assert is_delete_request("پاکش کن") is True
+    assert is_delete_request("حذف کن") is True
+    assert is_delete_request("حذفش کن") is True
+    assert is_delete_request("این رو حذف کن") is True
+    assert is_delete_request("delete") is True
+    assert is_delete_request("del") is True
+
+    # Negatives
+    assert is_delete_request("حافظه رو پاک کن") is False
+    assert is_delete_request("چطور حافظه کش تلگرام رو پاک کنم؟") is False
+    assert is_delete_request("سلام چطوری") is False
+
+
+def test_extract_replied_message_context():
+    from unittest.mock import MagicMock
+    from main import extract_replied_message_context
+
+    mock_msg = MagicMock()
+    mock_reply = MagicMock()
+    mock_reply.from_user.first_name = "سارا"
+    mock_reply.from_user.last_name = "احمدی"
+    mock_reply.from_user.username = "sara_ah"
+    mock_reply.forward_from = None
+    mock_reply.forward_from_chat = None
+    mock_reply.document = None
+    mock_reply.audio = None
+    mock_reply.photo = None
+    mock_reply.video = None
+    mock_reply.poll = None
+    mock_reply.text = "هوش مصنوعی در سال‌های اخیر رشد چشمگیری داشته است."
+    mock_reply.caption = None
+    mock_msg.reply_to_message = mock_reply
+
+    res = extract_replied_message_context(mock_msg)
+    assert "سارا احمدی" in res
+    assert "@sara_ah" in res
+    assert "هوش مصنوعی" in res

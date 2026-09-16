@@ -23,6 +23,7 @@ from config import (
 from utils.formatter import strip_thinking
 from tools.web_reader import fetch_webpage_text, search_web_live
 from tools.telegraph import publish_to_telegraph
+from tools.system import get_system_time_context
 import database
 
 logger = logging.getLogger("HermesAgentEngine")
@@ -477,8 +478,11 @@ async def execute_hermes_agent(
             get_effective_model()
         )]
 
+    time_ctx = get_system_time_context()
+    sys_prompt = f"{PROMETHEUS_SYSTEM_PROMPT}\n\n[تقویم، سال و زمان زنده رسمی کشور (ایران - تهران)]:\n{time_ctx}" if time_ctx else PROMETHEUS_SYSTEM_PROMPT
+
     messages = [
-        {"role": "system", "content": PROMETHEUS_SYSTEM_PROMPT}
+        {"role": "system", "content": sys_prompt}
     ] + turn_history
 
     final_answer: Optional[str] = None

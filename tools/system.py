@@ -38,31 +38,72 @@ _JALALI_MONTHS = [
 
 def get_current_time() -> str:
     """
-    Returns official Tehran time, Solar Jalali date, day of week, and Gregorian date.
+    Returns official Tehran time, Solar Jalali date, day of week, season, and Gregorian date.
     """
     if _HAS_JALALI:
         tehran_tz = pytz.timezone("Asia/Tehran")
         now_tehran = datetime.now(tehran_tz)
         j_now = jdatetime.datetime.fromgregorian(datetime=now_tehran)
 
-        weekday_name = _WEEKDAYS.get(j_now.weekday(), "")
+        weekday_name = jdatetime.date.j_weekdays_fa[j_now.weekday()] if hasattr(jdatetime.date, "j_weekdays_fa") else _WEEKDAYS.get(j_now.weekday(), "")
         month_name = _JALALI_MONTHS[j_now.month] if 1 <= j_now.month <= 12 else ""
 
-        time_str = j_now.strftime("%H:%M:%S")
+        time_str = now_tehran.strftime("%H:%M:%S")
         date_shamsi = f"{j_now.year}/{j_now.month:02d}/{j_now.day:02d}"
         date_verbose = f"{weekday_name}، {j_now.day} {month_name} {j_now.year}"
         date_gregorian = now_tehran.strftime("%Y-%m-%d")
+        gregorian_verbose = now_tehran.strftime("%A, %d %B %Y")
+
+        if j_now.month in (1, 2, 3):
+            season = "بهار"
+        elif j_now.month in (4, 5, 6):
+            season = "تابستان"
+        elif j_now.month in (7, 8, 9):
+            season = "پاییز"
+        else:
+            season = "زمستان"
 
         return (
-            "🕒 **ساعت رسمی و تقویم تهران:**\n\n"
-            f"⏱ **زمان:** `{time_str}` (به وقت رسمی ایران)\n"
-            f"📅 **تاریخ شمسی:** `{date_verbose}` (`{date_shamsi}`)\n"
-            f"🌍 **تاریخ میلادی:** `{date_gregorian}`\n\n"
-            "⚡ *محاسبه دقیق توسط پرومته*"
+            "🕒 **ساعت رسمی و تقویم ایران (تهران):**\n\n"
+            f"⏱ **زمان کنونی:** `{time_str}` (به وقت رسمی ایران - UTC+3:30)\n"
+            f"📅 **تاریخ شمسی:** `{date_verbose}`\n"
+            f"🔢 **فرمت عددی:** `{date_shamsi}` (فصل {season})\n"
+            f"🌍 **تاریخ میلادی:** `{date_gregorian}` (`{gregorian_verbose}`)\n\n"
+            "⚡ *محاسبه دقیق تقویم خورشیدی و زمان رسمی توسط پرومته*"
         )
     else:
         now = datetime.now()
         return f"🕒 زمان سرور: `{now.strftime('%Y-%m-%d %H:%M:%S')}`"
+
+
+def get_system_time_context() -> str:
+    """
+    Provides real-time calendar and clock context for injection into LLM system prompt.
+    Ensures the AI model always knows the exact current Jalali & Gregorian date and Tehran time.
+    """
+    try:
+        if _HAS_JALALI:
+            tehran_tz = pytz.timezone("Asia/Tehran")
+            now_tehran = datetime.now(tehran_tz)
+            j_now = jdatetime.datetime.fromgregorian(datetime=now_tehran)
+            weekday_fa = jdatetime.date.j_weekdays_fa[j_now.weekday()] if hasattr(jdatetime.date, "j_weekdays_fa") else _WEEKDAYS.get(j_now.weekday(), "")
+            month_name = _JALALI_MONTHS[j_now.month] if 1 <= j_now.month <= 12 else ""
+            date_shamsi = f"{j_now.year}/{j_now.month:02d}/{j_now.day:02d}"
+            date_gregorian = now_tehran.strftime("%Y-%m-%d")
+            time_str = now_tehran.strftime("%H:%M:%S")
+            return (
+                f"Current Real-Time & Calendar Context (Iran/Tehran): "
+                f"Today is {weekday_fa}، {j_now.day} {month_name} {j_now.year} SH ({date_shamsi}). "
+                f"Gregorian Date: {date_gregorian} ({now_tehran.strftime('%A')}). "
+                f"Tehran Time: {time_str} (Asia/Tehran, UTC+3:30). "
+                f"Current Year: {j_now.year} Solar Hijri (هجری شمسی) / {now_tehran.year} Gregorian."
+            )
+        else:
+            now = datetime.now()
+            return f"Current UTC Time: {now.strftime('%Y-%m-%d %H:%M:%S')}."
+    except Exception as e:
+        logger.warning(f"Error generating system time context: {e}")
+        return ""
 
 
 # Safe Math AST Evaluator

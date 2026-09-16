@@ -321,12 +321,29 @@ _TIME_EXCLUSIONS = (
     "۴ ساعت", "ساعت قبل", "ساعت بعد", "ساعت پیش", "ساعت طول"
 )
 
+_TIME_STANDALONES = {
+    "ساعت", "تاریخ", "تقویم", "زمان", "time", "date", "clock",
+    "امروز چندمه", "امروز چنده", "الان چندمه", "امروز چندم است",
+    "امروز چه روزیه", "امروز چه روزی است", "امروز چند شنبه است", "امروز چندشنبه است",
+    "تاریخ امروز", "تاریخ شمسی", "تقویم امروز", "تقویم شمسی",
+    "سال چندیم", "امسال چه سالیه", "امسال چه سالی است"
+}
+
+_TIME_REGEXES = [
+    re.compile(r"(?<!\w)(?:امروز|الان)\s*(?:چندمه|چنده|چه\s*روزیه|چه\s*روزی\s*است|چندم\s*(?:ماهه|ماه\s*است|است)?)(?!\w)", re.IGNORECASE),
+    re.compile(r"(?<!\w)(?:امروز|الان)\s+چند\s*شنبه\s*(?:است|هست|ایم|یم)?(?!\w)", re.IGNORECASE),
+    re.compile(r"(?<!\w)(?:تاریخ|تقویم)\s+(?:امروز|روز|شمسی|الان|کنونی)(?!\w)", re.IGNORECASE),
+    re.compile(r"(?<!\w)(?:ساعت)\s+(?:چنده|چند است|چند شد|رسمی|تهران|ایران|الان)(?!\w)", re.IGNORECASE),
+    re.compile(r"(?<!\w)(?:سال\s+چندیم|امسال\s+چه\s*سالیه|امسال\s+چه\s*سالی\s*است|سال\s+چنده)(?!\w)", re.IGNORECASE),
+    re.compile(r"(?<!\w)تاریخ\s+(?:امروز\s+به\s+شمسی|الان\s+چیه|روز\s+رو\s+بگو)(?!\w)", re.IGNORECASE),
+]
+
 _TIME_PHRASES = (
     "ساعت چنده", "ساعت چند است", "ساعت چند شد", "ساعت چنده الان", "ساعت الان چنده",
     "ساعت رسمی", "ساعت تهران", "ساعت رسمی کشور", "ساعت به وقت تهران", "ساعت ایران",
     "امروز چندمه", "امروز چندم است", "تاریخ امروز", "تاریخ روز", "امروز چه روزیه",
-    "امروز چند شنبه است", "امروز چندشنبه است", "تاریخ شمسی", "تقویم امروز", "تقویم شمسی",
-    "زمان فعلی", "زمان کنونی"
+    "امروز چه روزی است", "امروز چند شنبه است", "امروز چندشنبه است", "تاریخ شمسی",
+    "تقویم امروز", "تقویم شمسی", "زمان فعلی", "زمان کنونی", "امروز چنده", "الان چندمه"
 )
 
 _TIME_PHRASE_REGEXES = [
@@ -334,20 +351,97 @@ _TIME_PHRASE_REGEXES = [
     for tp in _TIME_PHRASES
 ]
 
+
 def is_time_query(text: str) -> bool:
-    """Matches time and calendar queries."""
+    """Matches natural Persian queries asking about current time, date, day of week, or calendar."""
     t = text.lower().strip()
-    if t in ("ساعت", "تاریخ", "تقویم", "زمان", "time", "date", "clock"):
+    if t in _TIME_STANDALONES:
         return True
     if any(ex in t for ex in _TIME_EXCLUSIONS):
         return False
     if any(p.search(t) for p in _TIME_PHRASE_REGEXES):
         return True
-    if re.search(r"^(?:ساعت|زمان|تاریخ)\s*(?:چنده|چند است|چند شد|الان|امروز|رسمی|تهران)?[\?؟]?$", t):
+    for r in _TIME_REGEXES:
+        if r.search(t):
+            return True
+    if re.search(r"^(?:ساعت|زمان|تاریخ|تقویم)\s*(?:چنده|چند است|چند شد|الان|امروز|رسمی|تهران|شمسی)?[\?؟]?$", t):
         return True
     if re.search(r"^(?:الان|امروز)\s+ساعت\s+چنده[\?؟]?$", t):
         return True
     return False
+
+
+# =========================================================================
+# Bot Message Deletion & Replied-To Message Context Extraction
+# =========================================================================
+
+_DELETE_PATTERNS = [
+    r"^(?:/del|/delete|/پاک)(?:@\w+)?$",
+    r"^(?:این\s*(?:رو|پیام\s*رو)?\s*)?پاک\s*(?:کن|ش\s*کن|کنید)[\!؟\.]*$",
+    r"^(?:این\s*(?:رو|پیام\s*رو)?\s*)?حذف\s*(?:کن|ش\s*کن|کنید)[\!؟\.]*$",
+    r"^(?:پاکش\s*کن|حذفش\s*کن|دلیت\s*کن|delete|del)[\!؟\.]*$",
+]
+
+
+def is_delete_request(text: str) -> bool:
+    """Matches requests to delete the bot's own message."""
+    t = text.lower().strip()
+    return any(bool(re.search(p, t, re.IGNORECASE)) for p in _DELETE_PATTERNS)
+
+
+def extract_replied_message_context(message) -> str:
+    """
+    Extracts structured sender, text, caption, and media metadata from the replied-to message.
+    Allows Prometheus to understand and process whatever message the user replied to.
+    """
+    reply_msg = getattr(message, "reply_to_message", None)
+    if not reply_msg:
+        return ""
+
+    author_parts = []
+    if getattr(reply_msg, "from_user", None) and reply_msg.from_user:
+        name = reply_msg.from_user.first_name or "کاربر"
+        if getattr(reply_msg.from_user, "last_name", None) and reply_msg.from_user.last_name:
+            name += f" {reply_msg.from_user.last_name}"
+        if getattr(reply_msg.from_user, "username", None) and reply_msg.from_user.username:
+            name += f" (@{reply_msg.from_user.username})"
+        author_parts.append(name)
+    else:
+        author_parts.append("کاربر")
+
+    if getattr(reply_msg, "forward_from", None) and reply_msg.forward_from:
+        f_name = reply_msg.forward_from.first_name or "کاربر"
+        if getattr(reply_msg.forward_from, "username", None) and reply_msg.forward_from.username:
+            f_name += f" (@{reply_msg.forward_from.username})"
+        author_parts.append(f"فوروارد از {f_name}")
+    elif getattr(reply_msg, "forward_from_chat", None) and reply_msg.forward_from_chat:
+        title = getattr(reply_msg.forward_from_chat, "title", "") or ""
+        author_parts.append(f"فوروارد از کانال/گروه {title}")
+
+    author_desc = " | ".join(author_parts)
+    content = getattr(reply_msg, "text", None) or getattr(reply_msg, "caption", None) or ""
+
+    media_notes = []
+    if getattr(reply_msg, "document", None) and reply_msg.document:
+        doc_name = getattr(reply_msg.document, "file_name", None) or "سند"
+        media_notes.append(f"فایل سند ({doc_name})")
+    if getattr(reply_msg, "audio", None) and reply_msg.audio:
+        title = getattr(reply_msg.audio, "title", None) or "موزیک"
+        perf = getattr(reply_msg.audio, "performer", None) or ""
+        media_notes.append(f"فایل صوتی ({perf} - {title})".strip())
+    if getattr(reply_msg, "photo", None) and reply_msg.photo:
+        media_notes.append("تصویر")
+    if getattr(reply_msg, "video", None) and reply_msg.video:
+        media_notes.append("ویدیو")
+    if getattr(reply_msg, "poll", None) and reply_msg.poll:
+        media_notes.append(f"نظرسنجی ({reply_msg.poll.question})")
+
+    media_header = f" [نوع مدیا: {', '.join(media_notes)}]" if media_notes else ""
+    if not content and not media_header:
+        return ""
+
+    body = content.strip() if content else "(بدون متن پیوست شده)"
+    return f"📌 [پیام ریپلای‌شده از طرف {author_desc}{media_header}]:\n\"\"\"\n{body}\n\"\"\""
 
 
 _WEATHER_EXCLUSIONS = (
@@ -437,7 +531,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🛍 **استعلام و قیمت دیجی‌کالا:** `/digikala نام کالا`\n"
         "• 🌦 **پیش‌بینی آب و هوای زنده:** `/weather نام شهر`\n"
         "• 🕒 **ساعت رسمی و تقویم شمسی:** `/time`\n"
-        "• 🧮 **ماشین حساب و ریاضی:** `/calc`\n\n"
+        "• 🧮 **ماشین حساب و ریاضی:** `/calc`\n"
+        "• 🗑 **حذف پیام‌های ارسالی ربات:** `/del` یا گفتن «پاکش کن» با ریپلای روی پیام ربات\n"
+        "• 📌 **درک هوشمند ریپلای:** روی هر پیامی ریپلای بزنید و سوال یا دستور خود را مطرح کنید تا ربات آن را تحلیل کند.\n\n"
         "💡 *در گروه‌ها، من تنها زمانی پاسخ می‌دهم که نام «پرومته» را بیاورید، مرا منشن (@) کنید یا روی پیامم ریپلای بزنید.*"
     )
     formatted = markdown_to_telegram_html(text)
@@ -463,8 +559,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/digikala [کالا]` - استعلام قیمت و موجودی دیجی‌کالا\n"
         "• `/time` - ساعت رسمی تهران و تاریخ دقیق شمسی\n"
         "• `/calc [عبارت]` - محاسبات ریاضی و علمی\n"
+        "• `/del` یا `/delete` - حذف پیام ارسال شده توسط پرومته (با ریپلای روی پیام یا گفتن «پاکش کن»)\n"
         "• `/clear` - پاکسازی حافظه نشست جاری\n"
         "• `/ping` - بررسی بیداری و سرعت پاسخ‌دهی سرور\n\n"
+        "📌 **درک هوشمند ریپلای:** روی هر پیامی ریپلای بزنید و بپرسید «این رو ترجمه کن»، «نظرت چیه؟» یا «خلاصه‌اش کن» تا پرومته محتوای ریپلای‌شده را هوشمندانه بخواند و تحلیل کند.\n\n"
         "🗣 **مکالمه روان:** هر سوالی بپرسید، پرومته به صورت هوشمند و خودکار بهترین روش پاسخ را انتخاب می‌کند."
     )
     formatted = markdown_to_telegram_html(text)
@@ -714,6 +812,28 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_music_request(update, context, query)
 
 
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deletes bot messages upon reply."""
+    msg = update.effective_message
+    if not msg:
+        return
+    bot_id = context.bot.id
+    reply_to = msg.reply_to_message
+    if reply_to and reply_to.from_user and reply_to.from_user.id == bot_id:
+        try:
+            await reply_to.delete()
+        except Exception as e:
+            logger.warning(f"Failed to delete bot message: {e}")
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+    elif reply_to:
+        await msg.reply_text("⚠️ من فقط می‌توانم پیام‌هایی که خودم ارسال کرده‌ام را حذف کنم.")
+    else:
+        await msg.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و /del یا «پاکش کن» را ارسال نمایید.")
+
+
 # =========================================================================
 # Main Message Handler with Silence-By-Default Trigger Logic
 # =========================================================================
@@ -796,6 +916,26 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     cleaned_lower = cleaned_prompt.lower()
+
+    # Fast-Path -1: Bot Message Deletion (/del, /delete, /پاک, "پاکش کن", "حذف کن")
+    if is_delete_request(cleaned_lower):
+        reply_to = message.reply_to_message
+        if reply_to and reply_to.from_user and reply_to.from_user.id == bot_id:
+            try:
+                await reply_to.delete()
+            except Exception as e:
+                logger.warning(f"Failed to delete bot message: {e}")
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+        elif reply_to:
+            await message.reply_text("⚠️ من فقط می‌توانم پیام‌هایی که خودم ارسال کرده‌ام را حذف کنم.")
+            return
+        elif is_private:
+            await message.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و /del یا «پاکش کن» را ارسال نمایید.")
+            return
 
     # Fast-Path 0: Response Time Tracking & Live Speed Benchmark
     latency_type = is_latency_query(cleaned_lower)
@@ -904,7 +1044,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Process all queries through autonomous agent brain (zero typing animations)
-    await _process_and_reply(update, context, cleaned_prompt)
+    replied_context = extract_replied_message_context(message)
+    if replied_context:
+        agent_prompt = f"{replied_context}\n\nدستور یا پرسش کاربر درباره پیام بالا:\n{cleaned_prompt}"
+    else:
+        agent_prompt = cleaned_prompt
+
+    await _process_and_reply(update, context, agent_prompt)
 
 
 # =========================================================================
@@ -943,6 +1089,7 @@ def build_application():
     app.add_handler(CommandHandler(["telegraph", "telegra", "article"], telegraph_command))
     app.add_handler(CommandHandler(["calc", "hesab"], calc_command))
     app.add_handler(CommandHandler(["clear"], clear_command))
+    app.add_handler(CommandHandler(["delete", "del", "pak"], delete_command))
     app.add_handler(CommandHandler(["ping"], ping_command))
 
     # All text messages (with silence-by-default logic)
