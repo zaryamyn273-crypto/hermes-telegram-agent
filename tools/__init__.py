@@ -7,6 +7,7 @@ from .system import get_current_time, calculate_math
 from .weather import get_weather
 from .ecommerce import search_digikala
 from .web_reader import fetch_webpage_text
+from .telegraph import create_telegraph_article, publish_to_telegraph, extract_telegraph_args
 
 __all__ = [
     "get_fiat_and_gold_rates",
@@ -16,4 +17,7 @@ __all__ = [
     "get_weather",
     "search_digikala",
     "fetch_webpage_text",
+    "create_telegraph_article",
+    "publish_to_telegraph",
+    "extract_telegraph_args",
 ]

@@ -230,3 +230,47 @@ def test_candidate_endpoints_prioritizes_9router():
         settings.HERMES_ENDPOINT = orig_hermes
 
 
+def test_telegraph_nodes_converter():
+    from tools.telegraph import markdown_to_telegraph_nodes, _parse_inline_elements
+
+    # Test inline parser
+    inline = _parse_inline_elements("متن **ضخیم** و [لینک](https://t.me)")
+    assert any(isinstance(x, dict) and x.get("tag") == "b" for x in inline)
+    assert any(isinstance(x, dict) and x.get("tag") == "a" and x.get("attrs", {}).get("href") == "https://t.me" for x in inline)
+
+    # Test full markdown converter
+    md = """# تیتر اصلی
+این یک پاراگراف است.
+
+## تیتر فرعی
+- مورد اول
+- مورد دوم
+
+> نقل قول پرومته
+
+```python
+print("Hello")
+```
+"""
+    nodes = markdown_to_telegraph_nodes(md)
+    tags = [n.get("tag") for n in nodes]
+    assert "h3" in tags
+    assert "p" in tags
+    assert "blockquote" in tags
+    assert "pre" in tags
+
+
+def test_telegraph_arg_extractor():
+    from tools.telegraph import extract_telegraph_args
+
+    t1, c1 = extract_telegraph_args("عنوان تست | متن کامل مقاله برای انتشار")
+    assert t1 == "عنوان تست"
+    assert c1 == "متن کامل مقاله برای انتشار"
+
+    multi = "تیتر مقاله در خط اول\nخط دوم پاراگراف اول\nخط سوم پاراگراف دوم"
+    t2, c2 = extract_telegraph_args(multi)
+    assert "تیتر مقاله" in t2
+    assert "خط دوم" in c2
+
+
+

@@ -36,6 +36,7 @@ from tools.system import get_current_time, calculate_math
 from tools.weather import get_weather
 from tools.ecommerce import search_digikala
 from tools.web_reader import fetch_webpage_text
+from tools.telegraph import create_telegraph_article, extract_telegraph_args
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -264,6 +265,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🕒 **ساعت رسمی تهران و تقویم شمسی** (`/time`)\n"
         "• 🌦 **پیش‌بینی آب و هوای شهرها** (`/weather تهران`)\n"
         "• 🛍 **استعلام و قیمت کالا در دیجی‌کالا** (`/digikala آیفون 16`)\n"
+        "• 📝 **انتشار فوری در تلگراف (Telegra.ph)** (`/telegraph عنوان | متن` یا ریپلای)\n"
         "• 🧮 **محاسبات ریاضی و علمی** (`/calc`)\n"
         "• 🔍 **تحلیل پیشرفته، استدلال و کدنویسی خودکار**\n\n"
         "💡 *در گروه‌ها، من تنها زمانی پاسخ می‌دهم که نام «پرومته» را بیاورید، مرا منشن (@) کنید یا روی پیامم ریپلای بزنید.*"
@@ -282,6 +284,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/time` - ساعت رسمی تهران و تاریخ دقیق شمسی\n"
         "• `/weather [شهر]` - آب و هوای زنده شهرها (مثال: `/weather تهران`)\n"
         "• `/digikala [کالا]` - استعلام زنده قیمت، موجودی و لینک خرید دیجی‌کالا\n"
+        "• `/telegraph [عنوان | متن]` - انتشار فوری مقالات و متن‌های بلند در تلگراف با قابلیت نمایش فوری (Instant View)\n"
+        "• `/read [لینک]` - استخراج و مطالعه متن صفحات وب\n"
         "• `/calc [عبارت]` - محاسبات ریاضی و علمی (مثال: `/calc sqrt(144) + 10`)\n"
         "• `/clear` - پاکسازی حافظه نشست و دیتابیس گفتگو\n"
         "• `/ping` - تست بیداری و سرعت پاسخ‌دهی سرور\n\n"
@@ -390,6 +394,42 @@ async def read_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = args[0].strip()
     res = await fetch_webpage_text(url)
     await _deliver_reply(update.effective_message, res)
+
+
+async def telegraph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct Telegraph article publishing command."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    if update.effective_chat:
+        await update.effective_chat.send_action(ChatAction.TYPING)
+
+    # Check if this command is a reply to another message
+    reply_msg = msg.reply_to_message
+    args_text = " ".join(context.args or []).strip()
+
+    if reply_msg and (reply_msg.text or reply_msg.caption):
+        content = reply_msg.text or reply_msg.caption or ""
+        title = args_text if args_text else "مستند تلگراف پرومته"
+    elif args_text:
+        title, content = extract_telegraph_args(args_text)
+    else:
+        guide = (
+            "📝 **راهنمای انتشار در تلگراف (Telegra.ph):**\n\n"
+            "برای انتشار فوری متن یا مقاله در تلگراف می‌توانید از روش‌های زیر استفاده کنید:\n\n"
+            "۱. **فرمت مستقیم:**\n"
+            "`/telegraph عنوان مقاله | متن کامل مقاله`\n\n"
+            "۲. **ریپلای روی پیام:**\n"
+            "روی هر پیام بلندی ریپلای بزنید و دستور `/telegraph [عنوان دلخواه]` را ارسال کنید.\n\n"
+            "۳. **مکالمه با هوش مصنوعی:**\n"
+            "به پرومته بگویید: *«یک مقاله درباره هوش مصنوعی بنویس و توی تلگراف منتشر کن»*"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    res = await create_telegraph_article(title=title, content=content)
+    await _deliver_reply(msg, res)
 
 
 # =========================================================================
@@ -524,6 +564,29 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _deliver_reply(message, res)
         return
 
+    # Fast-Path 8: Telegraph Article Publishing
+    if any(k in cleaned_lower for k in ["تلگراف", "telegraph", "telegra.ph"]):
+        # Case A: Reply to another message asking to publish to telegraph
+        if message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
+            reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
+            t_title = cleaned_prompt
+            for rem in ["تلگرافش کن", "توی تلگراف بذار", "در تلگراف منتشر کن", "توی تلگراف منتشر کن", "تلگراف", "telegraph"]:
+                t_title = t_title.replace(rem, "")
+            t_title = t_title.strip() or "مستند تلگراف پرومته"
+            res = await create_telegraph_article(title=t_title, content=reply_text)
+            await _deliver_reply(message, res)
+            return
+
+        # Case B: Direct "تلگراف: عنوان | متن" or "عنوان | متن" with telegraph intent
+        if "|" in cleaned_prompt and any(a in cleaned_lower for a in ["بساز", "منتشر", "صفحه", "پست", "publish", "create"]):
+            t_title, t_content = extract_telegraph_args(cleaned_prompt)
+            for rem in ["تلگراف:", "تلگراف", "telegraph:", "telegraph"]:
+                t_title = t_title.replace(rem, "").strip()
+            if t_content:
+                res = await create_telegraph_article(title=t_title or "مستند تلگراف پرومته", content=t_content)
+                await _deliver_reply(message, res)
+                return
+
     # Process all queries through autonomous agent brain (zero typing animations)
     await _process_and_reply(update, context, cleaned_prompt)
 
@@ -556,6 +619,7 @@ def build_application():
     app.add_handler(CommandHandler(["weather", "hava"], weather_command))
     app.add_handler(CommandHandler(["digikala", "dk"], digikala_command))
     app.add_handler(CommandHandler(["read", "web", "url"], read_command))
+    app.add_handler(CommandHandler(["telegraph", "telegra", "article"], telegraph_command))
     app.add_handler(CommandHandler(["calc", "hesab"], calc_command))
     app.add_handler(CommandHandler(["clear"], clear_command))
     app.add_handler(CommandHandler(["ping"], ping_command))

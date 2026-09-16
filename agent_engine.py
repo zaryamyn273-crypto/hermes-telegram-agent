@@ -22,6 +22,7 @@ from config import (
 )
 from utils.formatter import strip_thinking
 from tools.web_reader import fetch_webpage_text
+from tools.telegraph import publish_to_telegraph
 import database
 
 logger = logging.getLogger("HermesAgentEngine")
@@ -358,7 +359,21 @@ async def execute_hermes_agent(
         final_answer = "⚠️ در حال حاضر ارتباط با سرویس پردازش هوش مصنوعی برقرار نشد. لطفاً چند لحظه دیگر مجدداً تلاش فرمایید."
         return final_answer
 
-    # 6. Persist to session & cache
+    # 6. Auto Telegraph Hook: If the user prompt asked to publish to Telegraph, publish and append Instant View URL
+    p_lower = user_prompt.lower()
+    if any(k in p_lower for k in ["تلگراف", "telegraph", "telegra.ph"]) and any(a in p_lower for a in ["بساز", "منتشر", "صفحه", "پست", "publish", "create", "لینک"]):
+        try:
+            lines = [l.strip() for l in final_answer.split("\n") if l.strip()]
+            first_line = lines[0].replace("#", "").strip() if lines else "مقاله پرومته"
+            t_res = await publish_to_telegraph(title=first_line[:60], content=final_answer)
+            if t_res.get("ok"):
+                page_url = t_res.get("url")
+                final_answer += f"\n\n🔗 **پیوند نمایش فوری در تلگراف (Instant View):**\n{page_url}"
+                logger.info(f"Auto-published response to Telegraph: {page_url}")
+        except Exception as e:
+            logger.warning(f"Auto Telegraph publishing failed: {e}")
+
+    # 7. Persist to session & cache
     append_to_session(chat_id, "assistant", final_answer, user_id=user_id, username=username)
     await database.kv_set(cache_key, final_answer, ttl_sec=60)
 
