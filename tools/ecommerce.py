@@ -1,7 +1,8 @@
 """
 Specialized Digikala E-Commerce Tool for Prometheus:
 Provides real-time product search, pricing, stock status, ratings,
-and direct purchase links from Digikala API with multi-tier L1 RAM and Cloudflare KV caching.
+and direct purchase links from Digikala API with persistent keepalive connection pooling,
+multi-tier L1 RAM, and Cloudflare KV caching.
 """
 
 import urllib.parse
@@ -23,6 +24,18 @@ _DIGIKALA_HEADERS = {
     "Referer": "https://www.digikala.com/",
     "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7"
 }
+
+_DK_CLIENT: Optional[httpx.AsyncClient] = None
+
+
+def get_digikala_client() -> httpx.AsyncClient:
+    """Returns shared AsyncClient with cookie jar and keepalive connection pooling."""
+    global _DK_CLIENT
+    if _DK_CLIENT is None or _DK_CLIENT.is_closed:
+        limits = httpx.Limits(max_keepalive_connections=20, max_connections=40, keepalive_expiry=60.0)
+        timeout = httpx.Timeout(connect=2.0, read=3.8, write=2.0, pool=2.0)
+        _DK_CLIENT = httpx.AsyncClient(limits=limits, timeout=timeout, headers=_DIGIKALA_HEADERS, follow_redirects=True)
+    return _DK_CLIENT
 
 
 def clean_digikala_query(query: str) -> str:
@@ -54,27 +67,17 @@ async def search_digikala(query: str, max_results: int = 4) -> str:
     if cached:
         return cached
 
-    endpoints = [
-        f"https://api.digikala.com/v1/search/?q={urllib.parse.quote(clean_q)}",
-        f"https://api.digikala.com/v2/search/?q={urllib.parse.quote(clean_q)}",
-    ]
+    client = get_digikala_client()
+    products: List[Dict[str, Any]] = []
 
-    products = []
     try:
-        async with httpx.AsyncClient(headers=_DIGIKALA_HEADERS, timeout=6.0, follow_redirects=True) as client:
-            for ep in endpoints:
-                try:
-                    resp = await client.get(ep)
-                    if resp.status_code == 200:
-                        data = resp.json().get("data", {})
-                        p_list = data.get("products", [])
-                        if p_list:
-                            products = p_list
-                            break
-                except Exception:
-                    continue
+        enc_q = urllib.parse.quote(clean_q)
+        resp = await client.get(f"https://api.digikala.com/v1/search/?q={enc_q}&page=1")
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            products = data.get("products", [])
     except Exception as e:
-        logger.debug(f"Digikala client error: {e}")
+        logger.debug(f"Digikala client error for '{clean_q}': {e}")
 
     if not products:
         return f"🔍 کالایی با عنوان «{clean_q}» در دیجی‌کالا یافت نشد یا در دسترس نیست."

@@ -2,7 +2,7 @@
 Specialized Webpage Reader Tool for Prometheus:
 Fetches, extracts, cleans, and structures textual content from any public web page (URL).
 Strips scripts, ads, trackers, styles, and junk HTML, returning pure readable content.
-Protected by SSRF guardrails and backed by L1 RAM and Cloudflare KV caching.
+Protected by SSRF guardrails and backed by persistent keepalive connection pooling, L1 RAM, and Cloudflare KV caching.
 """
 
 import re
@@ -31,6 +31,18 @@ _BLOCKED_HOSTNAMES = {
     "metadata.google.internal", "169.254.169.254"
 }
 
+_WEB_CLIENT: Optional[httpx.AsyncClient] = None
+
+
+def get_web_client() -> httpx.AsyncClient:
+    """Returns persistent AsyncClient with keepalive connection pooling."""
+    global _WEB_CLIENT
+    if _WEB_CLIENT is None or _WEB_CLIENT.is_closed:
+        limits = httpx.Limits(max_keepalive_connections=30, max_connections=60, keepalive_expiry=60.0)
+        timeout = httpx.Timeout(connect=2.5, read=6.0, write=2.5, pool=2.5)
+        _WEB_CLIENT = httpx.AsyncClient(limits=limits, timeout=timeout, headers=_BROWSER_HEADERS, follow_redirects=True)
+    return _WEB_CLIENT
+
 
 def is_safe_public_url(url: str) -> bool:
     """Validates that URL points to a safe public destination (SSRF protection)."""
@@ -48,7 +60,7 @@ def is_safe_public_url(url: str) -> bool:
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
                 return False
         except ValueError:
-            pass  # Not an IP literal, it's a domain name
+            pass  # Domain name
         return True
     except Exception:
         return False
@@ -56,7 +68,7 @@ def is_safe_public_url(url: str) -> bool:
 
 async def fetch_webpage_text(url: str, max_chars: int = 5000) -> str:
     """
-    Fetches clean text from a public web page.
+    Fetches clean text from a public web page with streaming byte cap to avoid downloading bloated assets.
     """
     clean_url = url.strip()
     if not clean_url.startswith("http://") and not clean_url.startswith("https://"):
@@ -70,13 +82,21 @@ async def fetch_webpage_text(url: str, max_chars: int = 5000) -> str:
     if cached:
         return cached
 
+    client = get_web_client()
+    html = ""
     try:
-        async with httpx.AsyncClient(headers=_BROWSER_HEADERS, timeout=8.0, follow_redirects=True) as client:
-            resp = await client.get(clean_url)
+        async with client.stream("GET", clean_url) as resp:
             if resp.status_code != 200:
                 return f"⚠️ خطا در بازخوانی صفحه اینترنتی (کد وضعیت HTTP: {resp.status_code})."
 
-            html = resp.text
+            total_bytes = 0
+            chunks = []
+            async for chunk in resp.aiter_text():
+                chunks.append(chunk)
+                total_bytes += len(chunk)
+                if total_bytes > 200_000:  # Cap at 200KB of HTML
+                    break
+            html = "".join(chunks)
 
         # Parse and strip unwanted elements
         soup = BeautifulSoup(html, "html.parser")
@@ -88,7 +108,7 @@ async def fetch_webpage_text(url: str, max_chars: int = 5000) -> str:
         page_title = title_tag.get_text().strip() if title_tag else ""
 
         # Extract main content
-        main_el = soup.find("article") or soup.find("main") or soup.find(id=re.compile(r"content|main", re.I)) or soup.body
+        main_el = soup.find("article") or soup.find("main") or soup.find(id=re.compile(r"content|main|article|post", re.I)) or soup.body
         if not main_el:
             main_el = soup
 
@@ -102,13 +122,13 @@ async def fetch_webpage_text(url: str, max_chars: int = 5000) -> str:
         cleaned = re.sub(r"\s+", " ", extracted).strip()
 
         if len(cleaned) > max_chars:
-            cleaned = cleaned[:max_chars] + "... [بقیه متن کوتاه شد]"
+            cleaned = cleaned[:max_chars] + "... [بقیه محتوا کوتاه شد]"
 
         if not cleaned:
             return "⚠️ متنی از این صفحه استخراج نشد (ممکن است محتوا با جاوااسکریپت سنگین لود شود)."
 
         result = f"🌐 **عنوان صفحه:** {page_title}\n🔗 **آدرس:** {clean_url}\n\n📄 **محتوای استخراج‌شده:**\n{cleaned}"
-        await database.kv_set(cache_key, result, ttl_sec=300)
+        await database.kv_set(cache_key, result, ttl_sec=600)
         return result
 
     except Exception as e:

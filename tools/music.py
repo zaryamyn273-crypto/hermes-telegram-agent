@@ -2,6 +2,7 @@
 Specialized Music Search, Download & Telegram Audio Uploader for Prometheus:
 Finds, extracts, streams, and uploads high-fidelity studio MP3 tracks (320kbps & 128kbps)
 directly to Telegram chats with cover art, metadata, and sub-second file_id caching.
+Uses parallel racing crawler across top Iranian and global portals with early-exit optimization.
 """
 
 import re
@@ -31,14 +32,25 @@ _MUSIC_HEADERS = {
 }
 
 MUSIC_PORTALS = [
-    ("https://music-fa.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
     ("https://upmusics.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
     ("https://behmelody.in/?s={q}", r'<a\s+title=[\"\']([^\"\']+)[\"\']\s+href=[\"\'](https?://behmelody\.in/[^\"\']+)[\"\']'),
     ("https://tabamusic.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
     ("https://golsarmusic.ir/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
     ("https://muzicir.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
-    ("https://rozmusic.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
+    ("https://music-fa.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
 ]
+
+_MUSIC_CLIENT: Optional[httpx.AsyncClient] = None
+
+
+def get_music_client() -> httpx.AsyncClient:
+    """Returns shared AsyncClient with keepalive connection pooling."""
+    global _MUSIC_CLIENT
+    if _MUSIC_CLIENT is None or _MUSIC_CLIENT.is_closed:
+        limits = httpx.Limits(max_keepalive_connections=30, max_connections=60, keepalive_expiry=60.0)
+        timeout = httpx.Timeout(connect=2.5, read=4.5, write=3.0, pool=3.0)
+        _MUSIC_CLIENT = httpx.AsyncClient(limits=limits, timeout=timeout, headers=_MUSIC_HEADERS, follow_redirects=True)
+    return _MUSIC_CLIENT
 
 
 def clean_music_query(q: str) -> str:
@@ -84,21 +96,19 @@ def extract_music_query(text: str) -> Optional[str]:
     return cleaned if len(cleaned) >= 2 else None
 
 
-async def _crawl_portal(
+async def _crawl_portal_fast(
     client: httpx.AsyncClient,
     url_pattern: str,
     regex_pattern: str,
-    clean_q: str
-) -> List[Dict[str, Any]]:
-    """Crawls a single music portal and extracts candidates with MP3 download URLs."""
+    clean_q: str,
+) -> Optional[Dict[str, Any]]:
+    """Crawls a single portal with early exit on first valid MP3."""
     enc = urllib.parse.quote(clean_q)
-    candidates: List[Dict[str, Any]] = []
-
     try:
-        r = await client.get(url_pattern.format(q=enc), timeout=5.0, follow_redirects=True)
+        r = await client.get(url_pattern.format(q=enc), timeout=3.5)
         if r.status_code == 200:
             matches = re.findall(regex_pattern, r.text, re.DOTALL | re.IGNORECASE)
-            for m in matches[:3]:
+            for m in matches[:2]:
                 href = m[0] if isinstance(m, tuple) and m[0].startswith("http") else (m[1] if isinstance(m, tuple) and len(m) > 1 and m[1].startswith("http") else "")
                 raw_t = m[1] if isinstance(m, tuple) and href == m[0] else (m[0] if isinstance(m, tuple) else "")
 
@@ -108,11 +118,8 @@ async def _crawl_portal(
                 clean_title = BeautifulSoup(raw_t, "html.parser").get_text().strip()
                 clean_title = re.sub(r"دانلود آهنگ|دانلود اهنگ|ریمیکس|موزیک|mp3", "", clean_title, flags=re.I).strip(" -—")
 
-                try:
-                    p_res = await client.get(href, timeout=5.0, follow_redirects=True)
-                except Exception:
-                    continue
-
+                # Track page fetch
+                p_res = await client.get(href, timeout=3.5)
                 if p_res.status_code == 200:
                     mp3s = re.findall(r'href=[\"\'](https?://[^\"\']+\.mp3)[\"\']', p_res.text, re.IGNORECASE)
                     valid_mp3s = [
@@ -121,8 +128,7 @@ async def _crawl_portal(
                     ]
                     if valid_mp3s:
                         mp3_320 = [u for u in valid_mp3s if "320" in u]
-                        mp3_128 = [u for u in valid_mp3s if "128" in u]
-                        chosen = mp3_320[0] if mp3_320 else (mp3_128[0] if mp3_128 else valid_mp3s[0])
+                        chosen = mp3_320[0] if mp3_320 else valid_mp3s[0]
 
                         # Extract performer
                         performer = ""
@@ -131,26 +137,25 @@ async def _crawl_portal(
                         else:
                             performer = clean_q.split()[0] if clean_q else "هنرمند"
 
-                        candidates.append({
+                        return {
                             "title": clean_title or clean_q.title(),
                             "performer": performer or "هنرمند",
                             "url": chosen,
                             "quality": "320kbps Original" if ("320" in chosen) else "128kbps HQ",
-                        })
+                        }
     except Exception as e:
         logger.debug(f"Portal crawl error ({url_pattern}): {e}")
 
-    return candidates
+    return None
 
 
-async def _search_deezer(client: httpx.AsyncClient, clean_q: str) -> Optional[Dict[str, Any]]:
+async def _search_deezer_fast(client: httpx.AsyncClient, clean_q: str) -> Optional[Dict[str, Any]]:
     """Searches Deezer for tracks."""
     try:
         enc = urllib.parse.quote(clean_q)
-        resp = await client.get(f"https://api.deezer.com/search?q={enc}&limit=3", timeout=4.0)
+        resp = await client.get(f"https://api.deezer.com/search?q={enc}&limit=3", timeout=3.0)
         if resp.status_code == 200:
-            data = resp.json()
-            tracks = data.get("data") or []
+            tracks = resp.json().get("data") or []
             if tracks:
                 t = tracks[0]
                 preview = t.get("preview")
@@ -167,26 +172,34 @@ async def _search_deezer(client: httpx.AsyncClient, clean_q: str) -> Optional[Di
 
 
 async def search_music_track(clean_q: str) -> Optional[Dict[str, Any]]:
-    """Searches music portals in parallel and returns the best matching candidate."""
-    async with httpx.AsyncClient(headers=_MUSIC_HEADERS, timeout=7.0, follow_redirects=True) as client:
-        tasks = [_crawl_portal(client, pat, reg, clean_q) for pat, reg in MUSIC_PORTALS]
-        tasks.append(_search_deezer(client, clean_q))
+    """
+    Races multiple music portals concurrently.
+    Returns the first matching candidate with early exit for sub-second performance.
+    """
+    client = get_music_client()
+    tasks = [
+        asyncio.create_task(_crawl_portal_fast(client, pat, reg, clean_q))
+        for pat, reg in MUSIC_PORTALS
+    ]
+    tasks.append(asyncio.create_task(_search_deezer_fast(client, clean_q)))
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        all_candidates: List[Dict[str, Any]] = []
+    best_candidate: Optional[Dict[str, Any]] = None
 
-        for res in results:
-            if isinstance(res, list):
-                all_candidates.extend(res)
-            elif isinstance(res, dict) and res.get("url"):
-                all_candidates.append(res)
+    for fut in asyncio.as_completed(tasks):
+        try:
+            res = await fut
+            if res and res.get("url"):
+                # If we find a 320kbps full track, return immediately!
+                if "320" in res.get("quality", ""):
+                    for t in tasks:
+                        t.cancel()
+                    return res
+                if not best_candidate:
+                    best_candidate = res
+        except Exception:
+            pass
 
-        if not all_candidates:
-            return None
-
-        # Sort: 320kbps original first
-        all_candidates.sort(key=lambda x: (1 if "320" in x.get("quality", "") else 0), reverse=True)
-        return all_candidates[0]
+    return best_candidate
 
 
 async def download_mp3_stream(url: str, max_bytes: int = _MAX_AUDIO_BYTES) -> Optional[bytes]:
@@ -194,20 +207,20 @@ async def download_mp3_stream(url: str, max_bytes: int = _MAX_AUDIO_BYTES) -> Op
     if not url or not url.startswith("http"):
         return None
     try:
-        async with httpx.AsyncClient(headers=_MUSIC_HEADERS, timeout=30.0, follow_redirects=True) as client:
-            buf = io.BytesIO()
-            async with client.stream("GET", url) as resp:
-                if resp.status_code == 200:
-                    total = 0
-                    async for chunk in resp.aiter_bytes(chunk_size=65536):
-                        total += len(chunk)
-                        if total > max_bytes:
-                            logger.warning(f"MP3 stream exceeded limit: {total} bytes")
-                            return None
-                        buf.write(chunk)
-                    raw = buf.getvalue()
-                    if len(raw) >= 300_000:
-                        return raw
+        client = get_music_client()
+        buf = io.BytesIO()
+        async with client.stream("GET", url, timeout=20.0) as resp:
+            if resp.status_code == 200:
+                total = 0
+                async for chunk in resp.aiter_bytes(chunk_size=131072):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        logger.warning(f"MP3 stream exceeded limit: {total} bytes")
+                        return None
+                    buf.write(chunk)
+                raw = buf.getvalue()
+                if len(raw) >= 200_000:
+                    return raw
     except Exception as e:
         logger.warning(f"Error streaming MP3 from {url}: {e}")
     return None
@@ -246,7 +259,7 @@ async def handle_music_request(
                 await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.UPLOAD_VOICE)
             except Exception:
                 pass
-            await asyncio.sleep(4.0)
+            await asyncio.sleep(3.5)
 
     action_task = asyncio.create_task(_action_loop())
 
@@ -319,7 +332,7 @@ async def handle_music_request(
                     performer=performer,
                     caption=caption,
                     parse_mode=ParseMode.HTML,
-                    write_timeout=120.0,
+                    write_timeout=90.0,
                     read_timeout=60.0,
                 )
                 logger.info(f"Delivered music via streamed bytes for '{clean_q}'")
