@@ -29,6 +29,19 @@ logger = logging.getLogger("HermesAgentEngine")
 # Session Conversation History in RAM: chat_id -> List of message dicts
 _SESSIONS: Dict[int, List[Dict[str, Any]]] = {}
 
+# Persistent HTTP Client with Connection Pooling
+_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    """Returns a shared, persistent httpx.AsyncClient with keepalive connection pooling."""
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
+        limits = httpx.Limits(max_keepalive_connections=50, max_connections=100, keepalive_expiry=60.0)
+        timeout = httpx.Timeout(connect=3.0, read=45.0, write=5.0, pool=5.0)
+        _HTTP_CLIENT = httpx.AsyncClient(limits=limits, timeout=timeout)
+    return _HTTP_CLIENT
+
 # Upstream provider error signatures that trigger instant failover
 _PROVIDER_ERROR_PATTERNS = [
     "rejected your api key",
@@ -305,37 +318,37 @@ async def execute_hermes_agent(
         }
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=3.5, read=35.0, write=5.0, pool=5.0)) as client:
-                resp = await client.post(
-                    f"{api_url}/chat/completions",
-                    headers=headers,
-                    json=payload
+            client = get_http_client()
+            resp = await client.post(
+                f"{api_url}/chat/completions",
+                headers=headers,
+                json=payload
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Endpoint {api_url} returned HTTP {resp.status_code}: {resp.text[:200]}")
+                continue
+
+            data = resp.json()
+            choices = data.get("choices") or []
+            if not choices:
+                continue
+
+            msg = choices[0].get("message") or {}
+            raw_content = msg.get("content") or ""
+
+            # Check if the response is an upstream provider error message
+            if is_provider_error(raw_content):
+                logger.warning(
+                    f"Endpoint {api_url} returned provider failure: '{raw_content[:120]}'. Failing over to next candidate..."
                 )
-                if resp.status_code != 200:
-                    logger.warning(f"Endpoint {api_url} returned HTTP {resp.status_code}: {resp.text[:200]}")
-                    continue
+                continue
 
-                data = resp.json()
-                choices = data.get("choices") or []
-                if not choices:
-                    continue
+            cleaned = clean_agent_output(raw_content)
 
-                msg = choices[0].get("message") or {}
-                raw_content = msg.get("content") or ""
-
-                # Check if the response is an upstream provider error message
-                if is_provider_error(raw_content):
-                    logger.warning(
-                        f"Endpoint {api_url} returned provider failure: '{raw_content[:120]}'. Failing over to next candidate..."
-                    )
-                    continue
-
-                cleaned = clean_agent_output(raw_content)
-
-                if cleaned:
-                    final_answer = cleaned
-                    logger.info(f"Successfully received response from {api_url} (model={model})")
-                    break
+            if cleaned:
+                final_answer = cleaned
+                logger.info(f"Successfully received response from {api_url} (model={model})")
+                break
 
         except Exception as e:
             logger.warning(f"Endpoint {api_url} failed with error: {e}. Trying next candidate...")

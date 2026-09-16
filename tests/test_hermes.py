@@ -205,3 +205,28 @@ def test_web_reader_and_provider_error_detection():
     assert is_provider_error("Unauthorized: invalid api key") is True
     assert is_provider_error("سلام! پایتون یک زبان برنامه‌نویسی سطح بالاست.") is False
 
+
+def test_persistent_http_client():
+    from agent_engine import get_http_client
+    c1 = get_http_client()
+    c2 = get_http_client()
+    assert c1 is c2
+    assert not c1.is_closed
+
+
+def test_candidate_endpoints_prioritizes_9router():
+    from config import settings, get_candidate_endpoints
+    orig_internal = settings.ROUTER_INTERNAL_BASE_URL
+    orig_hermes = settings.HERMES_ENDPOINT
+    try:
+        settings.ROUTER_INTERNAL_BASE_URL = "http://9router.railway.internal:20128/v1"
+        settings.HERMES_ENDPOINT = "http://hermes-agent.railway.internal:8642/v1"
+        endpoints = get_candidate_endpoints()
+        assert len(endpoints) >= 2
+        # Candidate 1 must be 9router internal
+        assert "9router.railway.internal" in endpoints[0][0]
+    finally:
+        settings.ROUTER_INTERNAL_BASE_URL = orig_internal
+        settings.HERMES_ENDPOINT = orig_hermes
+
+

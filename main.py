@@ -18,7 +18,7 @@ import asyncio
 from typing import Optional, Tuple
 
 from telegram import Update
-from telegram.constants import ParseMode, ChatType
+from telegram.constants import ParseMode, ChatType, ChatAction
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
@@ -93,9 +93,21 @@ async def _deliver_reply(message, final_text: str):
             pass
 
 
+async def _send_typing_loop(bot, chat_id: int):
+    """Periodically sends typing chat action to Telegram while processing query."""
+    try:
+        while True:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            await asyncio.sleep(4.0)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.debug(f"Chat action TYPING error: {e}")
+
+
 async def _process_and_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
     """
-    Dispatches query directly to autonomous agent engine without showing typing animations.
+    Dispatches query directly to autonomous agent engine with active Telegram typing indicator.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -103,6 +115,7 @@ async def _process_and_reply(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if not message or not chat:
         return
 
+    typing_task = asyncio.create_task(_send_typing_loop(context.bot, chat.id))
     try:
         final_answer = await execute_hermes_agent(
             chat_id=chat.id,
@@ -113,6 +126,12 @@ async def _process_and_reply(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except Exception as e:
         logger.error(f"Error executing Prometheus Agent: {e}")
         final_answer = f"❌ متأسفانه خطایی در پردازش پاسخ رخ داد: {str(e)}"
+    finally:
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
 
     await _deliver_reply(message, final_answer)
 
@@ -304,12 +323,16 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def rates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Direct fiat & gold rates lookup."""
+    if update.effective_chat:
+        await update.effective_chat.send_action(ChatAction.TYPING)
     res = await get_fiat_and_gold_rates()
     await _deliver_reply(update.effective_message, res)
 
 
 async def crypto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Direct crypto price lookup."""
+    if update.effective_chat:
+        await update.effective_chat.send_action(ChatAction.TYPING)
     args = context.args or []
     sym = args[0].strip().upper() if args else "BTC"
     res = await get_crypto_price(sym)
@@ -318,12 +341,16 @@ async def crypto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Official time and Jalali calendar lookup."""
+    if update.effective_chat:
+        await update.effective_chat.send_action(ChatAction.TYPING)
     res = get_current_time()
     await _deliver_reply(update.effective_message, res)
 
 
 async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Direct weather lookup."""
+    if update.effective_chat:
+        await update.effective_chat.send_action(ChatAction.TYPING)
     args = context.args or []
     city = " ".join(args).strip() if args else "تهران"
     res = await get_weather(city)
@@ -336,6 +363,8 @@ async def digikala_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await update.effective_message.reply_text("ℹ️ لطفاً نام محصول مورد نظر را وارد کنید. مثال: `/digikala آیفون 16`", parse_mode=ParseMode.MARKDOWN)
         return
+    if update.effective_chat:
+        await update.effective_chat.send_action(ChatAction.TYPING)
     query = " ".join(args).strip()
     res = await search_digikala(query)
     await _deliver_reply(update.effective_message, res)
@@ -437,6 +466,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not cleaned_prompt:
         await message.reply_text("درود بر شما! در خدمتم. چه کمکی از دست پرومته ساخته است؟")
         return
+
+    # Trigger immediate typing action for real-time visual feedback in Telegram
+    try:
+        await chat.send_action(ChatAction.TYPING)
+    except Exception:
+        pass
 
     cleaned_lower = cleaned_prompt.lower()
 

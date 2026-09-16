@@ -103,21 +103,12 @@ def is_admin(user_id: Optional[int]) -> bool:
 def get_candidate_endpoints() -> List[Tuple[str, str, str]]:
     """
     Returns ordered list of (base_url, api_key, model) candidates for resilient failover.
-    Prioritizes Hermes Agent first (autonomous agent brain with native tools),
-    then low-latency internal 9router, then public 9router fallback.
+    Prioritizes ultra low-latency internal 9router first, then public 9router, then Hermes Agent fallback.
     """
     candidates = []
     fast_model = settings.ROUTER_FAST_MODEL or "ag/gemini-3.8-flash-low"
 
-    # 1. Hermes Agent Service (Primary: autonomous agent with native tools)
-    if settings.HERMES_ENDPOINT:
-        candidates.append((
-            settings.HERMES_ENDPOINT.rstrip("/"),
-            settings.HERMES_API_KEY or settings.ROUTER_API_KEY,
-            fast_model
-        ))
-
-    # 2. 9router Internal (Low-latency Railway private network fallback)
+    # 1. 9router Internal (Ultra low-latency Railway private network - 0ms network transit)
     if settings.ROUTER_INTERNAL_BASE_URL:
         candidates.append((
             settings.ROUTER_INTERNAL_BASE_URL.rstrip("/"),
@@ -125,11 +116,19 @@ def get_candidate_endpoints() -> List[Tuple[str, str, str]]:
             fast_model
         ))
 
-    # 3. 9router Public Fallback
+    # 2. 9router Public (Public Railway fallback)
     if settings.ROUTER_BASE_URL:
         candidates.append((
             settings.ROUTER_BASE_URL.rstrip("/"),
             settings.ROUTER_API_KEY,
+            fast_model
+        ))
+
+    # 3. Hermes Agent Service (Fallback)
+    if settings.HERMES_ENDPOINT:
+        candidates.append((
+            settings.HERMES_ENDPOINT.rstrip("/"),
+            settings.HERMES_API_KEY or settings.ROUTER_API_KEY,
             fast_model
         ))
 
@@ -138,11 +137,13 @@ def get_candidate_endpoints() -> List[Tuple[str, str, str]]:
 
 def get_effective_router_url() -> str:
     """Selects the best available API endpoint."""
-    if settings.HERMES_ENDPOINT:
-        return settings.HERMES_ENDPOINT.rstrip("/")
     if settings.ROUTER_INTERNAL_BASE_URL:
         return settings.ROUTER_INTERNAL_BASE_URL.rstrip("/")
-    return settings.ROUTER_BASE_URL.rstrip("/")
+    if settings.ROUTER_BASE_URL:
+        return settings.ROUTER_BASE_URL.rstrip("/")
+    if settings.HERMES_ENDPOINT:
+        return settings.HERMES_ENDPOINT.rstrip("/")
+    return "https://api.openai.com/v1"
 
 
 def get_effective_api_key() -> str:

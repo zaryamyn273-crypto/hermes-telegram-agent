@@ -44,6 +44,62 @@ def _safe_toman(val: Any) -> int:
     return int(digits) // 10
 
 
+async def _fetch_tgju_rates(rates: Dict[str, int]):
+    keys_needed = {
+        "price_dollar_rl": "usd",
+        "price_eur": "eur",
+        "price_aed": "aed",
+        "geram18": "gold18",
+        "sekee": "emami_coin",
+        "sekeb": "bahar_coin",
+        "nim": "half_coin",
+        "rob": "quarter_coin",
+    }
+    buf = ""
+    try:
+        async with httpx.AsyncClient(headers=_FINANCIAL_HEADERS, timeout=5.0, follow_redirects=True) as client:
+            async with client.stream("GET", "https://www.tgju.org/") as resp:
+                if resp.status_code == 200:
+                    async for chunk in resp.aiter_text():
+                        buf += chunk
+                        for tag, label in list(keys_needed.items()):
+                            m = re.search(rf'data-market-row="{tag}"[\s\S]{{1,1500}}?data-price="([^"]+)"', buf)
+                            if m:
+                                rates[label] = _safe_toman(m.group(1))
+                                del keys_needed[tag]
+                        if not keys_needed or len(buf) > 350000:
+                            break
+    except Exception as e:
+        logger.debug(f"TGJU fetch error: {e}")
+
+
+async def _fetch_usdt_rate() -> int:
+    try:
+        async with httpx.AsyncClient(timeout=3.0, headers=_FINANCIAL_HEADERS) as client:
+            wallex_resp = await client.get("https://api.wallex.ir/v1/markets")
+            if wallex_resp.status_code == 200:
+                data = wallex_resp.json()
+                usdt_market = data.get("result", {}).get("symbols", {}).get("USDTTMN", {})
+                last_p = usdt_market.get("stats", {}).get("lastPrice")
+                if last_p:
+                    return int(float(last_p))
+    except Exception as e:
+        logger.debug(f"Wallex fetch error: {e}")
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            nob_resp = await client.get("https://api.nobitex.ir/v2/orderbook/USDTIRT")
+            if nob_resp.status_code == 200:
+                data = nob_resp.json()
+                last_trade = data.get("lastTradePrice")
+                if last_trade:
+                    return int(float(last_trade)) // 10
+    except Exception as e:
+        logger.debug(f"Nobitex fetch error: {e}")
+
+    return 0
+
+
 async def get_fiat_and_gold_rates(force_refresh: bool = False) -> str:
     """
     Fetches live rates for USD, Tether, Euro, Dirham, Gold 18k, and Coins.
@@ -55,61 +111,7 @@ async def get_fiat_and_gold_rates(force_refresh: bool = False) -> str:
             return cached
 
     rates: Dict[str, int] = {}
-
-    # Source 1: TGJU Fast Stream Scrape
-    try:
-        keys_needed = {
-            "price_dollar_rl": "usd",
-            "price_eur": "eur",
-            "price_aed": "aed",
-            "geram18": "gold18",
-            "sekee": "emami_coin",
-            "sekeb": "bahar_coin",
-            "nim": "half_coin",
-            "rob": "quarter_coin",
-        }
-        buf = ""
-        async with httpx.AsyncClient(headers=_FINANCIAL_HEADERS, timeout=7.0, follow_redirects=True) as client:
-            async with client.stream("GET", "https://www.tgju.org/") as resp:
-                if resp.status_code == 200:
-                    async for chunk in resp.aiter_text():
-                        buf += chunk
-                        for tag, label in list(keys_needed.items()):
-                            m = re.search(rf'data-market-row="{tag}"[\s\S]{{1,1500}}?data-price="([^"]+)"', buf)
-                            if m:
-                                rates[label] = _safe_toman(m.group(1))
-                                del keys_needed[tag]
-                        if not keys_needed or len(buf) > 400000:
-                            break
-    except Exception as e:
-        logger.debug(f"TGJU fetch error: {e}")
-
-    # Source 2: Wallex USDT Toman Price
-    tether_toman = 0
-    try:
-        async with httpx.AsyncClient(timeout=4.0, headers=_FINANCIAL_HEADERS) as client:
-            wallex_resp = await client.get("https://api.wallex.ir/v1/markets")
-            if wallex_resp.status_code == 200:
-                data = wallex_resp.json()
-                usdt_market = data.get("result", {}).get("symbols", {}).get("USDTTMN", {})
-                last_p = usdt_market.get("stats", {}).get("lastPrice")
-                if last_p:
-                    tether_toman = int(float(last_p))
-    except Exception as e:
-        logger.debug(f"Wallex fetch error: {e}")
-
-    # Source 3: Nobitex Fallback for USDT
-    if tether_toman == 0:
-        try:
-            async with httpx.AsyncClient(timeout=4.0) as client:
-                nob_resp = await client.get("https://api.nobitex.ir/v2/orderbook/USDTIRT")
-                if nob_resp.status_code == 200:
-                    data = nob_resp.json()
-                    last_trade = data.get("lastTradePrice")
-                    if last_trade:
-                        tether_toman = int(float(last_trade)) // 10
-        except Exception as e:
-            logger.debug(f"Nobitex fetch error: {e}")
+    tether_toman, _ = await asyncio.gather(_fetch_usdt_rate(), _fetch_tgju_rates(rates), return_exceptions=True)
 
     if tether_toman > 0:
         rates["usdt"] = tether_toman
