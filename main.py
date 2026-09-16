@@ -35,6 +35,7 @@ from tools.financial import get_fiat_and_gold_rates, get_crypto_price
 from tools.system import get_current_time, calculate_math
 from tools.weather import get_weather
 from tools.ecommerce import search_digikala
+from tools.web_reader import fetch_webpage_text
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -351,6 +352,17 @@ async def calc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _deliver_reply(update.effective_message, res)
 
 
+async def read_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct webpage reader command."""
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("ℹ️ لطفاً آدرس اینترنتی (URL) مورد نظر را وارد کنید. مثال: `/read https://example.com`", parse_mode=ParseMode.MARKDOWN)
+        return
+    url = args[0].strip()
+    res = await fetch_webpage_text(url)
+    await _deliver_reply(update.effective_message, res)
+
+
 # =========================================================================
 # Main Message Handler with Silence-By-Default Trigger Logic
 # =========================================================================
@@ -508,6 +520,7 @@ def build_application():
     app.add_handler(CommandHandler(["time", "saat"], time_command))
     app.add_handler(CommandHandler(["weather", "hava"], weather_command))
     app.add_handler(CommandHandler(["digikala", "dk"], digikala_command))
+    app.add_handler(CommandHandler(["read", "web", "url"], read_command))
     app.add_handler(CommandHandler(["calc", "hesab"], calc_command))
     app.add_handler(CommandHandler(["clear"], clear_command))
     app.add_handler(CommandHandler(["ping"], ping_command))

@@ -189,3 +189,19 @@ def test_digikala_ecommerce_tool():
     assert clean_digikala_query("قیمت خرید گوشی آیفون 16 از دیجیکالا رو چک کن") == "گوشی آیفون 16"
     assert extract_digikala_query("قیمت آیفون 16 در دیجیکالا") == "آیفون 16"
     assert extract_digikala_query("دیجیکالا لپ تاپ ایسوس") == "لپ تاپ ایسوس"
+
+
+def test_web_reader_and_provider_error_detection():
+    from tools.web_reader import is_safe_public_url
+    from agent_engine import is_provider_error
+
+    assert is_safe_public_url("https://example.com") is True
+    assert is_safe_public_url("http://127.0.0.1:8000") is False
+    assert is_safe_public_url("http://localhost:8080") is False
+    assert is_safe_public_url("http://internal.service.local") is False
+
+    assert is_provider_error("OpenRouter rejected your API key, so the model can't be reached.") is True
+    assert is_provider_error("Provider said: HTTP 401: Missing Authentication header") is True
+    assert is_provider_error("Unauthorized: invalid api key") is True
+    assert is_provider_error("سلام! پایتون یک زبان برنامه‌نویسی سطح بالاست.") is False
+

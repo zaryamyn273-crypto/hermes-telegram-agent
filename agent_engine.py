@@ -2,7 +2,7 @@
 Hermes Agent Core Engine (Prometheus AI):
 Autonomous backend orchestrator connecting Telegram directly to Hermes Agent backend,
 with high-speed private-network 9router failover, multi-tier Cloudflare D1 & KV storage,
-in-memory RAM cache, and strict anti-jailbreak security guardrails.
+in-memory RAM cache, automated webpage reading, and strict anti-jailbreak security guardrails.
 """
 
 import re
@@ -21,12 +21,35 @@ from config import (
     get_effective_model,
 )
 from utils.formatter import strip_thinking
+from tools.web_reader import fetch_webpage_text
 import database
 
 logger = logging.getLogger("HermesAgentEngine")
 
 # Session Conversation History in RAM: chat_id -> List of message dicts
 _SESSIONS: Dict[int, List[Dict[str, Any]]] = {}
+
+# Upstream provider error signatures that trigger instant failover
+_PROVIDER_ERROR_PATTERNS = [
+    "rejected your api key",
+    "missing authentication header",
+    "can't be reached",
+    "unauthorized",
+    "http 401",
+    "invalid api key",
+    "model_not_found",
+    "auth_unavailable",
+    "payment / credit error",
+    "portal not configured",
+]
+
+
+def is_provider_error(text: str) -> bool:
+    """Returns True if the response contains upstream provider/auth failure signatures."""
+    if not text:
+        return True
+    t = text.lower()
+    return any(p in t for p in _PROVIDER_ERROR_PATTERNS)
 
 
 # =========================================================================
@@ -56,7 +79,7 @@ Operating Directives:
 
 4. Autonomous Tools & Capabilities:
 - You are equipped with autonomous tools: real-time web search, browser automation, data extraction, calculations, and analysis.
-- Use your tools autonomously whenever up-to-date information is needed (e.g., currency/dollar rates, cryptocurrency, current events, technical lookups).
+- When webpage content is provided, analyze, summarize, or extract the requested details thoroughly and accurately.
 - Deliver concrete, factual, and verified data.
 
 5. Formatting:
@@ -210,6 +233,7 @@ async def execute_hermes_agent(
     """
     Directly dispatches queries to the Hermes Agent backend with model 'ag/gemini-3.8-flash-low'
     (with private 9router failover), utilizing Cloudflare KV and L1 RAM caching.
+    Automatically handles URL extraction & webpage reading.
     Returns the final synthesized answer promptly without Telegram rate-limit or placeholder bugs.
     """
     # 1. Local Security & Jailbreak Guardrail Check
@@ -217,7 +241,20 @@ async def execute_hermes_agent(
     if violation:
         return violation
 
-    # 2. Check Cache for immediate response on identical standalone queries
+    # 2. Check for URL in prompt and pre-fetch webpage text
+    url_match = re.search(r"https?://[^\s<>\"']+", user_prompt)
+    augmented_prompt = user_prompt
+    if url_match:
+        target_url = url_match.group(0)
+        try:
+            page_text = await fetch_webpage_text(target_url, max_chars=4000)
+            if page_text and not page_text.startswith("⛔"):
+                augmented_prompt = f"{user_prompt}\n\n[محتوای استخراج شده از لینک {target_url}]:\n{page_text}"
+                logger.info(f"Auto-fetched webpage {target_url} for user query ({len(page_text)} chars)")
+        except Exception as err:
+            logger.warning(f"Failed to auto-fetch webpage {target_url}: {err}")
+
+    # 3. Check Cache for immediate response on identical standalone queries
     await ensure_session_history(chat_id)
     history = get_session_history(chat_id)
     cache_key = f"CACHE_PROMPT_{user_prompt.strip().lower()}"
@@ -229,11 +266,16 @@ async def execute_hermes_agent(
             append_to_session(chat_id, "assistant", cached_res, user_id=user_id, username=username)
             return cached_res
 
-    # 3. Append user message to history
+    # 4. Append user message to history
     append_to_session(chat_id, "user", user_prompt, user_id=user_id, username=username)
     current_history = get_session_history(chat_id)
 
-    # 4. Resolve Candidate Endpoints (Hermes Agent first with 3.8-flash-low, then 9router)
+    # Use augmented prompt in current turn messages
+    turn_history = list(current_history)
+    if turn_history and turn_history[-1].get("role") == "user":
+        turn_history[-1] = {"role": "user", "content": augmented_prompt}
+
+    # 5. Resolve Candidate Endpoints (Hermes Agent first with 3.8-flash-low, then 9router)
     candidate_endpoints = get_candidate_endpoints()
     if not candidate_endpoints:
         candidate_endpoints = [(
@@ -244,7 +286,7 @@ async def execute_hermes_agent(
 
     messages = [
         {"role": "system", "content": PROMETHEUS_SYSTEM_PROMPT}
-    ] + current_history
+    ] + turn_history
 
     final_answer: Optional[str] = None
 
@@ -280,6 +322,14 @@ async def execute_hermes_agent(
 
                 msg = choices[0].get("message") or {}
                 raw_content = msg.get("content") or ""
+
+                # Check if the response is an upstream provider error message
+                if is_provider_error(raw_content):
+                    logger.warning(
+                        f"Endpoint {api_url} returned provider failure: '{raw_content[:120]}'. Failing over to next candidate..."
+                    )
+                    continue
+
                 cleaned = clean_agent_output(raw_content)
 
                 if cleaned:
@@ -295,7 +345,7 @@ async def execute_hermes_agent(
         final_answer = "⚠️ در حال حاضر ارتباط با سرویس پردازش هوش مصنوعی برقرار نشد. لطفاً چند لحظه دیگر مجدداً تلاش فرمایید."
         return final_answer
 
-    # 5. Persist to session & cache
+    # 6. Persist to session & cache
     append_to_session(chat_id, "assistant", final_answer, user_id=user_id, username=username)
     await database.kv_set(cache_key, final_answer, ttl_sec=60)
 
