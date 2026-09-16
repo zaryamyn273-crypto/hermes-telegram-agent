@@ -14,6 +14,7 @@ from typing import Optional
 
 from telegram import Update
 from telegram.constants import ParseMode, ChatAction, ChatType
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -24,11 +25,11 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 
 from config import settings, is_admin
-from agent_engine import execute_hermes_agent, clear_session
+from agent_engine import execute_hermes_agent, clear_session, sanitize_identity
 from tools.system import get_current_time, calculate_math
 from tools.weather import get_weather
 from tools.financial import get_crypto_price, get_fiat_and_gold_rates
-from utils.formatter import markdown_to_telegram_html, split_message
+from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
 logging.basicConfig(
@@ -239,52 +240,64 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("درود بر شما! در خدمتم. چه کمکی از دست پرومته ساخته است؟")
         return
 
-    # Send Initial Placeholder
-    placeholder = await message.reply_text("✍️ *در حال تفکر و بررسی...*", parse_mode=ParseMode.MARKDOWN)
+    # Typing indicator background pulse (no placeholder, no cursor animation, fast direct delivery)
+    stop_typing = asyncio.Event()
 
-    # Streaming Update Throttler Callback
-    last_edit_time = 0.0
-    async def on_stream_delta(current_full_text: str):
-        nonlocal last_edit_time
-        now = time.monotonic()
-        if now - last_edit_time < settings.STREAM_EDIT_INTERVAL:
-            return
-        last_edit_time = now
+    async def _typing_pulse():
+        while not stop_typing.is_set():
+            try:
+                await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop_typing.wait(), timeout=3.5)
+            except asyncio.TimeoutError:
+                pass
 
-        try:
-            preview = current_full_text[:3800]
-            await placeholder.edit_text(f"{preview}\n\n▌", parse_mode=None)
-        except Exception:
-            pass
+    typing_task = asyncio.create_task(_typing_pulse())
 
-    # Execute Prometheus Agent with streaming
     try:
-        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
         final_answer = await execute_hermes_agent(
             chat_id=chat.id,
-            user_prompt=cleaned_prompt,
-            on_stream_delta=on_stream_delta
+            user_prompt=cleaned_prompt
         )
     except Exception as e:
         logger.error(f"Error executing Prometheus Agent: {e}")
         final_answer = f"❌ متأسفانه خطایی در پردازش پاسخ رخ داد: {str(e)}"
+    finally:
+        stop_typing.set()
+        try:
+            await typing_task
+        except Exception:
+            pass
 
-    # Deliver final resolved response
+    # Ensure identity sanitation and clean content
+    final_answer = sanitize_identity(final_answer).strip()
+    if not final_answer:
+        final_answer = "درود بر شما! پاسخی برای این پرسش دریافت نشد. لطفاً مجدداً سوال خود را بپرسید."
+
+    # Direct delivery without streaming edits (clean, fast, and no Telegram rate-limit issues)
     try:
         formatted = markdown_to_telegram_html(final_answer)
-        if len(formatted) <= 3900:
+        chunks = split_message(formatted, max_len=3900) if len(formatted) > 3900 else [formatted]
+        for ch in chunks:
             try:
-                await placeholder.edit_text(formatted, parse_mode=ParseMode.HTML)
-            except Exception:
-                await placeholder.edit_text(final_answer[:3900])
-        else:
-            chunks = split_message(formatted, max_len=3900)
-            await placeholder.edit_text(chunks[0], parse_mode=ParseMode.HTML)
-            for ch in chunks[1:]:
                 await message.reply_text(ch, parse_mode=ParseMode.HTML)
+            except Exception as html_err:
+                logger.warning(f"HTML delivery failed ({html_err}), falling back to plain text")
+                plain_ch = strip_thinking(final_answer)[:3900]
+                await message.reply_text(plain_ch)
+    except BadRequest as e:
+        if "not enough rights" in str(e).lower():
+            logger.warning(f"Bot lacks permission to send message in chat {chat.id}: {e}")
+        else:
+            logger.error(f"Telegram BadRequest in response delivery: {e}")
     except Exception as e:
         logger.error(f"Failed to deliver final message: {e}")
-        await message.reply_text(final_answer[:3900])
+        try:
+            await message.reply_text(final_answer[:3900])
+        except Exception:
+            pass
 
 
 # =========================================================================

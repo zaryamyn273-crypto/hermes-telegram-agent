@@ -73,3 +73,22 @@ async def test_execute_tool():
 
     res_time = await execute_tool("get_current_time", {})
     assert "ساعت" in res_time
+
+
+def test_sanitize_identity():
+    from agent_engine import sanitize_identity
+    raw = "من مدل Hermes Agent ساخته شده توسط Nous Research هستم و نام من هرمس است."
+    sanitized = sanitize_identity(raw)
+    assert "Hermes" not in sanitized
+    assert "هرمس" not in sanitized
+    assert "پرومته" in sanitized
+
+
+def test_candidate_endpoints():
+    from config import get_candidate_endpoints
+    candidates = get_candidate_endpoints()
+    assert len(candidates) >= 1
+    # Check that model is fast model
+    for url, key, model in candidates:
+        assert model in ["ag/gemini-3.8-flash-low", "Hermes-3-Llama-3.1-8B"] or "flash" in model
+

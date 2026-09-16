@@ -100,20 +100,60 @@ def is_admin(user_id: Optional[int]) -> bool:
         return False
 
 
+def get_candidate_endpoints() -> List[Tuple[str, str, str]]:
+    """
+    Returns ordered list of (base_url, api_key, model) candidates for resilient failover.
+    Prioritizes low-latency internal 9router, then public 9router, then Hermes service.
+    """
+    candidates = []
+    fast_model = settings.ROUTER_FAST_MODEL or "ag/gemini-3.8-flash-low"
+
+    # 1. 9router Internal (Lowest latency, Railway private network)
+    if settings.ROUTER_INTERNAL_BASE_URL:
+        candidates.append((
+            settings.ROUTER_INTERNAL_BASE_URL.rstrip("/"),
+            settings.ROUTER_API_KEY,
+            fast_model
+        ))
+
+    # 2. 9router Public Fallback
+    if settings.ROUTER_BASE_URL:
+        candidates.append((
+            settings.ROUTER_BASE_URL.rstrip("/"),
+            settings.ROUTER_API_KEY,
+            fast_model
+        ))
+
+    # 3. Hermes Agent Service (if configured)
+    if settings.HERMES_ENDPOINT:
+        candidates.append((
+            settings.HERMES_ENDPOINT.rstrip("/"),
+            settings.HERMES_API_KEY or settings.ROUTER_API_KEY,
+            fast_model
+        ))
+
+    return candidates
+
+
 def get_effective_router_url() -> str:
     """Selects the best available API endpoint."""
-    if settings.HERMES_ENDPOINT:
-        return settings.HERMES_ENDPOINT.rstrip("/")
     if settings.ROUTER_INTERNAL_BASE_URL:
         return settings.ROUTER_INTERNAL_BASE_URL.rstrip("/")
+    if settings.HERMES_ENDPOINT:
+        return settings.HERMES_ENDPOINT.rstrip("/")
     return settings.ROUTER_BASE_URL.rstrip("/")
 
 
 def get_effective_api_key() -> str:
     """Returns the effective API key for LLM requests."""
-    return settings.HERMES_API_KEY or settings.ROUTER_API_KEY or os.getenv("ROUTER_API_KEY", "")
+    return settings.ROUTER_API_KEY or settings.HERMES_API_KEY or os.getenv("ROUTER_API_KEY", "")
 
 
 def get_effective_model() -> str:
-    """Returns the effective LLM model name."""
-    return os.getenv("ROUTER_MODEL") or settings.ROUTER_MODEL or "Hermes-3-Llama-3.1-8B"
+    """Returns the effective fast LLM model name."""
+    if settings.ROUTER_FAST_MODEL:
+        return settings.ROUTER_FAST_MODEL
+    model = os.getenv("ROUTER_MODEL") or settings.ROUTER_MODEL
+    if not model or model.lower() == "high":
+        return "ag/gemini-3.8-flash-low"
+    return model
