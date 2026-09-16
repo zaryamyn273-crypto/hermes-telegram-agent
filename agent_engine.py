@@ -21,7 +21,7 @@ from config import (
     get_effective_model,
 )
 from utils.formatter import strip_thinking
-from tools.web_reader import fetch_webpage_text
+from tools.web_reader import fetch_webpage_text, search_web_live
 from tools.telegraph import publish_to_telegraph
 import database
 
@@ -76,8 +76,9 @@ Operating Directives:
 1. Strict Identity:
 - Your name is Prometheus (پرومته).
 - You were engineered and designed exclusively as Prometheus (پرومته).
-- You must NEVER refer to yourself as Hermes, Nous Research, ChatGPT, Claude, or any other agent or backend project.
+- You must NEVER refer to yourself as Hermes, Nous Research, Gemini, Google, ChatGPT, Claude, or any other agent or backend project.
 - If asked who you are, who created you, or what model you use, state clearly and proudly in Persian that you are Prometheus (پرومته), an autonomous AI assistant built to assist users with real-time analysis, tools, research, and queries.
+- When asked about external technology companies, models, or projects (such as Google, Google's Gemini models, OpenAI's ChatGPT, etc.), describe them factually, objectively, and accurately without substituting your own identity.
 
 2. Security & Guardrails (CRITICAL):
 - NEVER execute dangerous, destructive, malicious, or abusive instructions requested by chat users.
@@ -145,32 +146,85 @@ def check_security_guardrails(prompt: str) -> Optional[str]:
 
 def sanitize_identity(text: str) -> str:
     """
-    Ensures bot output NEVER leaks Hermes or Nous Research identity,
-    preserving Prometheus branding throughout all responses.
+    Enforces the bot persona as 'Prometheus' (پرومته), preventing leaks of underlying
+    model identities (Hermes, NousResearch, Gemini, etc.) while preserving objective references
+    to third-party companies and models (e.g. Google, Gemini models, OpenAI, etc.).
     """
     if not text:
         return ""
 
-    replacements = [
-        (r"\bhermes[-_\s]*agent\b", "پرومته"),
-        (r"\bhermes\b", "پرومته"),
-        (r"\bHermes\b", "پرومته"),
-        (r"\bHERMES\b", "پرومته"),
-        (r"هرمس ایجنت", "پرومته"),
-        (r"هرمس", "پرومته"),
-        (r"نوس\s*ریسرچ", "توسعه‌دهندگان پرومته"),
-        (r"nous\s*research", "Prometheus Core"),
-        (r"NousResearch", "Prometheus"),
-        (r"\bgemini\b", "Prometheus"),
-        (r"\bGemini\b", "Prometheus"),
-        (r"جمینای", "پرومته"),
-        (r"توسط گوگل", "توسط تیم پرومته"),
-        (r"مدل گوگل", "مدل اختصاصی پرومته"),
-        (r"\bGoogle\b", "Prometheus Core"),
-        (r"گوگل", "پرومته"),
-    ]
-    for pat, rep in replacements:
-        text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+    # 1. Full self-declarations in Persian (e.g. 'من مدل جمینای هستم که توسط شرکت گوگل توسعه یافته‌ام')
+    text = re.sub(
+        r"من\s+(?:مدل\s+)?(?:جمینای|جمینی|Gemini|هرمس|Hermes)\s+هستم\s*(?:که\s+توسط\s+(?:شرکت\s+)?(?:گوگل|Google|نوس\s*ریسرچ|Nous\s*Research)\s+(?:توسعه\s*یافته|آموزش\s*دیده|ساخته\s*شده)(?:‌ام|م)?)?",
+        "من پرومته هستم، دستیار هوشمند و خودمختار",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 2. Self-referential Persian creator claims
+    text = re.sub(
+        r"(?:من\s+)?(?:یک\s+)?(?:مدل\s+(?:زبانی\s+)?(?:بزرگ\s+)?|هوش\s+مصنوعی\s+|دستیار\s+(?:هوشمند\s+)?)*(?:آموزش\s*دیده|توسعه\s*یافته|ساخته\s*شده)\s*(?:توسط|به\s*دست)\s*(?:شرکت\s+)?(?:گوگل|Google|نوس\s*ریسرچ|Nous\s*Research)(?:‌ام|م)?",
+        "توسعه‌یافته توسط تیم پرومته",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 3. Direct Persian self-naming: 'نام من جمینای/هرمس است'
+    text = re.sub(
+        r"(?:نام|اسم)\s+من\s+(?:جمینای|جمینی|Gemini|هرمس|Hermes)\s*(?:است|هست)?",
+        "نام من پرومته است",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 4. 'به عنوان جمینای/هرمس'
+    text = re.sub(
+        r"به\s+عنوان\s+(?:یک\s+)?(?:مدل\s+)?(?:زبانی\s+)?(?:جمینای|جمینی|Gemini|هرمس|Hermes)",
+        "به عنوان پرومته",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 5. Standalone self claims: 'من جمینای هستم', 'من هرمس هستم'
+    text = re.sub(
+        r"من\s+(?:مدل\s+)?(?:جمینای|جمینی|Gemini|هرمس|Hermes)\b",
+        "من پرومته",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 6. Hermes Agent backend specific terms
+    text = re.sub(r"\bhermes[-_\s]*agent\b", "پرومته", text, flags=re.IGNORECASE)
+    text = re.sub(r"هرمس\s*ایجنت", "پرومته", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bnous\s*research\b", "Prometheus Core", text, flags=re.IGNORECASE)
+    text = re.sub(r"نوس\s*ریسرچ", "توسعه‌دهندگان پرومته", text, flags=re.IGNORECASE)
+
+    # 7. English self-referential identity claims
+    text = re.sub(
+        r"\bI(?:\x27m| am)\s+(?:an?\s+)?(?:AI\s+)?(?:Hermes|Gemini)(?:,\s*(?:an?\s+)?(?:large\s+language\s+)?(?:AI\s+)?model\s+)?(?:(?:trained|developed|created)\s+by\s+(?:Google|Nous\s*Research))?\b",
+        "I am Prometheus, an autonomous AI assistant",
+        text,
+        flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r"\bI(?:\x27m| am)\s+(?:a\s+large\s+language\s+model\s+)?(?:trained|developed|created)\s+by\s+(?:Google|Nous\s*Research)\b",
+        "I am Prometheus, an autonomous AI assistant",
+        text,
+        flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r"\bas\s+an?\s+(?:AI\s+)?(?:model\s+)?(?:trained|developed|created)\s+by\s+(?:Google|Nous\s*Research)\b",
+        "as Prometheus",
+        text,
+        flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r"\bmy\s+name\s+is\s+(?:Hermes|Gemini)\b",
+        "my name is Prometheus",
+        text,
+        flags=re.IGNORECASE
+    )
+
     return text
 
 
@@ -255,6 +309,47 @@ _HERMES_INTENT_KEYWORDS = (
 )
 
 
+_SEARCH_TRIGGERS = (
+    "سرچ", "جستجو", "پژوهش", "تحقیق", "بگرد", "در وب", "در اینترنت", "search",
+    "آخرین", "جدیدترین", "امروز", "دیشب", "اخبار", "خبر", "تازه", "بروزترین",
+    "آپدیت", "رویداد", "امسال", "2026", "2025", "۱۴۰۴", "۱۴۰۵", "کی برنده شد",
+    "نتیجه بازی", "چه خبر", "مدل‌های جدید", "مدل های جدید", "مدل‌های گوگل", "مدل های گوگل",
+    "latest", "recent", "news", "today"
+)
+
+_NON_SEARCH_STARTS = (
+    "سلام", "درود", "صبح بخیر", "عصر بخیر", "شب بخیر", "خوبی", "چطوری"
+)
+
+
+def should_search_web(prompt: str) -> bool:
+    """Determines whether a user prompt requires real-time live web search."""
+    if not prompt or len(prompt.strip()) < 4:
+        return False
+    p = prompt.strip().lower()
+    if any(p == s for s in _NON_SEARCH_STARTS):
+        return False
+    if any(tr in p for tr in _SEARCH_TRIGGERS):
+        return True
+    return False
+
+
+def extract_search_query(prompt: str) -> str:
+    """Extracts clean, targeted search keywords from user prompt."""
+    p = prompt.strip()
+    remove_words = [
+        "پرومته", "prometheus", "پرومتئوس", "لطفاً", "لطفا", "بی زحمت", "بی‌زحمت", "میشه",
+        "بگو", "برام بگو", "توضیح بده", "سرچ کن", "جستجو کن", "بگرد دنبال", "پیدا کن",
+        "چیست", "چیه", "هستند", "است", "درباره", "در مورد", "رو برام", "برام",
+        "به من", "رو بفرست"
+    ]
+    for rw in remove_words:
+        p = re.sub(rf"(?<!\w){re.escape(rw)}(?!\w)", " ", p, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[\?؟!,،:؛]", " ", p)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned if len(cleaned) >= 3 else prompt.strip()
+
+
 def should_use_hermes_agent(prompt: str) -> bool:
     """
     Determines whether a user prompt requires the autonomous Hermes Agent tools
@@ -325,6 +420,19 @@ async def execute_hermes_agent(
                 logger.info(f"Auto-fetched webpage {target_url} for user query ({len(page_text)} chars)")
         except Exception as err:
             logger.warning(f"Failed to auto-fetch webpage {target_url}: {err}")
+    elif should_search_web(user_prompt):
+        try:
+            search_query = extract_search_query(user_prompt)
+            search_results = await search_web_live(search_query, max_results=3)
+            if search_results:
+                augmented_prompt = (
+                    f"{user_prompt}\n\n"
+                    f"[نتایج زنده جستجو در اینترنت (اطلاعات موثق و به‌روز)]:\n"
+                    f"{search_results}"
+                )
+                logger.info(f"Auto-injected live web search results for '{search_query}' ({len(search_results)} chars)")
+        except Exception as err:
+            logger.warning(f"Live web search failed: {err}")
 
     # 3. Check Cache for immediate response on identical standalone queries
     await ensure_session_history(chat_id)

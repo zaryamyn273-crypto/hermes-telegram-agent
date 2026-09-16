@@ -782,8 +782,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_username:
         cleaned_prompt = re.sub(rf"@{re.escape(bot_username)}", "", cleaned_prompt, flags=re.IGNORECASE)
     for name in ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس", "پرومتـه"]:
-        cleaned_prompt = re.sub(rf"\b{re.escape(name)}\b", "", cleaned_prompt, flags=re.IGNORECASE)
-    cleaned_prompt = cleaned_prompt.strip()
+        cleaned_prompt = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "", cleaned_prompt, flags=re.IGNORECASE)
+    cleaned_prompt = cleaned_prompt.lstrip("،, :!-؟?").strip()
 
     if not cleaned_prompt:
         await message.reply_text("درود بر شما! در خدمتم. چه کمکی از دست پرومته ساخته است؟")

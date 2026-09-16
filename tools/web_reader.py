@@ -5,6 +5,7 @@ Strips scripts, ads, trackers, styles, and junk HTML, returning pure readable co
 Protected by SSRF guardrails and backed by persistent keepalive connection pooling, L1 RAM, and Cloudflare KV caching.
 """
 
+import os
 import re
 import ipaddress
 import urllib.parse
@@ -15,6 +16,7 @@ from bs4 import BeautifulSoup
 from typing import Optional
 
 import database
+from config import settings
 
 logger = logging.getLogger("WebReader")
 
@@ -134,3 +136,62 @@ async def fetch_webpage_text(url: str, max_chars: int = 5000) -> str:
     except Exception as e:
         logger.warning(f"Error fetching URL {clean_url}: {e}")
         return f"⚠️ امکان بازخوانی محتوای این صفحه وجود ندارد: {str(e)}"
+
+
+# =========================================================================
+# Live Web Search (Tavily Multi-Key Engine with L1 RAM Cache)
+# =========================================================================
+
+async def search_web_live(query: str, max_results: int = 3) -> Optional[str]:
+    """
+    Executes an ultra-fast live web search using Tavily API with key rotation and L1 cache.
+    Returns clean, structured Persian summary with sources and citations.
+    """
+    clean_q = query.strip()
+    if not clean_q or len(clean_q) < 3:
+        return None
+
+    cache_key = f"SEARCH_CACHE_{clean_q.lower()}"
+    cached = database.l1_get(cache_key)
+    if cached:
+        return cached
+
+    # Parse Tavily API Keys from config
+    keys_raw = getattr(settings, "TAVILY_API_KEYS", "") or os.getenv("TAVILY_API_KEYS", "")
+    keys = [k.strip() for k in keys_raw.split(",") if k.strip()]
+    if not keys:
+        logger.warning("No TAVILY_API_KEYS configured for live web search.")
+        return None
+
+    client = get_web_client()
+    for key in keys:
+        try:
+            r = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": key,
+                    "query": clean_q,
+                    "max_results": max_results,
+                    "search_depth": "basic",
+                },
+                timeout=3.5
+            )
+            if r.status_code == 200:
+                data = r.json()
+                results = data.get("results") or []
+                if results:
+                    snippets = []
+                    for idx, res in enumerate(results[:max_results], 1):
+                        title = res.get("title") or "منبع"
+                        content = res.get("content") or ""
+                        url = res.get("url") or ""
+                        clean_c = re.sub(r"\s+", " ", content).strip()[:250]
+                        snippets.append(f"[{idx}] {title}\n{clean_c}\n🔗 {url}")
+                    summary = "\n\n".join(snippets)
+                    database.l1_set(cache_key, summary, ttl_sec=600)
+                    return summary
+        except Exception as e:
+            logger.debug(f"Tavily search attempt failed: {e}")
+            continue
+
+    return None

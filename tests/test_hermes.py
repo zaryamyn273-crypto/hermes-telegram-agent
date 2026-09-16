@@ -68,7 +68,12 @@ def test_clean_agent_output():
     assert "<think>" not in out
     assert "tool_call" not in out
     assert "Hermes" not in out
-    assert "پرومته" in out
+    assert "Prometheus" in out
+
+    raw_fa = "<think>بررسی</think>[tool_call: search]من مدل هرمس هستم."
+    out_fa = clean_agent_output(raw_fa)
+    assert "هرمس" not in out_fa
+    assert "پرومته" in out_fa
 
 
 def test_security_guardrails():
@@ -386,6 +391,29 @@ def test_identity_sanitizer_gemini_and_google():
     assert "پرومته" in clean
 
 
+def test_identity_sanitizer_preserves_objective_google_and_gemini():
+    # When user or bot discusses Google models objectively, Google and Gemini MUST be preserved!
+    raw = "آخرین مدل‌های هوش مصنوعی شرکت گوگل شامل Gemini 1.5 Pro و Gemini 2.0 Flash هستند."
+    clean = sanitize_identity(raw)
+    assert "گوگل" in clean
+    assert "Gemini 1.5 Pro" in clean
+    assert "Gemini 2.0 Flash" in clean
+    assert "پرومته" not in clean
+
+    raw_en = "Google officially launched Gemini 2.0 Flash with advanced multimodal capabilities."
+    clean_en = sanitize_identity(raw_en)
+    assert "Google" in clean_en
+    assert "Gemini" in clean_en
+
+
+def test_identity_sanitizer_preserves_mythology_and_brands():
+    # Mythological Hermes or fashion brands must not be blindly replaced
+    raw = "هرمس در اساطیر یونان باستان خدای پیام‌رسان و حامی مسافران است."
+    clean = sanitize_identity(raw)
+    assert "هرمس" in clean
+    assert "پرومته" not in clean
+
+
 def test_extract_fiat_target():
     from main import extract_fiat_target
 
@@ -497,6 +525,20 @@ async def test_live_speed_test():
     assert "میلی‌ثانیه" in report
 
 
+def test_should_search_web_and_extract_search_query():
+    from agent_engine import should_search_web, extract_search_query
 
+    # Search triggers
+    assert should_search_web("آخرین مدل های گوگل چیه؟") is True
+    assert extract_search_query("آخرین مدل های گوگل چیه؟") == "آخرین مدل های گوگل"
 
+    assert should_search_web("اخبار جدید هوش مصنوعی امروز رو برام سرچ کن") is True
+    assert extract_search_query("اخبار جدید هوش مصنوعی امروز رو برام سرچ کن") == "اخبار جدید هوش مصنوعی امروز"
 
+    assert should_search_web("نتیجه بازی دیشب رئال مادرید چند چند شد") is True
+    assert should_search_web("جدیدترین قیمت خودرو در بازار") is True
+
+    # Non-search triggers
+    assert should_search_web("سلام چطوری") is False
+    assert should_search_web("درود") is False
+    assert should_search_web("یک تابع فیبوناچی در پایتون بنویس") is False
