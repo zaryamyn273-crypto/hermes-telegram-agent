@@ -5,7 +5,7 @@ Uses Pydantic if available, otherwise falls back seamlessly to standard dataclas
 """
 
 import os
-from typing import Set, Optional, List
+from typing import Set, Optional, List, Tuple
 
 try:
     from pydantic_settings import BaseSettings
