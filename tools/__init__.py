@@ -8,6 +8,13 @@ from .weather import get_weather
 from .ecommerce import search_digikala
 from .web_reader import fetch_webpage_text
 from .telegraph import create_telegraph_article, publish_to_telegraph, extract_telegraph_args
+from .music import (
+    clean_music_query,
+    search_music_track,
+    is_music_request,
+    extract_music_query,
+    handle_music_request,
+)
 
 __all__ = [
     "get_fiat_and_gold_rates",
@@ -20,4 +27,9 @@ __all__ = [
     "create_telegraph_article",
     "publish_to_telegraph",
     "extract_telegraph_args",
+    "clean_music_query",
+    "search_music_track",
+    "is_music_request",
+    "extract_music_query",
+    "handle_music_request",
 ]

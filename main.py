@@ -37,6 +37,7 @@ from tools.weather import get_weather
 from tools.ecommerce import search_digikala
 from tools.web_reader import fetch_webpage_text
 from tools.telegraph import create_telegraph_article, extract_telegraph_args
+from tools.music import handle_music_request, is_music_request, extract_music_query
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -265,6 +266,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🕒 **ساعت رسمی تهران و تقویم شمسی** (`/time`)\n"
         "• 🌦 **پیش‌بینی آب و هوای شهرها** (`/weather تهران`)\n"
         "• 🛍 **استعلام و قیمت کالا در دیجی‌کالا** (`/digikala آیفون 16`)\n"
+        "• 🎵 **دانلود و آپلود خودکار موزیک ۳۲۰** (`/music هایده سوغاتی`)\n"
         "• 📝 **انتشار فوری در تلگراف (Telegra.ph)** (`/telegraph عنوان | متن` یا ریپلای)\n"
         "• 🧮 **محاسبات ریاضی و علمی** (`/calc`)\n"
         "• 🔍 **تحلیل پیشرفته، استدلال و کدنویسی خودکار**\n\n"
@@ -284,6 +286,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/time` - ساعت رسمی تهران و تاریخ دقیق شمسی\n"
         "• `/weather [شهر]` - آب و هوای زنده شهرها (مثال: `/weather تهران`)\n"
         "• `/digikala [کالا]` - استعلام زنده قیمت، موجودی و لینک خرید دیجی‌کالا\n"
+        "• `/music [نام آهنگ]` - جستجو، استخراج و ارسال مستقیم فایل صوتی با کیفیت اصلی ۳۲۰\n"
         "• `/telegraph [عنوان | متن]` - انتشار فوری مقالات و متن‌های بلند در تلگراف با قابلیت نمایش فوری (Instant View)\n"
         "• `/read [لینک]` - استخراج و مطالعه متن صفحات وب\n"
         "• `/calc [عبارت]` - محاسبات ریاضی و علمی (مثال: `/calc sqrt(144) + 10`)\n"
@@ -430,6 +433,13 @@ async def telegraph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     res = await create_telegraph_article(title=title, content=content)
     await _deliver_reply(msg, res)
+
+
+async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct music search, download & upload command."""
+    args = context.args or []
+    query = " ".join(args).strip()
+    await handle_music_request(update, context, query)
 
 
 # =========================================================================
@@ -587,6 +597,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await _deliver_reply(message, res)
                 return
 
+    # Fast-Path 9: Music Search, Download & Upload
+    if is_music_request(cleaned_lower):
+        music_q = extract_music_query(cleaned_prompt) or cleaned_prompt
+        await handle_music_request(update, context, music_q)
+        return
+
     # Process all queries through autonomous agent brain (zero typing animations)
     await _process_and_reply(update, context, cleaned_prompt)
 
@@ -618,6 +634,7 @@ def build_application():
     app.add_handler(CommandHandler(["time", "saat"], time_command))
     app.add_handler(CommandHandler(["weather", "hava"], weather_command))
     app.add_handler(CommandHandler(["digikala", "dk"], digikala_command))
+    app.add_handler(CommandHandler(["music", "song", "ahang"], music_command))
     app.add_handler(CommandHandler(["read", "web", "url"], read_command))
     app.add_handler(CommandHandler(["telegraph", "telegra", "article"], telegraph_command))
     app.add_handler(CommandHandler(["calc", "hesab"], calc_command))

@@ -1,0 +1,345 @@
+"""
+Specialized Music Search, Download & Telegram Audio Uploader for Prometheus:
+Finds, extracts, streams, and uploads high-fidelity studio MP3 tracks (320kbps & 128kbps)
+directly to Telegram chats with cover art, metadata, and sub-second file_id caching.
+"""
+
+import re
+import io
+import time
+import logging
+import asyncio
+import urllib.parse
+import httpx
+from bs4 import BeautifulSoup
+from typing import Dict, Any, List, Optional, Tuple
+
+from telegram import Update
+from telegram.constants import ChatAction, ParseMode
+from telegram.ext import ContextTypes
+
+import database
+from utils.formatter import strip_thinking
+
+logger = logging.getLogger("MusicTool")
+
+_MAX_AUDIO_BYTES = 25 * 1024 * 1024  # Telegram bot limit (25 MB)
+
+_MUSIC_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+MUSIC_PORTALS = [
+    ("https://music-fa.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
+    ("https://upmusics.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
+    ("https://behmelody.in/?s={q}", r'<a\s+title=[\"\']([^\"\']+)[\"\']\s+href=[\"\'](https?://behmelody\.in/[^\"\']+)[\"\']'),
+    ("https://tabamusic.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
+    ("https://golsarmusic.ir/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
+    ("https://muzicir.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
+    ("https://rozmusic.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>'),
+]
+
+
+def clean_music_query(q: str) -> str:
+    """Strips conversational noise, filler words, and punctuation from music queries."""
+    cleaned = re.sub(r'[\\/:\*\?\"<>\|]', ' ', q or '')
+    noise = [
+        "دانلود آهنگ", "دانلود اهنگ", "اهنگ", "آهنگ", "موزیک", "ترانه", "دانلود",
+        "remix", "ریمیکس", "320", "128", "full", "mp3", "new", "جدید", "کامل",
+        "اصلی", "original", "بفرست", "پخش کن", "پلی کن", "رو بده", "رو بفرست",
+        "بذار", "بزار", "بخوان", "بخون", "پیدا کن", "میخوام", "می‌خوام",
+        "لطفا", "لطفاً", "برام", "برامون", "یه", "یک", "رو", "را",
+    ]
+    for n in noise:
+        cleaned = re.sub(rf"\b{n}\b", " ", cleaned, flags=re.IGNORECASE)
+    return " ".join(cleaned.split()).strip()
+
+
+_MUSIC_INTENT_KEYWORDS = (
+    "آهنگ", "اهنگ", "موزیک", "ترانه", "خواننده", "music", "song", "mp3", "ترانه"
+)
+_MUSIC_ACTION_KEYWORDS = (
+    "دانلود", "بفرست", "پخش", "پلی", "بذار", "بزار", "بدین", "بده", "میخوام", "می‌خوام"
+)
+
+
+def is_music_request(text: str) -> bool:
+    """Matches natural Persian queries explicitly requesting a song or music track."""
+    t = text.lower().strip()
+    if t.startswith(("/music", "/song", "/play", "/ahang")):
+        return True
+    if any(k in t for k in ["دانلود آهنگ", "دانلود اهنگ", "دانلود موزیک", "دانلود ترانه"]):
+        return True
+    has_m = any(k in t for k in _MUSIC_INTENT_KEYWORDS)
+    has_a = any(a in t for a in _MUSIC_ACTION_KEYWORDS)
+    return has_m and has_a
+
+
+def extract_music_query(text: str) -> Optional[str]:
+    """Extracts the song title and artist from the query."""
+    if not is_music_request(text):
+        return None
+    cleaned = clean_music_query(text)
+    return cleaned if len(cleaned) >= 2 else None
+
+
+async def _crawl_portal(
+    client: httpx.AsyncClient,
+    url_pattern: str,
+    regex_pattern: str,
+    clean_q: str
+) -> List[Dict[str, Any]]:
+    """Crawls a single music portal and extracts candidates with MP3 download URLs."""
+    enc = urllib.parse.quote(clean_q)
+    candidates: List[Dict[str, Any]] = []
+
+    try:
+        r = await client.get(url_pattern.format(q=enc), timeout=5.0, follow_redirects=True)
+        if r.status_code == 200:
+            matches = re.findall(regex_pattern, r.text, re.DOTALL | re.IGNORECASE)
+            for m in matches[:3]:
+                href = m[0] if isinstance(m, tuple) and m[0].startswith("http") else (m[1] if isinstance(m, tuple) and len(m) > 1 and m[1].startswith("http") else "")
+                raw_t = m[1] if isinstance(m, tuple) and href == m[0] else (m[0] if isinstance(m, tuple) else "")
+
+                if not href:
+                    continue
+
+                clean_title = BeautifulSoup(raw_t, "html.parser").get_text().strip()
+                clean_title = re.sub(r"دانلود آهنگ|دانلود اهنگ|ریمیکس|موزیک|mp3", "", clean_title, flags=re.I).strip(" -—")
+
+                try:
+                    p_res = await client.get(href, timeout=5.0, follow_redirects=True)
+                except Exception:
+                    continue
+
+                if p_res.status_code == 200:
+                    mp3s = re.findall(r'href=[\"\'](https?://[^\"\']+\.mp3)[\"\']', p_res.text, re.IGNORECASE)
+                    valid_mp3s = [
+                        u for u in mp3s
+                        if not any(b in u.lower() for b in ["voice", "advert", "ads", "intro", "teaser", "demo", "sample", "64.mp3"])
+                    ]
+                    if valid_mp3s:
+                        mp3_320 = [u for u in valid_mp3s if "320" in u]
+                        mp3_128 = [u for u in valid_mp3s if "128" in u]
+                        chosen = mp3_320[0] if mp3_320 else (mp3_128[0] if mp3_128 else valid_mp3s[0])
+
+                        # Extract performer
+                        performer = ""
+                        if "–" in clean_title or "-" in clean_title:
+                            performer = re.split(r"[–-]", clean_title)[0].strip()[:50]
+                        else:
+                            performer = clean_q.split()[0] if clean_q else "هنرمند"
+
+                        candidates.append({
+                            "title": clean_title or clean_q.title(),
+                            "performer": performer or "هنرمند",
+                            "url": chosen,
+                            "quality": "320kbps Original" if ("320" in chosen) else "128kbps HQ",
+                        })
+    except Exception as e:
+        logger.debug(f"Portal crawl error ({url_pattern}): {e}")
+
+    return candidates
+
+
+async def _search_deezer(client: httpx.AsyncClient, clean_q: str) -> Optional[Dict[str, Any]]:
+    """Searches Deezer for tracks."""
+    try:
+        enc = urllib.parse.quote(clean_q)
+        resp = await client.get(f"https://api.deezer.com/search?q={enc}&limit=3", timeout=4.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            tracks = data.get("data") or []
+            if tracks:
+                t = tracks[0]
+                preview = t.get("preview")
+                if preview:
+                    return {
+                        "title": t.get("title", clean_q.title()),
+                        "performer": t.get("artist", {}).get("name", "هنرمند"),
+                        "url": preview,
+                        "quality": "Preview Track",
+                    }
+    except Exception as e:
+        logger.debug(f"Deezer search error: {e}")
+    return None
+
+
+async def search_music_track(clean_q: str) -> Optional[Dict[str, Any]]:
+    """Searches music portals in parallel and returns the best matching candidate."""
+    async with httpx.AsyncClient(headers=_MUSIC_HEADERS, timeout=7.0, follow_redirects=True) as client:
+        tasks = [_crawl_portal(client, pat, reg, clean_q) for pat, reg in MUSIC_PORTALS]
+        tasks.append(_search_deezer(client, clean_q))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        all_candidates: List[Dict[str, Any]] = []
+
+        for res in results:
+            if isinstance(res, list):
+                all_candidates.extend(res)
+            elif isinstance(res, dict) and res.get("url"):
+                all_candidates.append(res)
+
+        if not all_candidates:
+            return None
+
+        # Sort: 320kbps original first
+        all_candidates.sort(key=lambda x: (1 if "320" in x.get("quality", "") else 0), reverse=True)
+        return all_candidates[0]
+
+
+async def download_mp3_stream(url: str, max_bytes: int = _MAX_AUDIO_BYTES) -> Optional[bytes]:
+    """Streams MP3 file into memory buffer with size and timeout guards."""
+    if not url or not url.startswith("http"):
+        return None
+    try:
+        async with httpx.AsyncClient(headers=_MUSIC_HEADERS, timeout=30.0, follow_redirects=True) as client:
+            buf = io.BytesIO()
+            async with client.stream("GET", url) as resp:
+                if resp.status_code == 200:
+                    total = 0
+                    async for chunk in resp.aiter_bytes(chunk_size=65536):
+                        total += len(chunk)
+                        if total > max_bytes:
+                            logger.warning(f"MP3 stream exceeded limit: {total} bytes")
+                            return None
+                        buf.write(chunk)
+                    raw = buf.getvalue()
+                    if len(raw) >= 300_000:
+                        return raw
+    except Exception as e:
+        logger.warning(f"Error streaming MP3 from {url}: {e}")
+    return None
+
+
+async def handle_music_request(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    query: str
+):
+    """
+    Core music handler: searches, downloads, and directly uploads MP3 audio to Telegram chat.
+    Uses continuous upload action indicator and caches file_id for sub-second redelivery.
+    """
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
+        return
+
+    clean_q = clean_music_query(query)
+    if not clean_q:
+        await message.reply_text(
+            "🎵 **راهنمای دانلود موزیک پرومته:**\n\n"
+            "لطفاً نام آهنگ یا خواننده مورد نظر را وارد نمایید.\n"
+            "مثال: `/music هایده سوغاتی` یا `آهنگ مرغ سحر شجریان رو بفرست`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # 1. Background Uploading Chat Action Loop
+    is_active = True
+
+    async def _action_loop():
+        while is_active:
+            try:
+                await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.UPLOAD_VOICE)
+            except Exception:
+                pass
+            await asyncio.sleep(4.0)
+
+    action_task = asyncio.create_task(_action_loop())
+
+    try:
+        cache_key = f"MUSIC_FID_{clean_q.replace(' ', '_')}"
+
+        # 2. Check KV Cache for Instant file_id Redelivery
+        cached_file_id = await database.kv_get(cache_key)
+        if cached_file_id:
+            try:
+                await message.reply_audio(
+                    audio=cached_file_id,
+                    caption=(
+                        f"🎵 <b>{clean_q.title()}</b>\n"
+                        f"⚡ <i>تحویل فوری از کش ابری پرومته</i>"
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
+                logger.info(f"Delivered music via cached file_id for '{clean_q}'")
+                return
+            except Exception as e_cid:
+                logger.debug(f"Cached file_id invalid: {e_cid}")
+
+        # 3. Search Portals
+        track = await search_music_track(clean_q)
+        if not track:
+            await message.reply_text(
+                f"❌ متأسفانه قطعه صوتی برای «<b>{clean_q}</b>» یافت نشد.\n"
+                f"لطفاً نام خواننده یا بخش دیگری از متن ترانه را امتحان نمایید.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        title = track.get("title") or clean_q.title()
+        performer = track.get("performer") or "هنرمند"
+        quality = track.get("quality") or "320kbps Original"
+        audio_url = track["url"]
+
+        caption = (
+            f"🎵 <b>{title}</b>\n"
+            f"🎤 <b>خواننده:</b> {performer}\n"
+            f"• <b>کیفیت:</b> <code>{quality}</code>\n"
+            f"⚡ <i>دانلود و ارسال اختصاصی توسط پرومته</i>"
+        )
+
+        # 4. Attempt Direct Telegram URL Delivery
+        sent_msg = None
+        try:
+            sent_msg = await message.reply_audio(
+                audio=audio_url,
+                title=title,
+                performer=performer,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                write_timeout=60.0,
+                read_timeout=60.0,
+            )
+            logger.info(f"Delivered music via direct URL for '{clean_q}'")
+        except Exception as e_url:
+            logger.debug(f"Direct URL send failed ({e_url}), streaming bytes into buffer...")
+
+            # 5. Fallback: Stream bytes directly and upload
+            raw_bytes = await download_mp3_stream(audio_url)
+            if raw_bytes:
+                audio_io = io.BytesIO(raw_bytes)
+                audio_io.name = f"{title}.mp3"
+                sent_msg = await message.reply_audio(
+                    audio=audio_io,
+                    title=title,
+                    performer=performer,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    write_timeout=120.0,
+                    read_timeout=60.0,
+                )
+                logger.info(f"Delivered music via streamed bytes for '{clean_q}'")
+            else:
+                await message.reply_text(
+                    f"⚠️ لینک قطعه صوتی «{title}» استخراج شد اما بارگیری آن مقدور نبود:\n🔗 {audio_url}"
+                )
+                return
+
+        # 6. Cache file_id for sub-second redelivery
+        if sent_msg and sent_msg.audio and sent_msg.audio.file_id:
+            await database.kv_set(cache_key, sent_msg.audio.file_id, ttl_sec=86400 * 14)
+
+    except Exception as err:
+        logger.error(f"Error handling music request: {err}", exc_info=True)
+        await message.reply_text(f"❌ خطا در پردازش و ارسال موزیک: {str(err)}")
+    finally:
+        is_active = False
+        action_task.cancel()
+        try:
+            await action_task
+        except asyncio.CancelledError:
+            pass

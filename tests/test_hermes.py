@@ -273,4 +273,21 @@ def test_telegraph_arg_extractor():
     assert "خط دوم" in c2
 
 
+def test_music_query_cleaner_and_intent():
+    from tools.music import clean_music_query, is_music_request, extract_music_query
+
+    # Intent detection
+    assert is_music_request("دانلود آهنگ سوغاتی هایده") is True
+    assert is_music_request("موزیک مرغ سحر شجریان رو بفرست") is True
+    assert is_music_request("/music homayoun shajarian") is True
+    assert is_music_request("آهنگ جدید شادمهر رو دانلود کن") is True
+    assert is_music_request("سلام چطوری؟") is False
+    assert is_music_request("قیمت دلار چنده") is False
+
+    # Cleaner & extractor
+    assert clean_music_query("دانلود آهنگ سوغاتی هایده رو برام بفرست 320") == "سوغاتی هایده"
+    assert extract_music_query("آهنگ مرغ سحر از شجریان رو بذار") is not None
+
+
+
 
