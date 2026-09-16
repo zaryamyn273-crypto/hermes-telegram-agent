@@ -1,7 +1,8 @@
 """
 Test suite for Prometheus (Hermes Telegram Agent).
-Verifies identity sanitization, security guardrails, in-memory RAM caching,
-RAM session history, endpoint configuration, and message formatting.
+Verifies identity sanitization, security guardrails, Cloudflare L1/KV storage,
+specialized tools (time, math, financial parsing), candidate endpoints (3.8 low),
+and message formatting.
 """
 
 import pytest
@@ -10,11 +11,13 @@ from agent_engine import (
     sanitize_identity,
     clean_agent_output,
     check_security_guardrails,
-    RAMCache,
     get_session_history,
     append_to_session,
     clear_session,
 )
+import database
+from tools.system import get_current_time, calculate_math
+from tools.financial import _safe_toman
 from utils.formatter import markdown_to_telegram_html, strip_thinking, split_message
 from config import get_candidate_endpoints, settings
 
@@ -76,21 +79,17 @@ def test_security_guardrails():
     assert check_security_guardrails("یک کد پایتون برای مرتب سازی بنویس") is None
 
 
-def test_ram_cache():
-    cache = RAMCache(default_ttl=1.0)
-    cache.set("foo", "bar")
-    assert cache.get("foo") == "bar"
-    assert cache.get("nonexistent") is None
+def test_l1_storage_and_cache():
+    database.l1_set("test_k", "test_v", ttl_sec=2)
+    assert database.l1_get("test_k") == "test_v"
+    assert database.l1_get("non_existent_k") is None
 
-    # Test TTL expiration
-    cache.set("quick", "val", ttl=0.1)
-    assert cache.get("quick") == "val"
-    time.sleep(0.15)
-    assert cache.get("quick") is None
+    database.l1_delete("test_k")
+    assert database.l1_get("test_k") is None
 
 
 def test_session_history():
-    test_chat = 999999
+    test_chat = 888888
     clear_session(test_chat)
     assert len(get_session_history(test_chat)) == 0
 
@@ -105,9 +104,27 @@ def test_session_history():
     assert len(get_session_history(test_chat)) == 0
 
 
-def test_candidate_endpoints_order():
+def test_system_and_time_tool():
+    res = get_current_time()
+    assert "ساعت" in res or "زمان" in res
+
+    math_res = calculate_math("25 * 4 + 10")
+    assert "110" in math_res
+
+    math_sqrt = calculate_math("sqrt(144)")
+    assert "12" in math_sqrt
+
+
+def test_safe_toman_parser():
+    # 650,000 Rials -> 65,000 Tomans
+    assert _safe_toman("650,000") == 65000
+    assert _safe_toman("۶۵۰٬۰۰۰") == 65000
+    assert _safe_toman("invalid") == 0
+
+
+def test_candidate_endpoints_model_is_3_8_low():
     candidates = get_candidate_endpoints()
     assert len(candidates) >= 1
-    # Check that endpoints are present
     for url, key, model in candidates:
         assert url.startswith("http")
+        assert model == "ag/gemini-3.8-flash-low"

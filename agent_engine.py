@@ -1,8 +1,8 @@
 """
 Hermes Agent Core Engine (Prometheus AI):
 Autonomous backend orchestrator connecting Telegram directly to Hermes Agent backend,
-with high-speed private-network 9router failover, in-memory RAM session management,
-smart RAM caching, and strict anti-jailbreak security guardrails.
+with high-speed private-network 9router failover, multi-tier Cloudflare D1 & KV storage,
+in-memory RAM cache, and strict anti-jailbreak security guardrails.
 """
 
 import re
@@ -21,48 +21,12 @@ from config import (
     get_effective_model,
 )
 from utils.formatter import strip_thinking
+import database
 
 logger = logging.getLogger("HermesAgentEngine")
 
 # Session Conversation History in RAM: chat_id -> List of message dicts
 _SESSIONS: Dict[int, List[Dict[str, Any]]] = {}
-
-
-# =========================================================================
-# In-Memory RAM Cache (Thread-safe with TTL)
-# =========================================================================
-
-class RAMCache:
-    """Thread-safe in-memory RAM cache with sliding TTL."""
-    def __init__(self, default_ttl: float = 60.0, max_entries: int = 500):
-        self.default_ttl = default_ttl
-        self.max_entries = max_entries
-        self._cache: Dict[str, Tuple[float, str]] = {}
-
-    def get(self, key: str) -> Optional[str]:
-        now = time.monotonic()
-        if key in self._cache:
-            expire_at, val = self._cache[key]
-            if now < expire_at:
-                return val
-            else:
-                self._cache.pop(key, None)
-        return None
-
-    def set(self, key: str, value: str, ttl: Optional[float] = None):
-        expire_at = time.monotonic() + (ttl if ttl is not None else self.default_ttl)
-        self._cache[key] = (expire_at, value)
-        if len(self._cache) > self.max_entries:
-            now = time.monotonic()
-            expired_keys = [k for k, (exp, _) in self._cache.items() if now >= exp]
-            for k in expired_keys:
-                self._cache.pop(k, None)
-
-    def clear(self):
-        self._cache.clear()
-
-
-_RAM_CACHE = RAMCache(default_ttl=45.0)
 
 
 # =========================================================================
@@ -183,29 +147,54 @@ def clean_agent_output(text: str) -> str:
 
 
 # =========================================================================
-# RAM Session History Management
+# Session History Management (RAM + Cloudflare D1 Sync)
 # =========================================================================
 
+async def ensure_session_history(chat_id: int) -> List[Dict[str, Any]]:
+    """Loads session history from Cloudflare D1 into RAM if cold."""
+    if chat_id not in _SESSIONS:
+        try:
+            d1_history = await database.load_session_history_from_d1(chat_id, limit=settings.MAX_SESSION_HISTORY)
+            _SESSIONS[chat_id] = d1_history
+        except Exception:
+            _SESSIONS[chat_id] = []
+    return _SESSIONS[chat_id]
+
+
 def get_session_history(chat_id: int) -> List[Dict[str, Any]]:
-    """Retrieves or initializes the in-memory RAM conversation history for a chat_id."""
+    """Retrieves session history from RAM."""
     if chat_id not in _SESSIONS:
         _SESSIONS[chat_id] = []
     return _SESSIONS[chat_id]
 
 
-def append_to_session(chat_id: int, role: str, content: Any):
-    """Appends a message to the RAM session history, enforcing sliding window bounds."""
+def append_to_session(chat_id: int, role: str, content: Any, user_id: int = 0, username: str = ""):
+    """Appends a message to RAM session history and queues async persist to Cloudflare D1."""
     history = get_session_history(chat_id)
     if content is not None:
         history.append({"role": role, "content": content})
+        # Asynchronously persist to Cloudflare D1
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                database.persist_message_to_d1(chat_id, user_id, role, str(content), username)
+            )
+        except RuntimeError:
+            pass
+
     max_len = settings.MAX_SESSION_HISTORY * 2
     if len(history) > max_len:
         _SESSIONS[chat_id] = history[-max_len:]
 
 
 def clear_session(chat_id: int):
-    """Clears the RAM session memory for a chat."""
+    """Clears session memory in RAM and deletes history from Cloudflare D1."""
     _SESSIONS.pop(chat_id, None)
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(database.clear_session_in_d1(chat_id))
+    except RuntimeError:
+        pass
 
 
 # =========================================================================
@@ -215,10 +204,12 @@ def clear_session(chat_id: int):
 async def execute_hermes_agent(
     chat_id: int,
     user_prompt: str,
+    user_id: int = 0,
+    username: str = "",
 ) -> str:
     """
-    Directly dispatches queries to the Hermes Agent backend (with private 9router failover).
-    Hermes Agent executes its own autonomous toolset (web search, browser, code, etc.) natively.
+    Directly dispatches queries to the Hermes Agent backend with model 'ag/gemini-3.8-flash-low'
+    (with private 9router failover), utilizing Cloudflare KV and L1 RAM caching.
     Returns the final synthesized answer promptly without Telegram rate-limit or placeholder bugs.
     """
     # 1. Local Security & Jailbreak Guardrail Check
@@ -226,21 +217,23 @@ async def execute_hermes_agent(
     if violation:
         return violation
 
-    # 2. Check RAM Cache for immediate response on identical standalone queries
+    # 2. Check Cache for immediate response on identical standalone queries
+    await ensure_session_history(chat_id)
     history = get_session_history(chat_id)
-    cache_key = f"q:{user_prompt.strip().lower()}"
+    cache_key = f"CACHE_PROMPT_{user_prompt.strip().lower()}"
+
     if len(history) <= 1:
-        cached_res = _RAM_CACHE.get(cache_key)
+        cached_res = await database.kv_get(cache_key)
         if cached_res:
-            append_to_session(chat_id, "user", user_prompt)
-            append_to_session(chat_id, "assistant", cached_res)
+            append_to_session(chat_id, "user", user_prompt, user_id=user_id, username=username)
+            append_to_session(chat_id, "assistant", cached_res, user_id=user_id, username=username)
             return cached_res
 
-    # 3. Append user message to RAM history
-    append_to_session(chat_id, "user", user_prompt)
+    # 3. Append user message to history
+    append_to_session(chat_id, "user", user_prompt, user_id=user_id, username=username)
     current_history = get_session_history(chat_id)
 
-    # 4. Resolve Candidate Endpoints (Hermes Agent first, then 9router)
+    # 4. Resolve Candidate Endpoints (Hermes Agent first with 3.8-flash-low, then 9router)
     candidate_endpoints = get_candidate_endpoints()
     if not candidate_endpoints:
         candidate_endpoints = [(
@@ -302,8 +295,8 @@ async def execute_hermes_agent(
         final_answer = "⚠️ در حال حاضر ارتباط با سرویس پردازش هوش مصنوعی برقرار نشد. لطفاً چند لحظه دیگر مجدداً تلاش فرمایید."
         return final_answer
 
-    # 5. Persist to RAM session & cache
-    append_to_session(chat_id, "assistant", final_answer)
-    _RAM_CACHE.set(cache_key, final_answer)
+    # 5. Persist to session & cache
+    append_to_session(chat_id, "assistant", final_answer, user_id=user_id, username=username)
+    await database.kv_set(cache_key, final_answer, ttl_sec=60)
 
     return final_answer

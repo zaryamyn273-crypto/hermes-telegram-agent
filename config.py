@@ -19,8 +19,8 @@ try:
         ROUTER_BASE_URL: str = Field(default="https://api.openai.com/v1", env="ROUTER_BASE_URL")
         ROUTER_INTERNAL_BASE_URL: str = Field(default="", env="ROUTER_INTERNAL_BASE_URL")
         ROUTER_API_KEY: str = Field(default="", env="ROUTER_API_KEY")
-        ROUTER_MODEL: str = Field(default="Hermes-3-Llama-3.1-8B", env="ROUTER_MODEL")
-        ROUTER_FAST_MODEL: str = Field(default="Hermes-3-Llama-3.1-8B", env="ROUTER_FAST_MODEL")
+        ROUTER_MODEL: str = Field(default="ag/gemini-3.8-flash-low", env="ROUTER_MODEL")
+        ROUTER_FAST_MODEL: str = Field(default="ag/gemini-3.8-flash-low", env="ROUTER_FAST_MODEL")
 
         HERMES_ENDPOINT: str = Field(default="", env="HERMES_ENDPOINT")
         HERMES_API_KEY: str = Field(default="", env="HERMES_API_KEY")
@@ -55,8 +55,8 @@ except ImportError:
         ROUTER_BASE_URL: str = os.getenv("ROUTER_BASE_URL", "https://api.openai.com/v1")
         ROUTER_INTERNAL_BASE_URL: str = os.getenv("ROUTER_INTERNAL_BASE_URL", "")
         ROUTER_API_KEY: str = os.getenv("ROUTER_API_KEY", "")
-        ROUTER_MODEL: str = os.getenv("ROUTER_MODEL", "Hermes-3-Llama-3.1-8B")
-        ROUTER_FAST_MODEL: str = os.getenv("ROUTER_FAST_MODEL", "Hermes-3-Llama-3.1-8B")
+        ROUTER_MODEL: str = os.getenv("ROUTER_MODEL", "ag/gemini-3.8-flash-low")
+        ROUTER_FAST_MODEL: str = os.getenv("ROUTER_FAST_MODEL", "ag/gemini-3.8-flash-low")
 
         HERMES_ENDPOINT: str = os.getenv("HERMES_ENDPOINT", "")
         HERMES_API_KEY: str = os.getenv("HERMES_API_KEY", "")
@@ -114,7 +114,7 @@ def get_candidate_endpoints() -> List[Tuple[str, str, str]]:
         candidates.append((
             settings.HERMES_ENDPOINT.rstrip("/"),
             settings.HERMES_API_KEY or settings.ROUTER_API_KEY,
-            "hermes"
+            fast_model
         ))
 
     # 2. 9router Internal (Low-latency Railway private network fallback)

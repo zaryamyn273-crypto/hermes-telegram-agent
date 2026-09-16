@@ -1,8 +1,9 @@
 """
 Hermes Telegram Agent - Production Entrypoint (Prometheus AI)
 Modern asynchronous architecture powered by python-telegram-bot v20+
-Features Silence-by-default group trigger logic, native background typing indicator,
-direct delegation to Hermes Agent autonomous brain, and anti-jailbreak security guardrails.
+Features Silence-by-default group trigger logic, Cloudflare D1 & KV storage,
+direct delegation to Hermes Agent autonomous brain (3.8 low), and specialized Persian tools.
+Zero typing animations or streaming artifacts to protect Prometheus identity.
 """
 
 import re
@@ -14,7 +15,7 @@ import asyncio
 from typing import Optional
 
 from telegram import Update
-from telegram.constants import ParseMode, ChatAction, ChatType
+from telegram.constants import ParseMode, ChatType
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
@@ -27,6 +28,9 @@ from telegram.request import HTTPXRequest
 
 from config import settings, is_admin
 from agent_engine import execute_hermes_agent, clear_session, sanitize_identity
+from tools.financial import get_fiat_and_gold_rates, get_crypto_price
+from tools.system import get_current_time, calculate_math
+from tools.weather import get_weather
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -46,81 +50,66 @@ def check_rate_limit(user_id: int) -> bool:
         return True
     now = time.monotonic()
     last = _USER_LAST_REQ.get(user_id, 0.0)
-    if now - last < 1.0:  # 1 second minimum between requests
+    if now - last < 0.8:  # 0.8 second minimum between requests
         return False
     _USER_LAST_REQ[user_id] = now
     return True
 
 
 # =========================================================================
-# Common Query Dispatch & Response Delivery
+# Common Response Delivery (No Typing Animations)
 # =========================================================================
 
-async def _process_and_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
+async def _deliver_reply(message, final_text: str):
     """
-    Common helper to dispatch user queries to the autonomous agent brain
-    while displaying native Telegram typing indicator, with clean direct delivery.
+    Delivers finalized response cleanly to Telegram without streaming or typing animations.
     """
-    message = update.effective_message
-    chat = update.effective_chat
-    if not message or not chat:
-        return
-
-    stop_typing = asyncio.Event()
-
-    async def _typing_pulse():
-        while not stop_typing.is_set():
-            try:
-                await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(stop_typing.wait(), timeout=3.5)
-            except asyncio.TimeoutError:
-                pass
-
-    typing_task = asyncio.create_task(_typing_pulse())
+    cleaned = sanitize_identity(final_text).strip()
+    if not cleaned:
+        cleaned = "درود بر شما! پاسخی برای این پرسش دریافت نشد. لطفاً مجدداً سوال خود را بفرمایید."
 
     try:
-        final_answer = await execute_hermes_agent(
-            chat_id=chat.id,
-            user_prompt=prompt
-        )
-    except Exception as e:
-        logger.error(f"Error executing Prometheus Agent: {e}")
-        final_answer = f"❌ متأسفانه خطایی در پردازش پاسخ رخ داد: {str(e)}"
-    finally:
-        stop_typing.set()
-        try:
-            await typing_task
-        except Exception:
-            pass
-
-    final_answer = sanitize_identity(final_answer).strip()
-    if not final_answer:
-        final_answer = "درود بر شما! پاسخی برای این پرسش دریافت نشد. لطفاً مجدداً سوال خود را بپرسید."
-
-    try:
-        formatted = markdown_to_telegram_html(final_answer)
+        formatted = markdown_to_telegram_html(cleaned)
         chunks = split_message(formatted, max_len=3900) if len(formatted) > 3900 else [formatted]
         for ch in chunks:
             try:
                 await message.reply_text(ch, parse_mode=ParseMode.HTML)
             except Exception as html_err:
                 logger.warning(f"HTML delivery failed ({html_err}), falling back to plain text")
-                plain_ch = strip_thinking(final_answer)[:3900]
+                plain_ch = strip_thinking(cleaned)[:3900]
                 await message.reply_text(plain_ch)
     except BadRequest as e:
-        if "not enough rights" in str(e).lower():
-            logger.warning(f"Bot lacks permission to send message in chat {chat.id}: {e}")
-        else:
-            logger.error(f"Telegram BadRequest in response delivery: {e}")
+        logger.warning(f"Telegram BadRequest in response delivery: {e}")
     except Exception as e:
-        logger.error(f"Failed to deliver final message: {e}")
+        logger.error(f"Failed to deliver message: {e}")
         try:
-            await message.reply_text(final_answer[:3900])
+            await message.reply_text(cleaned[:3900])
         except Exception:
             pass
+
+
+async def _process_and_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
+    """
+    Dispatches query directly to autonomous agent engine without showing typing animations.
+    """
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat:
+        return
+
+    try:
+        final_answer = await execute_hermes_agent(
+            chat_id=chat.id,
+            user_prompt=prompt,
+            user_id=user.id if user else 0,
+            username=user.username or "" if user else "",
+        )
+    except Exception as e:
+        logger.error(f"Error executing Prometheus Agent: {e}")
+        final_answer = f"❌ متأسفانه خطایی در پردازش پاسخ رخ داد: {str(e)}"
+
+    await _deliver_reply(message, final_answer)
 
 
 # =========================================================================
@@ -135,13 +124,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"⚡ **درود {u_name}! به پرومته (Prometheus AI) خوش آمدید.**\n\n"
-        "من **پرومته** هستم؛ دستیار هوش مصنوعی پیشرفته، پرسرعت و خودمختار شما که مجهز به ابزارهای بلادرنگ و مغز استدلال ایجنتیک است:\n\n"
-        "• 📊 **نرخ زنده رمزارزها، دلار و طلا** (`/rates`, `/crypto btc`)\n"
-        "• 🌦 **پیش‌بینی لحظه‌ای آب و هوا** (`/weather تهران`)\n"
-        "• 🔍 **جستجوی وب و مطالعه عمیق لینک‌ها**\n"
-        "• 🧮 **محاسبات ریاضی و علمی**\n"
-        "• 🕒 **زمان رسمی تهران و تاریخ دقیق** (`/time`)\n\n"
-        "💡 *در گروه‌ها، من فقط زمانی فعال می‌شوم که نام «پرومته» را در پیامتان بیاورید، مرا منشن (@) کنید یا روی پیامم ریپلای بزنید.*"
+        "من **پرومته** هستم؛ دستیار هوش مصنوعی پیشرفته، پرسرعت و خودمختار شما که مجهز به ابزارهای بلادرنگ، دیتابیس ابری کلودفلر و مغز استدلال ایجنتیک است:\n\n"
+        "• 📊 **نرخ لحظه‌ای دلار، تتر، طلا و سکه** (`/rates`, `/dollar`)\n"
+        "• 🪙 **استعلام زنده رمزارزها** (`/crypto btc` یا `/crypto eth`)\n"
+        "• 🕒 **ساعت رسمی تهران و تقویم شمسی** (`/time`)\n"
+        "• 🌦 **پیش‌بینی آب و هوای شهرها** (`/weather تهران`)\n"
+        "• 🧮 **محاسبات ریاضی و علمی** (`/calc`)\n"
+        "• 🔍 **جستجوی عمیق وب، تحلیل داده و کدنویسی خودکار**\n\n"
+        "💡 *در گروه‌ها، من تنها زمانی فعال می‌شوم که نام «پرومته» را بیاورید، مرا منشن (@) کنید یا روی پیامم ریپلای بزنید.*"
     )
     formatted = markdown_to_telegram_html(text)
     await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
@@ -153,22 +143,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📖 **راهنمای قابلیت‌ها و دستورات پرومته (Prometheus AI):**\n\n"
         "• `/start` - راه‌اندازی و معرفی پرومته\n"
-        "• `/help` - راهنمای دستورات\n"
-        "• `/clear` - پاکسازی حافظه گفتگو و شروع نشست تازه\n"
-        "• `/ping` - بررسی بیداری و سرعت پاسخ‌دهی سرور\n"
-        "• `/time` - استعلام ساعت رسمی تهران و تقویم شمسی\n"
-        "• `/rates` - قیمت لحظه‌ای دلار، تتر، یورو و درهم\n"
-        "• `/crypto [نماد]` - نرخ لحظه‌ای ارز دیجیتال (مثال: `/crypto btc` یا `/crypto eth`)\n"
-        "• `/weather [شهر]` - آب و هوای زنده شهرها (مثال: `/weather تهران`)\n\n"
+        "• `/help` - راهنمای جامع دستورات\n"
+        "• `/rates` یا `/dollar` - قیمت زنده دلار، تتر، یورو، طلا و سکه در بازار ایران\n"
+        "• `/crypto [نماد]` - نرخ لحظه‌ای رمزارزها به دلار و تومان (مثال: `/crypto btc`)\n"
+        "• `/time` - استعلام ساعت رسمی تهران و تاریخ دقیق شمسی\n"
+        "• `/weather [شهر]` - آب و هوای زنده شهرها (مثال: `/weather تهران`)\n"
+        "• `/calc [عبارت]` - محاسبه عبارات ریاضی و علمی (مثال: `/calc sqrt(144) + 10`)\n"
+        "• `/clear` - پاکسازی حافظه نشست و دیتابیس گفتگو\n"
+        "• `/ping` - بررسی بیداری و سرعت پاسخ‌دهی سرور\n\n"
         "🗣 **مکالمه آزاد در گروه و چت خصوصی:**\n"
-        "می‌توانید هر سوال تحلیلی، برنامه‌نویسی، متنی یا علمی را مستقیماً بپرسید. در گروه کافی است بگویید: «پرومته وضعیت بازار چطوره؟» یا روی پیام پرومته ریپلای کنید."
+        "می‌توانید هر سوال تحلیلی، برنامه‌نویسی، علمی یا عمومی را مطرح کنید. در گروه کافی است بگویید: «پرومته وضعیت بازار چطوره؟» یا روی پیام پرومته ریپلای کنید."
     )
     formatted = markdown_to_telegram_html(text)
     await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
 
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Resets conversational session context in RAM."""
+    """Resets conversational session context in RAM and Cloudflare D1."""
     chat = update.effective_chat
     user = update.effective_user
     msg = update.effective_message
@@ -183,7 +174,7 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     clear_session(chat.id)
-    await msg.reply_text("🧹 حافظه نشست جاری با موفقیت پاکسازی و از نو مقداردهی شد.")
+    await msg.reply_text("🧹 حافظه نشست جاری و تاریخچه دیتابیس با موفقیت پاکسازی شد.")
 
 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,49 +183,48 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.effective_message.reply_text("🏓 پونگ...")
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     await msg.edit_text(
-        f"🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده فرماندهی است.**\n⚡ تأخیر اتصال: `{elapsed_ms:.1f}ms`",
+        f"🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده است.**\n⚡ تأخیر اتصال: `{elapsed_ms:.1f}ms`",
         parse_mode=ParseMode.MARKDOWN
     )
 
 
-async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Official time and calendar via autonomous agent brain."""
-    await _process_and_reply(
-        update,
-        context,
-        "ساعت رسمی تهران و تاریخ دقیق امروز شمسی را همراه با مناسبت‌ها به طور کامل اعلام کن."
-    )
-
-
-async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct weather lookup via autonomous agent brain."""
-    args = context.args or []
-    city = " ".join(args).strip() if args else "تهران"
-    await _process_and_reply(
-        update,
-        context,
-        f"وضعیت دقیق، دما، رطوبت و پیش‌بینی آب و هوای شهر {city} را با ابزارهای بلادرنگ گزارش بده."
-    )
+async def rates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct fiat & gold rates lookup."""
+    res = await get_fiat_and_gold_rates()
+    await _deliver_reply(update.effective_message, res)
 
 
 async def crypto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct crypto price lookup via autonomous agent brain."""
+    """Direct crypto price lookup."""
     args = context.args or []
     sym = args[0].strip().upper() if args else "BTC"
-    await _process_and_reply(
-        update,
-        context,
-        f"قیمت لحظه‌ای رمزارز {sym} به دلار و معادل تومانی آن، به همراه تغییرات ۲۴ ساعته را اعلام کن."
-    )
+    res = await get_crypto_price(sym)
+    await _deliver_reply(update.effective_message, res)
 
 
-async def rates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct fiat & gold rates lookup via autonomous agent brain."""
-    await _process_and_reply(
-        update,
-        context,
-        "قیمت لحظه‌ای دلار آزاد، تتر، یورو، درهم امارات، طلا ۱۸ عیار و سکه امامی در بازار ایران را با ابزارهای بلادرنگ گزارش بده."
-    )
+async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Official time and Jalali calendar lookup."""
+    res = get_current_time()
+    await _deliver_reply(update.effective_message, res)
+
+
+async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct weather lookup."""
+    args = context.args or []
+    city = " ".join(args).strip() if args else "تهران"
+    res = await get_weather(city)
+    await _deliver_reply(update.effective_message, res)
+
+
+async def calc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Math calculator command."""
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("ℹ️ لطفاً عبارت ریاضی مورد نظر را وارد کنید. مثال: `/calc 25 * 4 + 10`", parse_mode=ParseMode.MARKDOWN)
+        return
+    expr = " ".join(args).strip()
+    res = calculate_math(expr)
+    await _deliver_reply(update.effective_message, res)
 
 
 # =========================================================================
@@ -300,13 +290,45 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("⚠️ لطفاً کمی شکیبا باشید و از ارسال رگباری پیام‌ها خودداری کنید.")
         return
 
-    # Fast-Path: Heartbeat / Ping
+    # Fast-Path 1: Heartbeat / Ping
     if any(k in raw_lower for k in ["پرومته بیداری", "بیداری پرومته", "پینگ پرومته", "پرومته بیدار"]):
         await message.reply_text(
             "🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده فرماندهی است.**",
             parse_mode=ParseMode.MARKDOWN
         )
         return
+
+    # Fast-Path 2: Official Tehran Time & Calendar
+    if any(k in raw_lower for k in ["ساعت چنده", "ساعت چند است", "ساعت رسمی", "امروز چندمه", "تاریخ امروز", "امروز چه روزیه"]):
+        res = get_current_time()
+        await _deliver_reply(message, res)
+        return
+
+    # Fast-Path 3: Fiat & Gold Rates
+    fiat_keywords = [
+        "قیمت دلار", "نرخ دلار", "دلار چنده", "دلار چند شده", "قیمت تتر", "نرخ تتر",
+        "قیمت طلا", "نرخ طلا", "قیمت سکه", "نرخ سکه", "سکه امامی", "طلای ۱۸ عیار",
+        "نرخ ارز", "قیمت یورو", "قیمت درهم"
+    ]
+    if any(k in raw_lower for k in fiat_keywords):
+        res = await get_fiat_and_gold_rates()
+        await _deliver_reply(message, res)
+        return
+
+    # Fast-Path 4: Crypto Rates
+    crypto_kw_map = {
+        "بیتکوین": "BTC", "بیت کوین": "BTC", "btc": "BTC",
+        "اتریوم": "ETH", "eth": "ETH",
+        "سولانا": "SOL", "sol": "SOL",
+        "تون": "TON", "تون کوین": "TON", "ton": "TON",
+        "دوج": "DOGE", "دوج کوین": "DOGE", "doge": "DOGE",
+        "ریپل": "XRP", "xrp": "XRP",
+    }
+    for kw, sym in crypto_kw_map.items():
+        if f"قیمت {kw}" in raw_lower or f"نرخ {kw}" in raw_lower or f"{kw} چنده" in raw_lower:
+            res = await get_crypto_price(sym)
+            await _deliver_reply(message, res)
+            return
 
     # Clean the trigger from the prompt
     cleaned_prompt = raw_text
@@ -320,7 +342,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("درود بر شما! در خدمتم. چه کمکی از دست پرومته ساخته است؟")
         return
 
-    # Process all queries through autonomous agent brain
+    # Process all queries through autonomous agent brain (without typing animations)
     await _process_and_reply(update, context, cleaned_prompt)
 
 
@@ -360,6 +382,7 @@ def build_application():
     app.add_handler(CommandHandler("rates", rates_command))
     app.add_handler(CommandHandler("gold", rates_command))
     app.add_handler(CommandHandler("dollar", rates_command))
+    app.add_handler(CommandHandler("calc", calc_command))
 
     # General Message Handler (Supports text, captions, documents)
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, message_handler))
