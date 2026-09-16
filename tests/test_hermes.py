@@ -146,8 +146,25 @@ def test_fiat_fast_path_intents():
     assert is_fiat_or_gold_query("سکه امامی") is True
     assert is_fiat_or_gold_query("قیمت تتر") is True
     assert is_fiat_or_gold_query("نرخ ارز و طلا") is True
+    assert is_fiat_or_gold_query("قیمت ارز چنده") is True
+    assert is_fiat_or_gold_query("یورو چنده") is True
+    assert is_fiat_or_gold_query("درهم امارات") is True
+    assert is_fiat_or_gold_query("مظنه طلا چنده") is True
+    assert is_fiat_or_gold_query("انس طلا چند شد") is True
 
-    # Non-fiat queries
+    # User reported bug: "ارزون" in Indian 5G query was falsely matched as "ارز"
+    assert is_fiat_or_gold_query("پرومته داخل هندوستان اینترنت 5G نامحدود میدن؟ با قیمت ارزون") is False
+
+    # Words containing "ارز", "طلا", "انس", "درهم" as substrings must NOT trigger fiat tool
+    assert is_fiat_or_gold_query("قیمت ارزان ترین گوشی") is False
+    assert is_fiat_or_gold_query("ارزش سهام تسلا چقدره") is False
+    assert is_fiat_or_gold_query("یک داستان در مورد انسان بگو") is False
+    assert is_fiat_or_gold_query("قیمت بلیت آژانس مسافرتی چنده") is False
+    assert is_fiat_or_gold_query("اطلاعات قیمت لپ‌تاپ رو داری؟") is False
+    assert is_fiat_or_gold_query("چرا درهم و برهم نوشتی") is False
+    assert is_fiat_or_gold_query("آرزو دارم موفق بشی") is False
+
+    # Non-fiat conversational queries
     assert is_fiat_or_gold_query("سلام چطوری؟") is False
     assert is_fiat_or_gold_query("یک شعر از حافظ بگو") is False
 
@@ -168,6 +185,14 @@ def test_time_fast_path_intents():
     assert is_time_query("امروز چندمه") is True
     assert is_time_query("تاریخ امروز") is True
     assert is_time_query("تقویم") is True
+    assert is_time_query("ساعت رسمی کشور") is True
+    assert is_time_query("ساعت الان چنده؟") is True
+
+    # Smart watches, durations, and appointments must NOT trigger time tool
+    assert is_time_query("قیمت ساعت هوشمند شیائومی چنده") is False
+    assert is_time_query("چند ساعت طول میکشه برم مشهد؟") is False
+    assert is_time_query("ساعت دیواری چوبی قشنگه") is False
+    assert is_time_query("یک ساعت بعد زنگ بزن") is False
     assert is_time_query("سلام روز بخیر") is False
 
 
@@ -175,6 +200,11 @@ def test_weather_fast_path_intents():
     assert extract_weather_query("آب و هوای تهران چطوره") == "تهران"
     assert extract_weather_query("هوای شیراز") == "شیراز"
     assert extract_weather_query("دمای اصفهان چند درجه است") == "اصفهان"
+    assert extract_weather_query("وضعیت هوای تبریز") == "تبریز"
+
+    # Idioms and non-weather expressions must NOT trigger weather tool
+    assert extract_weather_query("هوای منو داشته باش") is None
+    assert extract_weather_query("دمای جوش آب چنده") is None
     assert extract_weather_query("کد پایتون بنویس") is None
 
 
@@ -182,6 +212,12 @@ def test_math_fast_path_intents():
     assert is_math_query("125 * 4 + 10") is True
     assert is_math_query("(50000 * 0.15) / 3") is True
     assert is_math_query("حساب کن 25 * 25") is True
+    assert is_math_query("محاسبه کن sqrt(144) + 10") is True
+
+    # Natural conversation with "حساب کن" must NOT trigger math tool
+    assert is_math_query("حساب کن ببین من اگه فلان کارو بکنم خوبه یا نه") is False
+    assert is_math_query("من آیفون 16+ میخوام") is False
+    assert is_math_query("اینترنت 5G نامحدود") is False
     assert is_math_query("سلام چطوری") is False
 
 
@@ -283,6 +319,11 @@ def test_music_query_cleaner_and_intent():
     assert is_music_request("آهنگ جدید شادمهر رو دانلود کن") is True
     assert is_music_request("سلام چطوری؟") is False
     assert is_music_request("قیمت دلار چنده") is False
+
+    # Informational or conversational queries mentioning music/singer must NOT trigger download
+    assert is_music_request("این خواننده کیه؟ اطلاعاتش رو بفرست") is False
+    assert is_music_request("میخوام بدونم چرا این آهنگ معروف شد") is False
+    assert is_music_request("آموزش آهنگسازی با کیوبیس") is False
 
     # Cleaner & extractor
     assert clean_music_query("دانلود آهنگ سوغاتی هایده رو برام بفرست 320") == "سوغاتی هایده"

@@ -68,23 +68,36 @@ def clean_music_query(q: str) -> str:
     return " ".join(cleaned.split()).strip()
 
 
-_MUSIC_INTENT_KEYWORDS = (
-    "آهنگ", "اهنگ", "موزیک", "ترانه", "خواننده", "music", "song", "mp3", "ترانه"
+_MUSIC_COMMANDS = ("/music", "/song", "/play", "/ahang")
+
+_MUSIC_EXPLICIT_PHRASES = (
+    "دانلود آهنگ", "دانلود اهنگ", "دانلود موزیک", "دانلود ترانه",
+    "آهنگ رو بفرست", "اهنگ رو بفرست", "موزیک رو بفرست",
+    "آهنگ برام بفرست", "اهنگ برام بفرست", "موزیک برام بفرست",
+    "آهنگ جدید", "اهنگ جدید", "موزیک جدید",
+    "آهنگ رو دانلود کن", "اهنگ رو دانلود کن", "موزیک رو دانلود کن"
 )
-_MUSIC_ACTION_KEYWORDS = (
-    "دانلود", "بفرست", "پخش", "پلی", "بذار", "بزار", "بدین", "بده", "میخوام", "می‌خوام"
+
+_MUSIC_EXCLUSIONS = (
+    "کیه", "کیست", "چرا", "چطور", "چگونه", "بیوگرافی", "اطلاعات", "آموزش",
+    "نت آهنگ", "آکورد", "ساز", "تئوری", "تاریخچه", "کنسرت"
 )
+
+_MUSIC_INTENTS = ("آهنگ", "اهنگ", "موزیک", "ترانه", "music", "song", "mp3")
+_MUSIC_ACTIONS = ("دانلود", "بفرست", "پخش", "پلی", "پخش کن", "پلی کن", "ارسال کن", "دانلود کن", "بذار", "بزار", "بگذار")
 
 
 def is_music_request(text: str) -> bool:
     """Matches natural Persian queries explicitly requesting a song or music track."""
     t = text.lower().strip()
-    if t.startswith(("/music", "/song", "/play", "/ahang")):
+    if any(t.startswith(cmd) for cmd in _MUSIC_COMMANDS):
         return True
-    if any(k in t for k in ["دانلود آهنگ", "دانلود اهنگ", "دانلود موزیک", "دانلود ترانه"]):
+    if any(ex in t for ex in _MUSIC_EXCLUSIONS):
+        return False
+    if any(sp in t for sp in _MUSIC_EXPLICIT_PHRASES):
         return True
-    has_m = any(k in t for k in _MUSIC_INTENT_KEYWORDS)
-    has_a = any(a in t for a in _MUSIC_ACTION_KEYWORDS)
+    has_m = any(re.search(rf"(?<!\w){re.escape(k)}(?!\w)", t) for k in _MUSIC_INTENTS)
+    has_a = any(re.search(rf"(?<!\w){re.escape(a)}(?!\w)", t) for a in _MUSIC_ACTIONS)
     return has_m and has_a
 
 

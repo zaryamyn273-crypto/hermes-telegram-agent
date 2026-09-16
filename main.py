@@ -158,31 +158,56 @@ async def _process_and_reply(
 # Fast-Path Intent Detectors
 # =========================================================================
 
-_FIAT_KEYWORDS = (
-    "دلار", "dollar", "usd", "تتر", "usdt", "طلا", "سکه", "ارز", "یورو", "eur",
-    "درهم", "aed", "مظنه", "انس"
-)
-_INTENT_KEYWORDS = (
-    "قیمت", "نرخ", "چند", "چنده", "چقدر", "امروز", "لحظه", "بازار", "وضعیت",
-    "بگو", "استعلام", "چند شد", "چند است", "چند شده"
-)
 _SPECIFIC_FIAT_PHRASES = (
-    "سکه امامی", "بهار آزادی", "طلای ۱۸", "طلا ۱۸", "نیم سکه", "ربع سکه", "سکه گرمی",
-    "قیمت دلار", "نرخ دلار", "دلار چنده", "قیمت تتر", "نرخ تتر", "قیمت طلا", "نرخ طلا",
-    "قیمت سکه", "نرخ سکه", "نرخ ارز", "قیمت ارز", "وضعیت دلار", "وضعیت بازار ارز",
-    "بازار ارز", "ارز و طلا", "طلا و ارز"
+    "سکه امامی", "بهار آزادی", "طلای ۱۸", "طلا ۱۸", "طلای ۱۸ عیار", "نیم سکه", "ربع سکه", "سکه گرمی",
+    "قیمت دلار", "نرخ دلار", "دلار چنده", "دلار چند است", "دلار چند شد", "دلار چند شده", "دلار امروز", "دلار الان",
+    "قیمت تتر", "نرخ تتر", "تتر چنده", "تتر چند است", "تتر چند شد",
+    "قیمت طلا", "نرخ طلا", "طلا چنده", "طلا چند است", "طلا چند شد", "مظنه طلا", "انس طلا",
+    "قیمت سکه", "نرخ سکه", "سکه چنده", "سکه چند است", "سکه چند شد",
+    "نرخ ارز", "قیمت ارز", "وضعیت دلار", "وضعیت بازار ارز",
+    "بازار ارز", "ارز و طلا", "طلا و ارز", "ارز آزاد", "ارز دولتی", "دلار آزاد",
+    "قیمت یورو", "نرخ یورو", "یورو چنده", "قیمت درهم", "نرخ درهم", "درهم امارات"
 )
 
+_FIAT_PHRASE_REGEXES = [
+    re.compile(rf"(?<!\w){re.escape(sp)}(?!\w)", re.IGNORECASE)
+    for sp in _SPECIFIC_FIAT_PHRASES
+]
+
+_FIAT_ASSETS_PATTERN = re.compile(
+    r"(?<!\w)(?:دلار|dollar|usd|تتر|usdt|طلا|طلای|سکه|مظنه|یورو|eur|درهم|aed)(?!\w)",
+    re.IGNORECASE
+)
+
+_FIAT_INTENT_PATTERN = re.compile(
+    r"(?<!\w)(?:قیمت|نرخ|چند|چنده|چقدر|امروز|لحظه|بازار|وضعیت|استعلام|چند شد|چند است)(?!\w)",
+    re.IGNORECASE
+)
+
+_FIAT_EXCLUDED_TOPICS_PATTERN = re.compile(
+    r"(?<!\w)(?:اینترنت|هند|هندوستان|سیمکارت|شارژ|بسته|لپ\s*تاپ|لپتاپ|موبایل|گوشی|بلیت|بلیط|هواپیما|هتل|تور|ماشین|خودرو|پایتون|برنامه|کد|سهام|بورس)(?!\w)",
+    re.IGNORECASE
+)
+
+
 def is_fiat_or_gold_query(text: str) -> bool:
-    """Matches any natural Persian query asking about dollar, euro, dirham, gold, or coin rates."""
+    """Matches natural Persian queries strictly asking about dollar, euro, dirham, gold, or coin rates."""
     t = text.lower().strip()
-    if t in ("دلار", "dollar", "usd", "تتر", "usdt", "طلا", "سکه", "ارز", "یورو", "eur", "درهم", "aed"):
+    if t in ("دلار", "dollar", "usd", "تتر", "usdt", "طلا", "سکه", "ارز", "یورو", "eur", "درهم", "aed", "مظنه", "درهم امارات"):
         return True
-    if any(sp in t for sp in _SPECIFIC_FIAT_PHRASES):
+
+    # Check unambiguous specific phrases with strict boundary
+    if any(p.search(t) for p in _FIAT_PHRASE_REGEXES):
         return True
-    has_curr = any(c in t for c in _FIAT_KEYWORDS)
-    has_intent = any(i in t for i in _INTENT_KEYWORDS)
-    return has_curr and has_intent
+
+    # If general non-financial context is present without a specific phrase, reject
+    if _FIAT_EXCLUDED_TOPICS_PATTERN.search(t):
+        return False
+
+    # Check asset + intent with strict word boundaries
+    has_asset = bool(_FIAT_ASSETS_PATTERN.search(t))
+    has_intent = bool(_FIAT_INTENT_PATTERN.search(t))
+    return has_asset and has_intent
 
 
 _CRYPTO_MAP = {
@@ -206,61 +231,111 @@ def extract_crypto_query(text: str) -> Optional[str]:
     """Extracts target cryptocurrency symbol if the query asks about crypto price."""
     t = text.lower().strip()
     for kw, sym in _CRYPTO_MAP.items():
-        if t == kw or t == f"قیمت {kw}" or t == f"نرخ {kw}":
+        if t == kw:
             return sym
-        if f"قیمت {kw}" in t or f"نرخ {kw}" in t or f"{kw} چنده" in t or f"{kw} چند است" in t or f"{kw} چند شد" in t or f"{kw} چند شده" in t:
+        if re.search(rf"(?<!\w)(?:قیمت|نرخ)\s+{re.escape(kw)}(?!\w)", t):
+            return sym
+        if re.search(rf"(?<!\w){re.escape(kw)}\s+(?:چنده|چند است|چند شد|چند شده)(?!\w)", t):
             return sym
     return None
 
 
+_TIME_EXCLUSIONS = (
+    "ساعت هوشمند", "ساعت مچی", "ساعت دیواری", "ساعت کاری", "ساعت کار", "ساعت خواب",
+    "چند ساعت", "یک ساعت", "دو ساعت", "۲ ساعت", "سه ساعت", "۳ ساعت", "چهار ساعت",
+    "۴ ساعت", "ساعت قبل", "ساعت بعد", "ساعت پیش", "ساعت طول"
+)
+
+_TIME_PHRASES = (
+    "ساعت چنده", "ساعت چند است", "ساعت چند شد", "ساعت چنده الان", "ساعت الان چنده",
+    "ساعت رسمی", "ساعت تهران", "ساعت رسمی کشور", "ساعت به وقت تهران", "ساعت ایران",
+    "امروز چندمه", "امروز چندم است", "تاریخ امروز", "تاریخ روز", "امروز چه روزیه",
+    "امروز چند شنبه است", "امروز چندشنبه است", "تاریخ شمسی", "تقویم امروز", "تقویم شمسی",
+    "زمان فعلی", "زمان کنونی"
+)
+
+_TIME_PHRASE_REGEXES = [
+    re.compile(rf"(?<!\w){re.escape(tp)}(?!\w)", re.IGNORECASE)
+    for tp in _TIME_PHRASES
+]
+
 def is_time_query(text: str) -> bool:
     """Matches time and calendar queries."""
     t = text.lower().strip()
-    time_keywords = [
-        "ساعت چنده", "ساعت چند است", "ساعت رسمی", "ساعت چند شد", "ساعت تهران",
-        "امروز چندمه", "تاریخ امروز", "امروز چه روزیه", "تاریخ شمسی", "تقویم",
-        "زمان فعلی", "ساعت"
-    ]
-    if t in ("ساعت", "تاریخ", "تقویم", "زمان"):
+    if t in ("ساعت", "تاریخ", "تقویم", "زمان", "time", "date", "clock"):
         return True
-    return any(k in t for k in time_keywords)
+    if any(ex in t for ex in _TIME_EXCLUSIONS):
+        return False
+    if any(p.search(t) for p in _TIME_PHRASE_REGEXES):
+        return True
+    if re.search(r"^(?:ساعت|زمان|تاریخ)\s*(?:چنده|چند است|چند شد|الان|امروز|رسمی|تهران)?[\?؟]?$", t):
+        return True
+    if re.search(r"^(?:الان|امروز)\s+ساعت\s+چنده[\?؟]?$", t):
+        return True
+    return False
 
+
+_WEATHER_EXCLUSIONS = (
+    "منو داشته باش", "داشته باش", "جوش آب", "نقطه جوش", "دمای جوش", "اتاق", "بدن",
+    "موتور", "روشن", "خاموش", "دلم", "سرم", "حالم", "کد", "پایتون", "برنامه"
+)
 
 def extract_weather_query(text: str) -> Optional[str]:
     """Matches natural Persian weather queries and extracts city name."""
     t = text.strip()
+    if any(ex in t for ex in _WEATHER_EXCLUSIONS):
+        return None
+
+    # 1. Unambiguous weather pattern: "آب و هوای [شهر]", "وضعیت هوای [شهر]"
     m = re.search(
-        r"(?:آب\s*و\s*هوای|وضعیت\s*هوای|هوای|دمای|آب\s*هوا)\s+([آ-یa-zA-Z\s]+?)(?:\s+(?:چطوره|چطوریه|چگونه\s*است|چند\s*درجه\s*است|امروز|\?|؟)|[\?؟]|$)",
+        r"(?:آب\s*و\s*هوای|وضعیت\s*(?:آب\s*و\s*)?هوای|آب\s*هوا[ی]?)\s+([آ-یa-zA-Z\s]+?)(?:\s+(?:چطوره|چطوریه|چگونه\s*است|چند\s*درجه\s*است|امروز|الان|\?|؟)|[\?؟]|$)",
         t
     )
     if m:
         city = m.group(1).strip()
-        if len(city) >= 2 and city not in ("امروز", "فردا", "الان"):
+        if len(city) >= 2 and city not in ("امروز", "فردا", "الان", "اینجا"):
             return city
+
+    # 2. Pattern with "هوای [شهر]" or "دمای [شهر]" - require weather intent
+    m2 = re.search(
+        r"(?:هوای|دمای)\s+([آ-یa-zA-Z\s]+?)(?:\s+(?:چطوره|چطوریه|چگونه\s*است|چند\s*درجه\s*است|امروز|الان|بارونیه|برفیه|گرمه|سرده)|[\?؟]|$)",
+        t
+    )
+    if m2:
+        candidate = m2.group(1).strip()
+        if len(candidate) >= 2 and candidate not in ("امروز", "فردا", "الان", "اینجا") and not any(v in candidate for v in ("من", "تو", "ما", "او", "کن", "باش", "شد", "رو")):
+            return candidate
+
     return None
 
 
 def is_math_query(text: str) -> bool:
     """Matches mathematical calculation requests."""
     t = text.strip()
-    if t.startswith("حساب کن ") or t.startswith("محاسبه کن "):
-        return True
-    # Expression contains math symbols and numbers
-    cleaned = re.sub(r"[0-9\.\+\-\*\/\(\)\^\%\s]", "", t)
-    if not cleaned and len(t) >= 3 and any(op in t for op in "+-*/^"):
-        return True
-    return False
+    expr = re.sub(r"^(?:حساب کن|محاسبه کن|حساب|محاسبه)\s*", "", t, flags=re.IGNORECASE).strip()
+    if not expr:
+        return False
+    if not re.search(r"\d", expr):
+        return False
+    has_op = any(op in expr for op in "+-*/^%") or bool(re.search(r"(?i)\b(?:sqrt|sin|cos|tan|log|abs|pow)\b", expr))
+    if not has_op:
+        return False
+    cleaned = re.sub(r"(?i)\b(?:sqrt|sin|cos|tan|log|abs|pi|e|exp|pow)\b", "", expr)
+    cleaned = re.sub(r"[0-9\.\+\-\*\/\(\)\^\%\s,،]", "", cleaned).strip()
+    return len(cleaned) == 0
 
 
 def extract_digikala_query(text: str) -> Optional[str]:
     """Matches requests to search or buy products from Digikala."""
     t = text.strip()
-    m = re.search(r"(?:قیمت|خرید|جستجوی|سرچ)\s+(.+?)\s+(?:در|از)\s+(?:دیجیکالا|دیجی کالا)", t, flags=re.IGNORECASE)
+    m = re.search(r"(?:قیمت|خرید|جستجوی|سرچ)\s+(.+?)\s+(?:در|از|توی)\s+(?:دیجیکالا|دیجی کالا)", t, flags=re.IGNORECASE)
     if m:
         return m.group(1).strip()
-    m2 = re.search(r"(?:دیجیکالا|دیجی کالا)\s+(.+)", t, flags=re.IGNORECASE)
+    m2 = re.search(r"^(?:دیجیکالا|دیجی\s*کالا)\s*[:\s]\s*([آ-یa-zA-Z0-9\s]+)$", t, flags=re.IGNORECASE)
     if m2:
-        return m2.group(1).strip()
+        candidate = m2.group(1).strip()
+        if not any(candidate.startswith(w) for w in ("چطور", "چرا", "چیست", "کی", "کجا", "مال")):
+            return candidate
     return None
 
 
