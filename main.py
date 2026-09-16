@@ -51,6 +51,14 @@ from tools.ecommerce import search_digikala
 from tools.web_reader import fetch_webpage_text
 from tools.telegraph import create_telegraph_article, extract_telegraph_args
 from tools.music import handle_music_request, is_music_request, extract_music_query
+from tools.rate_limiter import check_user_rate_limit, get_user_quota_info
+from tools.id_tool import is_id_request, format_id_report
+from tools.barcode_tool import generate_qr_code, generate_barcode, parse_barcode_request
+from tools.vision import (
+    analyze_image_with_vision,
+    is_reconstruction_query,
+    build_reconstruction_image_url,
+)
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -60,20 +68,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("HermesTelegramAgent")
 
-# Microsecond In-Memory Rate Limiter (Per User)
-_USER_LAST_REQ: dict = {}
-
 
 def check_rate_limit(user_id: int) -> bool:
-    """Microsecond in-memory rate limiter in RAM."""
-    if is_admin(user_id):
-        return True
-    now = time.monotonic()
-    last = _USER_LAST_REQ.get(user_id, 0.0)
-    if now - last < 0.8:  # 0.8 second minimum between requests
-        return False
-    _USER_LAST_REQ[user_id] = now
-    return True
+    """Microsecond in-memory & multi-tier rate limiter wrapper."""
+    allowed, _ = check_user_rate_limit(user_id)
+    return allowed
 
 
 # =========================================================================
@@ -524,6 +523,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🧠 **غول ایجنت خودمختار:** `/agent [پرسش یا موضوع تحقیق]` (اجرای تمام ابزارها، وب‌گردی، مرورگر و کدنویسی)\n"
         "• ⚡ **حالت فوق‌سریع:** `/fast [پرسش]` (پاسخ‌دهی زیر ۱ ثانیه با شبکه خصوصی)\n"
         "• ⚙️ **تنظیم حالت پاسخ‌دهی:** `/mode` (انتخاب بین هوشمند، غول ایجنت و فوق‌سریع)\n"
+        "• 🆔 **استخراج آیدی عددی و مشخصات چت:** `/id` یا `/myid` (کپی فوری با یک لمس)\n"
+        "• 📷 **درک تصویر، OCR و بازسازی بصری:** ارسال مستقیم عکس یا ریپلای روی عکس\n"
+        "• 🏁 **ساخت بارکد و QR Code:** `/qr [متن]` یا `/barcode [کد]`\n"
         "• 📊 **نرخ لحظه‌ای دلار، تتر، طلا و سکه:** `/rates` یا `/dollar`\n"
         "• 🪙 **استعلام زنده رمزارزها:** `/crypto btc` یا `/crypto eth`\n"
         "• 🎵 **دانلود و آپلود مستقیم موزیک ۳۲۰:** `/music نام ترانه`\n"
@@ -550,6 +552,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/fast [پرسش]` - پاسخ‌دهی رعدآسا (زیر ۱ ثانیه) برای مکالمات و سوالات سریع\n"
         "• `/mode` - مشاهده و تغییر حالت کاری (هوشمند خودکار / غول ایجنت / فوق‌سریع)\n\n"
         "🛠 **ابزارهای اختصاصی و بلادرنگ:**\n"
+        "• `/id` یا `/myid` - استخراج کامل آیدی عددی کاربر، چت، پیام، فرستنده فوروارد و فایل‌های مدیا به صورت کپی یک‌لمسی\n"
+        "• `/qr [متن/لینک]` - ساخت کیوآر کد اختصاصی با کیفیت فوق‌العاده بالا\n"
+        "• `/barcode [کد]` - ساخت بارکد میله‌ای استاندارد تجاری (Code128)\n"
+        "• 📷 **بینایی ماشین (Vision):** ارسال هر تصویر یا ریپلای روی تصویر با سوال، استخراج متن (OCR)، تحلیل اشیاء یا درخواست «بازسازی تصویر»\n"
         "• `/rates` یا `/dollar` - قیمت زنده دلار، تتر، یورو، طلا و سکه در بازار ایران\n"
         "• `/crypto [نماد]` - نرخ لحظه‌ای رمزارزها به دلار و تومان (مثال: `/crypto btc`)\n"
         "• `/music [نام ترانه]` - جستجو و ارسال فایل کامل MP3 با کیفیت اصلی ۳۲۰\n"
@@ -834,6 +840,120 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و /del یا «پاکش کن» را ارسال نمایید.")
 
 
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Extracts all Telegram IDs and metadata with 1-tap copyable code blocks."""
+    msg = update.effective_message
+    if not msg:
+        return
+    report = format_id_report(update)
+    await msg.reply_text(report, parse_mode=ParseMode.HTML)
+
+
+async def barcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generates QR codes and barcodes directly in Telegram."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    cmd = (msg.text or "").split()[0].lower()
+    args = context.args or []
+    data_text = " ".join(args).strip()
+
+    if not data_text:
+        guide = (
+            "🏁 **راهنمای ساخت بارکد و کد QR (پرومته):**\n\n"
+            "• برای ساخت QR Code:\n"
+            "`/qr [متن یا لینک یا شماره]`\n"
+            "مثال: `/qr https://google.com`\n\n"
+            "• برای ساخت بارکد میله‌ای استاندارد:\n"
+            "`/barcode [اعداد یا حروف انگلیسی]`\n"
+            "مثال: `/barcode 9789643110291`\n\n"
+            "💡 همچنین می‌توانید در گفتگو بنویسید: *«برای شماره 09123456789 کیوآر کد بساز»*"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    is_qr = ("qr" in cmd or "کیو" in cmd)
+    if is_qr:
+        buf = generate_qr_code(data_text)
+        caption = f"🏁 <b>کیوآر کد اختصاصی پرومته</b>\n📄 محتوا: <code>{html.escape(data_text)}</code>"
+    else:
+        buf = generate_barcode(data_text)
+        caption = f"🏁 <b>بارکد استاندارد پرومته (Code128)</b>\n📄 داده: <code>{html.escape(data_text)}</code>"
+
+    await msg.reply_photo(photo=buf, caption=caption, parse_mode=ParseMode.HTML)
+
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct multimodal vision handler for received photos."""
+    msg = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+    if not msg or not msg.photo or not chat or not user:
+        return
+
+    is_private = (chat.type == ChatType.PRIVATE)
+    bot_id = context.bot.id
+    bot_username = (context.bot.username or "").lower()
+    caption = msg.caption or ""
+
+    # Check group trigger
+    if not is_private:
+        is_triggered = False
+        if msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == bot_id:
+            is_triggered = True
+        elif bot_username and f"@{bot_username}" in caption.lower():
+            is_triggered = True
+        elif any(name in caption.lower() for name in ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس"]):
+            is_triggered = True
+        if not is_triggered:
+            return
+
+    # Rate limit check
+    allowed, limit_msg = check_user_rate_limit(user.id)
+    if not allowed:
+        await msg.reply_text(limit_msg or "⚠️ لطفاً کمی شکیبا باشید.")
+        return
+
+    typing_task = asyncio.create_task(_send_typing_loop(context.bot, chat.id))
+    t0 = time.perf_counter()
+    try:
+        largest_photo = msg.photo[-1]
+        photo_file = await largest_photo.get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+
+        cleaned_caption = caption
+        if bot_username:
+            cleaned_caption = re.sub(rf"@{re.escape(bot_username)}", "", cleaned_caption, flags=re.IGNORECASE)
+        for name in ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس"]:
+            cleaned_caption = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "", cleaned_caption, flags=re.IGNORECASE)
+        cleaned_caption = cleaned_caption.strip()
+
+        analysis = await analyze_image_with_vision(
+            image_bytes=bytes(photo_bytes),
+            prompt=cleaned_caption if cleaned_caption else None,
+            chat_id=chat.id,
+        )
+
+        if is_reconstruction_query(caption):
+            reconstruct_prompt = cleaned_caption or "photorealistic detailed visual recreation"
+            preview_url = build_reconstruction_image_url(reconstruct_prompt)
+            analysis += f"\n\n🎨 <b>پیش‌نمایش شبیه‌سازی مجدد تصویر:</b>\n<a href=\"{preview_url}\">مشاهده پیش‌نمایش تصویر بازسازی‌شده</a>"
+
+        elapsed = time.perf_counter() - t0
+        record_chat_latency(chat.id, elapsed, "موتور بینایی چندوجهی پرومته (Vision)")
+        await _deliver_reply(msg, analysis)
+    except Exception as e:
+        logger.error(f"Error processing photo vision: {e}")
+        await msg.reply_text(f"❌ متأسفانه خطایی در پردازش تصویر رخ داد: {str(e)}")
+    finally:
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+
+
 # =========================================================================
 # Main Message Handler with Silence-By-Default Trigger Logic
 # =========================================================================
@@ -893,8 +1013,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if not check_rate_limit(user.id):
-        await message.reply_text("⚠️ لطفاً کمی شکیبا باشید و از ارسال رگباری پیام‌ها خودداری کنید.")
+    allowed, limit_msg = check_user_rate_limit(user.id)
+    if not allowed:
+        await message.reply_text(limit_msg or "⚠️ لطفاً کمی شکیبا باشید و از ارسال رگباری پیام‌ها خودداری کنید.")
         return
 
     # Clean the trigger name from the prompt for cleaner matching
@@ -916,6 +1037,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     cleaned_lower = cleaned_prompt.lower()
+
+    # Fast-Path -2: Full Telegram Numeric ID & Diagnostics Extraction (<1ms)
+    if is_id_request(cleaned_lower):
+        report = format_id_report(update)
+        await message.reply_text(report, parse_mode=ParseMode.HTML)
+        return
 
     # Fast-Path -1: Bot Message Deletion (/del, /delete, /پاک, "پاکش کن", "حذف کن")
     if is_delete_request(cleaned_lower):
@@ -1014,6 +1141,50 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _deliver_reply(message, res)
         return
 
+    # Fast-Path 7.5: Barcode & QR Code Generator (<10ms)
+    is_bc, bc_type, bc_content = parse_barcode_request(cleaned_prompt)
+    if is_bc and bc_content:
+        t0 = time.perf_counter()
+        if bc_type == "qr":
+            buf = generate_qr_code(bc_content)
+            caption = f"🏁 <b>کیوآر کد اختصاصی پرومته</b>\n📄 محتوا: <code>{html.escape(bc_content)}</code>"
+        else:
+            buf = generate_barcode(bc_content)
+            caption = f"🏁 <b>بارکد استاندارد پرومته (Code128)</b>\n📄 داده: <code>{html.escape(bc_content)}</code>"
+        record_chat_latency(chat.id, time.perf_counter() - t0, f"تولید کننده {bc_type.upper()}")
+        await message.reply_photo(photo=buf, caption=caption, parse_mode=ParseMode.HTML)
+        return
+
+    # Fast-Path 7.8: Multimodal Vision on Replied Photo
+    if message.reply_to_message and message.reply_to_message.photo:
+        reply_photo = message.reply_to_message.photo[-1]
+        typing_task = asyncio.create_task(_send_typing_loop(context.bot, chat.id))
+        t0 = time.perf_counter()
+        try:
+            photo_file = await reply_photo.get_file()
+            photo_bytes = await photo_file.download_as_bytearray()
+            analysis = await analyze_image_with_vision(
+                image_bytes=bytes(photo_bytes),
+                prompt=cleaned_prompt,
+                chat_id=chat.id,
+            )
+            if is_reconstruction_query(cleaned_prompt):
+                preview_url = build_reconstruction_image_url(cleaned_prompt)
+                analysis += f"\n\n🎨 <b>پیش‌نمایش شبیه‌سازی مجدد تصویر:</b>\n<a href=\"{preview_url}\">مشاهده پیش‌نمایش تصویر بازسازی‌شده</a>"
+
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, "موتور بینایی و درک تصویر پرومته (Vision)")
+            await _deliver_reply(message, analysis)
+            return
+        except Exception as e:
+            logger.error(f"Error processing replied photo vision: {e}")
+        finally:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+
     # Fast-Path 8: Telegraph Article Publishing
     if any(k in cleaned_lower for k in ["تلگراف", "telegraph", "telegra.ph"]):
         # Case A: Reply to another message asking to publish to telegraph
@@ -1089,8 +1260,14 @@ def build_application():
     app.add_handler(CommandHandler(["telegraph", "telegra", "article"], telegraph_command))
     app.add_handler(CommandHandler(["calc", "hesab"], calc_command))
     app.add_handler(CommandHandler(["clear"], clear_command))
+    app.add_handler(CommandHandler(["id", "myid", "info", "chatid", "whoami"], id_command))
+    app.add_handler(CommandHandler(["qr", "qrcode"], barcode_command))
+    app.add_handler(CommandHandler(["barcode", "bar"], barcode_command))
     app.add_handler(CommandHandler(["delete", "del", "pak"], delete_command))
     app.add_handler(CommandHandler(["ping"], ping_command))
+
+    # Multimodal photo handler
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
     # All text messages (with silence-by-default logic)
     app.add_handler(

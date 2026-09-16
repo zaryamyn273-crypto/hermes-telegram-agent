@@ -621,3 +621,147 @@ def test_extract_replied_message_context():
     assert "سارا احمدی" in res
     assert "@sara_ah" in res
     assert "هوش مصنوعی" in res
+
+
+def test_user_rate_limiter():
+    from tools.rate_limiter import (
+        check_user_rate_limit,
+        get_user_quota_info,
+        _USER_LAST_REQ,
+        _USER_MINUTE_WINDOWS,
+    )
+    from config import settings
+
+    admin_id = 99999999
+    settings.ADMIN_USER_IDS = [admin_id]
+
+    # 1. Admin is unconditionally allowed
+    allowed, msg = check_user_rate_limit(admin_id)
+    assert allowed is True
+    assert msg is None
+
+    # 2. Regular user cooldown
+    test_user = 12345678
+    _USER_LAST_REQ.pop(test_user, None)
+    _USER_MINUTE_WINDOWS.pop(test_user, None)
+
+    # First request allowed
+    allowed1, msg1 = check_user_rate_limit(test_user)
+    assert allowed1 is True
+    assert msg1 is None
+
+    # Immediate second request blocked by cooldown
+    allowed2, msg2 = check_user_rate_limit(test_user)
+    assert allowed2 is False
+    assert "شکیبا باشید" in msg2
+
+    # Quota info check
+    info = get_user_quota_info(test_user)
+    assert "limit" in info
+    assert "remaining" in info
+    assert info["is_admin"] is False
+
+
+def test_id_tool():
+    from unittest.mock import MagicMock
+    from telegram.constants import ChatType
+    from tools.id_tool import is_id_request, format_id_report
+
+    # Request matching
+    assert is_id_request("/id") is True
+    assert is_id_request("/myid") is True
+    assert is_id_request("/info") is True
+    assert is_id_request("/chatid") is True
+    assert is_id_request("آیدی من") is True
+    assert is_id_request("آیدی عددی") is True
+    assert is_id_request("شناسه عددی") is True
+    assert is_id_request("آیدی من چیه") is True
+    assert is_id_request("آیدی") is True
+
+    # Negatives
+    assert is_id_request("آیدی کالای دیجیکالا چیه؟") is False
+    assert is_id_request("سلام") is False
+
+    # Format report
+    mock_update = MagicMock()
+    mock_user = MagicMock()
+    mock_user.id = 11223344
+    mock_user.first_name = "علی"
+    mock_user.last_name = "رضایی"
+    mock_user.username = "alirez"
+    mock_user.is_premium = True
+    mock_user.language_code = "fa"
+
+    mock_chat = MagicMock()
+    mock_chat.id = -100987654321
+    mock_chat.type = ChatType.SUPERGROUP
+    mock_chat.title = "گروه توسعه"
+    mock_chat.username = "devgroup"
+
+    mock_msg = MagicMock()
+    mock_msg.message_id = 456
+    mock_msg.reply_to_message = None
+
+    mock_update.effective_user = mock_user
+    mock_update.effective_chat = mock_chat
+    mock_update.effective_message = mock_msg
+
+    report = format_id_report(mock_update)
+    assert "<code>11223344</code>" in report
+    assert "<code>-100987654321</code>" in report
+    assert "<code>456</code>" in report
+    assert "علی رضایی" in report
+    assert "@alirez" in report
+
+
+def test_barcode_and_qr_tool():
+    from tools.barcode_tool import (
+        generate_qr_code,
+        generate_barcode,
+        parse_barcode_request,
+    )
+
+    # 1. QR Code generation returns valid PNG buffer
+    qr_buf = generate_qr_code("https://example.com")
+    qr_bytes = qr_buf.getvalue()
+    assert qr_bytes.startswith(b"\x89PNG")
+    assert len(qr_bytes) > 100
+
+    # 2. Barcode generation returns valid PNG buffer
+    bc_buf = generate_barcode("123456789012")
+    bc_bytes = bc_buf.getvalue()
+    assert bc_bytes.startswith(b"\x89PNG")
+    assert len(bc_bytes) > 100
+
+    # 3. Parsing commands
+    is_m, b_type, content = parse_barcode_request("/qr https://google.com")
+    assert is_m is True
+    assert b_type == "qr"
+    assert content == "https://google.com"
+
+    is_m2, b_type2, content2 = parse_barcode_request("/barcode 9789643110291")
+    assert is_m2 is True
+    assert b_type2 == "barcode"
+    assert content2 == "9789643110291"
+
+    is_m3, b_type3, content3 = parse_barcode_request("برای شماره 09123456789 کیوآر بساز")
+    assert is_m3 is True
+    assert b_type3 == "qr"
+
+    is_m4, _, _ = parse_barcode_request("سلام چطوری؟")
+    assert is_m4 is False
+
+
+def test_vision_helpers():
+    from tools.vision import is_reconstruction_query, build_reconstruction_image_url
+
+    # Reconstruction detection
+    assert is_reconstruction_query("این تصویر رو بازسازی کن") is True
+    assert is_reconstruction_query("تصویر رو مجدد بساز") is True
+    assert is_reconstruction_query("reconstruct this image") is True
+    assert is_reconstruction_query("این عکس چیست؟") is False
+
+    # URL generation
+    url = build_reconstruction_image_url("cyberpunk futuristic tehran cityscape")
+    assert "pollinations.ai" in url
+    assert "cyberpunk" in url
