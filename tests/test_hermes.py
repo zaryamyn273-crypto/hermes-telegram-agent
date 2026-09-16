@@ -386,6 +386,117 @@ def test_identity_sanitizer_gemini_and_google():
     assert "پرومته" in clean
 
 
+def test_extract_fiat_target():
+    from main import extract_fiat_target
+
+    assert extract_fiat_target("دلار") == "usd"
+    assert extract_fiat_target("قیمت دلار") == "usd"
+    assert extract_fiat_target("دلار چنده") == "usd"
+    assert extract_fiat_target("یورو") == "eur"
+    assert extract_fiat_target("قیمت یورو") == "eur"
+    assert extract_fiat_target("طلا") == "gold"
+    assert extract_fiat_target("طلای ۱۸ عیار چنده") == "gold"
+    assert extract_fiat_target("سکه") == "coin"
+    assert extract_fiat_target("سکه امامی") == "coin"
+    assert extract_fiat_target("درهم") == "aed"
+    assert extract_fiat_target("درهم امارات") == "aed"
+    assert extract_fiat_target("تتر") == "usdt"
+
+    # Multi-asset or general overview requests must return None (full table)
+    assert extract_fiat_target("قیمت ارز") is None
+    assert extract_fiat_target("ارز و طلا") is None
+    assert extract_fiat_target("قیمت دلار و طلا") is None
+    assert extract_fiat_target("سکه و یورو چنده") is None
+
+
+@pytest.mark.asyncio
+async def test_targeted_fiat_formatting():
+    import json
+    from tools.financial import get_fiat_and_gold_rates
+
+    # Populate raw mock rates for deterministic unit testing
+    database.l1_set("RAW_FINANCIAL_RATES_DICT", json.dumps({
+        "usd": 230500,
+        "usdt": 230300,
+        "eur": 266300,
+        "aed": 63040,
+        "gold18": 23500000,
+        "emami_coin": 234000000,
+        "bahar_coin": 229000000,
+        "half_coin": 119000000,
+        "quarter_coin": 63000000,
+    }), ttl_sec=60)
+
+    usd_resp = await get_fiat_and_gold_rates(target="usd")
+    assert "دلار" in usd_resp
+    assert "230,500" in usd_resp
+    assert "یورو" not in usd_resp
+    assert "طلای ۱۸ عیار" not in usd_resp
+
+    eur_resp = await get_fiat_and_gold_rates(target="eur")
+    assert "یورو" in eur_resp
+    assert "266,300" in eur_resp
+    assert "سکه تمام" not in eur_resp
+
+    gold_resp = await get_fiat_and_gold_rates(target="gold")
+    assert "طلای ۱۸ عیار" in gold_resp
+    assert "23,500,000" in gold_resp
+    assert "درهم امارات" not in gold_resp
+
+    coin_resp = await get_fiat_and_gold_rates(target="coin")
+    assert "سکه تمام طرح امامی" in coin_resp
+    assert "234,000,000" in coin_resp
+    assert "یورو" not in coin_resp
+
+    full_resp = await get_fiat_and_gold_rates(target=None)
+    assert "دلار آزاد" in full_resp
+    assert "یورو" in full_resp
+    assert "طلای ۱۸ عیار" in full_resp
+    assert "سکه تمام امامی" in full_resp
+
+
+def test_latency_query_and_benchmarking():
+    from main import is_latency_query
+    from tools.system import record_chat_latency, format_last_latency_response
+
+    # Detection of previous response latency questions
+    assert is_latency_query("این جواب رو چقدر طول کشید بدی") == "previous"
+    assert is_latency_query("چقدر طول کشید جواب بدی") == "previous"
+    assert is_latency_query("چقدر طول کشید پاسخ بدی") == "previous"
+    assert is_latency_query("پاسخ قبلی چقدر طول کشید") == "previous"
+    assert is_latency_query("چند ثانیه طول کشید جواب بدی") == "previous"
+
+    # Detection of live speed test / benchmark requests
+    assert is_latency_query("چقدر طول میکشه جواب بدی") == "benchmark"
+    assert is_latency_query("تست بکن و اعلام بکن چقدر طول میکشه جواب بدی") == "benchmark"
+    assert is_latency_query("تست کن ببین چقدر طول میکشه جواب بدی") == "benchmark"
+    assert is_latency_query("تست سرعت بده") == "benchmark"
+    assert is_latency_query("سرعتت چقدره") == "benchmark"
+    assert is_latency_query("پینگت چقدره") == "benchmark"
+    assert is_latency_query("سرعت پاسخگویی چقدر است") == "benchmark"
+
+    # Unrelated queries must NOT trigger latency tool
+    assert is_latency_query("سلام چطوری") is None
+    assert is_latency_query("قیمت دلار چنده") is None
+    assert is_latency_query("چقدر طول میکشه برم مشهد") is None
+
+    # Recording and reporting latency
+    test_cid = 999111
+    record_chat_latency(test_cid, 0.421, "شبکه اختصاصی فوق‌سریع هرمس (Flash Low)")
+    report = format_last_latency_response(test_cid)
+    assert "۰.۴۲۱ ثانیه" in report or "0.421" in report or "۴۲۱" in report
+    assert "موتور پردازش" in report
+
+
+@pytest.mark.asyncio
+async def test_live_speed_test():
+    from tools.system import run_live_speed_test
+
+    report = await run_live_speed_test()
+    assert "Live Benchmark" in report
+    assert "میلی‌ثانیه" in report
+
+
 
 
 

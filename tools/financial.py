@@ -122,28 +122,43 @@ async def _fetch_usdt_rate() -> int:
     return 230000  # Fallback baseline
 
 
-async def get_fiat_and_gold_rates(force_refresh: bool = False) -> str:
+KV_KEY_RAW_RATES = "RAW_FINANCIAL_RATES_DICT"
+
+
+async def get_fiat_and_gold_rates(force_refresh: bool = False, target: Optional[str] = None) -> str:
     """
     Fetches live rates for USD, Tether, Euro, Dirham, Gold 18k, and Coins in parallel.
-    Returns clean, high-speed Persian formatted text.
+    - If target is specified ('usd', 'usdt', 'eur', 'aed', 'gold', 'coin'), returns targeted asset info only.
+    - If target is None, returns complete comprehensive market table.
+    Uses L1 RAM caching of raw rates for sub-millisecond redelivery.
     """
+    rates: Optional[Dict[str, int]] = None
     if not force_refresh:
-        cached = await database.kv_get(KV_KEY_FIAT_GOLD)
-        if cached:
-            return cached
+        raw_cached = database.l1_get(KV_KEY_RAW_RATES)
+        if raw_cached:
+            try:
+                cached_dict = json.loads(raw_cached)
+                if isinstance(cached_dict, dict) and (cached_dict.get("usd") or cached_dict.get("usdt")):
+                    rates = cached_dict
+            except Exception:
+                pass
 
-    rates: Dict[str, int] = {}
-    usdt_val, _ = await asyncio.gather(_fetch_usdt_rate(), _fetch_tgju_rates(rates), return_exceptions=True)
+    if rates is None:
+        rates = {}
+        usdt_val, _ = await asyncio.gather(_fetch_usdt_rate(), _fetch_tgju_rates(rates), return_exceptions=True)
 
-    if isinstance(usdt_val, int) and usdt_val > 0:
-        rates["usdt"] = usdt_val
-        if not rates.get("usd"):
-            rates["usd"] = usdt_val
+        if isinstance(usdt_val, int) and usdt_val > 0:
+            rates["usdt"] = usdt_val
+            if not rates.get("usd"):
+                rates["usd"] = usdt_val
+
+        if rates.get("usd") or rates.get("usdt") or rates.get("gold18"):
+            database.l1_set(KV_KEY_RAW_RATES, json.dumps(rates), ttl_sec=90)
 
     if not rates.get("usd") and not rates.get("gold18") and not rates.get("usdt"):
         return "⚠️ در حال حاضر به دلیل اختلال موقت در سامانه‌های مبدا، دریافت نرخ لحظه‌ای ارز و طلا مقدور نیست. لطفاً دقایقی دیگر مجدداً تلاش نمایید."
 
-    # Format result in clean Persian
+    # Format values in clean Persian
     usd_str = f"{rates['usd']:,} تومان" if rates.get("usd") else "نامشخص"
     usdt_str = f"{rates['usdt']:,} تومان" if rates.get("usdt") else usd_str
     eur_str = f"{rates['eur']:,} تومان" if rates.get("eur") else "نامشخص"
@@ -154,6 +169,49 @@ async def get_fiat_and_gold_rates(force_refresh: bool = False) -> str:
     nim_str = f"{rates['half_coin']:,} تومان" if rates.get("half_coin") else "نامشخص"
     rob_str = f"{rates['quarter_coin']:,} تومان" if rates.get("quarter_coin") else "نامشخص"
 
+    # Targeted Asset Formats
+    if target == "usd":
+        return (
+            "💵 **نرخ لحظه‌ای دلار آمریکا در بازار آزاد:**\n\n"
+            f"• 💵 **دلار نقدی تهران:** `{usd_str}`\n"
+            f"• 🟢 **تتر (USDT) معادل:** `{usdt_str}`\n\n"
+            "⚡ *استعلام زنده از بازار آزاد توسط پرومته*"
+        )
+    elif target == "usdt":
+        return (
+            "🟢 **نرخ لحظه‌ای تتر (USDT) در بازار ایران:**\n\n"
+            f"• 🟢 **تتر (USDT):** `{usdt_str}`\n\n"
+            "⚡ *استعلام زنده از صرافی‌های معتبر توسط پرومته*"
+        )
+    elif target == "eur":
+        return (
+            "💶 **نرخ لحظه‌ای یورو در بازار آزاد ایران:**\n\n"
+            f"• 💶 **یورو:** `{eur_str}`\n\n"
+            "⚡ *استعلام زنده از بازار آزاد توسط پرومته*"
+        )
+    elif target == "aed":
+        return (
+            "🇦🇪 **نرخ لحظه‌ای درهم امارات در بازار آزاد:**\n\n"
+            f"• 🇦🇪 **درهم امارات:** `{aed_str}`\n\n"
+            "⚡ *استعلام زنده از بازار آزاد توسط پرومته*"
+        )
+    elif target == "gold":
+        return (
+            "🥇 **نرخ لحظه‌ای طلای ۱۸ عیار در بازار ایران:**\n\n"
+            f"• 🥇 **طلای ۱۸ عیار (هر گرم):** `{gold_str}`\n\n"
+            "⚡ *استعلام زنده از بازار زرگران توسط پرومته*"
+        )
+    elif target == "coin":
+        return (
+            "🪙 **نرخ لحظه‌ای انواع سکه در بازار ایران:**\n\n"
+            f"• 🪙 **سکه تمام طرح امامی:** `{coin_str}`\n"
+            f"• 🪙 **سکه تمام بهار آزادی:** `{bahar_str}`\n"
+            f"• 🪙 **نیم سکه:** `{nim_str}`\n"
+            f"• 🪙 **ربع سکه:** `{rob_str}`\n\n"
+            "⚡ *استعلام زنده از بازار آزاد توسط پرومته*"
+        )
+
+    # Comprehensive Table (Default)
     text = (
         "📊 **نرخ لحظه‌ای ارز و طلای بازار آزاد ایران:**\n\n"
         f"💵 **دلار آزاد:** `{usd_str}`\n"
@@ -167,7 +225,6 @@ async def get_fiat_and_gold_rates(force_refresh: bool = False) -> str:
         f"🪙 **ربع سکه:** `{rob_str}`\n\n"
         "⚡ *استعلام زنده از بازار آزاد توسط پرومته*"
     )
-
     await database.kv_set(KV_KEY_FIAT_GOLD, text, ttl_sec=90)
     return text
 

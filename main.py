@@ -39,7 +39,13 @@ from agent_engine import (
     set_user_mode,
 )
 from tools.financial import get_fiat_and_gold_rates, get_crypto_price
-from tools.system import get_current_time, calculate_math
+from tools.system import (
+    get_current_time,
+    calculate_math,
+    record_chat_latency,
+    format_last_latency_response,
+    run_live_speed_test,
+)
 from tools.weather import get_weather
 from tools.ecommerce import search_digikala
 from tools.web_reader import fetch_webpage_text
@@ -132,6 +138,7 @@ async def _process_and_reply(
         return
 
     typing_task = asyncio.create_task(_send_typing_loop(context.bot, chat.id))
+    t_start = time.perf_counter()
     try:
         final_answer = await execute_hermes_agent(
             chat_id=chat.id,
@@ -150,6 +157,10 @@ async def _process_and_reply(
             await typing_task
         except asyncio.CancelledError:
             pass
+
+    elapsed = time.perf_counter() - t_start
+    engine_label = "مغز خودمختار هرمس ایجنت (Titan Brain)" if force_agent else "شبکه اختصاصی فوق‌سریع هرمس (Flash Low)"
+    record_chat_latency(chat.id, elapsed, engine_label)
 
     await _deliver_reply(message, final_answer)
 
@@ -208,6 +219,70 @@ def is_fiat_or_gold_query(text: str) -> bool:
     has_asset = bool(_FIAT_ASSETS_PATTERN.search(t))
     has_intent = bool(_FIAT_INTENT_PATTERN.search(t))
     return has_asset and has_intent
+
+
+def extract_fiat_target(text: str) -> Optional[str]:
+    """
+    Determines if user asked for a specific single currency or gold asset:
+    - 'usd': dollar
+    - 'usdt': tether
+    - 'eur': euro
+    - 'aed': dirham
+    - 'gold': gold
+    - 'coin': coin (emami, bahar, etc.)
+    - None: general market overview (all assets)
+    """
+    t = text.lower().strip()
+    has_general_arz = bool(re.search(r"(?<!\w)(?:ارز|ارزها)(?!\w)", t))
+    has_usd = bool(re.search(r"(?<!\w)(?:دلار|dollar|usd)(?!\w)", t))
+    has_usdt = bool(re.search(r"(?<!\w)(?:تتر|usdt)(?!\w)", t))
+    has_eur = bool(re.search(r"(?<!\w)(?:یورو|eur)(?!\w)", t))
+    has_aed = bool(re.search(r"(?<!\w)(?:درهم|aed)(?!\w)", t))
+    has_gold = bool(re.search(r"(?<!\w)(?:طلا|طلای|مظنه|انس)(?!\w)", t))
+    has_coin = bool(re.search(r"(?<!\w)(?:سکه|امامی|بهار\s*آزادی|نیم\s*سکه|ربع\s*سکه)(?!\w)", t))
+
+    count = sum([has_general_arz, has_usd, has_usdt, has_eur, has_aed, has_gold, has_coin])
+    if count > 1 or count == 0:
+        return None  # Full table
+
+    if has_usd:
+        return "usd"
+    if has_usdt:
+        return "usdt"
+    if has_eur:
+        return "eur"
+    if has_aed:
+        return "aed"
+    if has_gold:
+        return "gold"
+    if has_coin:
+        return "coin"
+    return None
+
+
+_PREV_LATENCY_PATTERN = re.compile(
+    r"(?:(?:این\s*جواب|این\s*پاسخ|پاسخ\s*قبلی|جواب\s*قبلی)\s*(?:رو\s*)?(?:چقدر|چند\s*ثانیه)\s*(?:طول\s*کشید|زمان\s*برد)|(?:چقدر|چند\s*ثانیه)\s*(?:طول\s*کشید|زمان\s*برد)\s*(?:این\s*رو\s*)?(?:بدی|پاسخ\s*بدی|جواب\s*بدی|بگی))",
+    re.IGNORECASE
+)
+
+_BENCHMARK_PATTERN = re.compile(
+    r"(?:چقدر\s*(?:طول\s*میکشه|زمان\s*میبره)\s*(?:جواب|پاسخ)\s*بدی|تست\s*(?:کن|بکن|بزن)?\s*(?:ببین|و\s*اعلام\s*کن|رو)?\s*چقدر\s*طول\s*میکشه|تست\s*سرعت|تست\s*پینگ|سرعتت\s*چقدره|پینگت\s*چقدره|سرعت\s*پاسخگویی|تاخیر\s*پاسخگویی|سرعت\s*ربات|پینگ\s*ربات)",
+    re.IGNORECASE
+)
+
+
+def is_latency_query(text: str) -> Optional[str]:
+    """
+    Returns 'previous' if user asks how long the previous answer took.
+    Returns 'benchmark' if user asks to test response time / latency.
+    Returns None otherwise.
+    """
+    t = text.lower().strip()
+    if _PREV_LATENCY_PATTERN.search(t):
+        return "previous"
+    if _BENCHMARK_PATTERN.search(t):
+        return "benchmark"
+    return None
 
 
 _CRYPTO_MAP = {
@@ -505,22 +580,32 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Heartbeat & latency ping."""
+    """Heartbeat & live latency benchmark."""
+    if update.effective_chat:
+        await update.effective_chat.send_action(ChatAction.TYPING)
     t0 = time.perf_counter()
-    msg = await update.effective_message.reply_text("🏓 پونگ...")
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    await msg.edit_text(
-        f"🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده فرماندهی است.**\n⚡ تأخیر اتصال: `{elapsed_ms:.1f}ms`",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    res = await run_live_speed_test()
+    if update.effective_chat:
+        record_chat_latency(update.effective_chat.id, time.perf_counter() - t0, "تست زنده پینگ و تاخیر")
+    await _deliver_reply(update.effective_message, res)
 
 
 async def rates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct fiat & gold rates lookup."""
+    """Direct fiat & gold rates lookup (supports /dollar or specific asset arguments)."""
     if update.effective_chat:
         await update.effective_chat.send_action(ChatAction.TYPING)
-    res = await get_fiat_and_gold_rates()
-    await _deliver_reply(update.effective_message, res)
+    msg = update.effective_message
+    cmd = msg.text.split()[0].lower() if msg and msg.text else "/rates"
+    target = None
+    if "dollar" in cmd or "dolar" in cmd:
+        target = "usd"
+    elif context.args:
+        target = extract_fiat_target(" ".join(context.args))
+    t0 = time.perf_counter()
+    res = await get_fiat_and_gold_rates(target=target)
+    if update.effective_chat:
+        record_chat_latency(update.effective_chat.id, time.perf_counter() - t0, f"دستور استعلام نرخ ({target or 'جامع'})")
+    await _deliver_reply(msg, res)
 
 
 async def crypto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -712,52 +797,80 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cleaned_lower = cleaned_prompt.lower()
 
+    # Fast-Path 0: Response Time Tracking & Live Speed Benchmark
+    latency_type = is_latency_query(cleaned_lower)
+    if latency_type:
+        t0 = time.perf_counter()
+        if latency_type == "previous":
+            res = format_last_latency_response(chat.id)
+        else:
+            res = await run_live_speed_test()
+        elapsed = time.perf_counter() - t0
+        record_chat_latency(chat.id, elapsed, "سنجشگر زنده سرعت و تاخیر پرومته")
+        await _deliver_reply(message, res)
+        return
+
     # Fast-Path 1: Heartbeat / Ping
     if any(k in cleaned_lower for k in ["بیداری", "پینگ", "بیدار"]):
         if len(cleaned_lower.split()) <= 3:
-            await message.reply_text(
-                "🏓 **پونگ! پرومته کاملاً بیدار، هوشیار و آماده است.**",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            t0 = time.perf_counter()
+            res = await run_live_speed_test()
+            record_chat_latency(chat.id, time.perf_counter() - t0, "تست زنده پینگ و تاخیر")
+            await _deliver_reply(message, res)
             return
 
     # Fast-Path 2: Official Tehran Time & Solar Jalali Calendar (<1ms)
     if is_time_query(cleaned_lower):
+        t0 = time.perf_counter()
         res = get_current_time()
+        record_chat_latency(chat.id, time.perf_counter() - t0, "محاسبه‌گر ساعت و تقویم شمسی (<1ms)")
         await _deliver_reply(message, res)
         return
 
     # Fast-Path 3: Fiat & Gold Rates (<50ms)
     if is_fiat_or_gold_query(cleaned_lower):
-        res = await get_fiat_and_gold_rates()
+        t0 = time.perf_counter()
+        target = extract_fiat_target(cleaned_lower)
+        res = await get_fiat_and_gold_rates(target=target)
+        elapsed = time.perf_counter() - t0
+        asset_label = f"استعلام لحظه‌ای {target.upper()}" if target else "جدول جامع نرخ ارز و طلا"
+        record_chat_latency(chat.id, elapsed, f"ابزار اختصاصی {asset_label}")
         await _deliver_reply(message, res)
         return
 
     # Fast-Path 4: Crypto Rates (<100ms)
     crypto_sym = extract_crypto_query(cleaned_lower)
     if crypto_sym:
+        t0 = time.perf_counter()
         res = await get_crypto_price(crypto_sym)
+        record_chat_latency(chat.id, time.perf_counter() - t0, f"استعلام لحظه‌ای رمزارز {crypto_sym}")
         await _deliver_reply(message, res)
         return
 
     # Fast-Path 5: Weather (<150ms)
     weather_city = extract_weather_query(cleaned_prompt)
     if weather_city:
+        t0 = time.perf_counter()
         res = await get_weather(weather_city)
+        record_chat_latency(chat.id, time.perf_counter() - t0, f"هواشناسی زنده ({weather_city})")
         await _deliver_reply(message, res)
         return
 
     # Fast-Path 6: Digikala E-Commerce (<1s)
     dk_query = extract_digikala_query(cleaned_prompt)
     if dk_query:
+        t0 = time.perf_counter()
         res = await search_digikala(dk_query)
+        record_chat_latency(chat.id, time.perf_counter() - t0, f"جستجوی فروشگاهی دیجی‌کالا ({dk_query})")
         await _deliver_reply(message, res)
         return
 
     # Fast-Path 7: Safe Math Evaluation (<1ms)
     if is_math_query(cleaned_prompt):
+        t0 = time.perf_counter()
         calc_expr = cleaned_prompt.replace("حساب کن", "").replace("محاسبه کن", "").strip()
         res = calculate_math(calc_expr)
+        record_chat_latency(chat.id, time.perf_counter() - t0, "موتور محاسبات ریاضی پرومته (<1ms)")
         await _deliver_reply(message, res)
         return
 
