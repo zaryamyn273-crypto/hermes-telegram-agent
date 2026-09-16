@@ -1,0 +1,13 @@
+python-telegram-bot[http2]>=20.7
+httpx[http2]>=0.27.0
+pydantic>=2.5.0
+pydantic-settings>=2.0.0
+beautifulsoup4>=4.12.0
+Pillow>=10.0.0
+pytz>=2024.1
+jdatetime>=5.0.0
+aiohttp>=3.9.0
+yt-dlp>=2024.3.10
+mutagen>=1.47.0
+qrcode>=7.4.2
+python-barcode>=0.15.1
