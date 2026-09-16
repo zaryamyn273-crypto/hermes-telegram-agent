@@ -289,5 +289,62 @@ def test_music_query_cleaner_and_intent():
     assert extract_music_query("آهنگ مرغ سحر از شجریان رو بذار") is not None
 
 
+def test_should_use_hermes_agent():
+    from agent_engine import should_use_hermes_agent
+
+    # Complex / Agentic queries
+    assert should_use_hermes_agent("لطفاً درباره هوش مصنوعی جدید تحقیق کن و گزارش بده") is True
+    assert should_use_hermes_agent("یک کد پایتون بنویس و تست کن") is True
+    assert should_use_hermes_agent("آخرین اخبار تکنولوژی در وب رو سرچ کن") is True
+    assert should_use_hermes_agent("این مقاله https://example.com رو بررسی کن") is True
+
+    # Simple conversational queries
+    assert should_use_hermes_agent("سلام") is False
+    assert should_use_hermes_agent("چطوری؟") is False
+    assert should_use_hermes_agent("یک جوک بگو") is False
+
+
+@pytest.mark.asyncio
+async def test_user_mode_storage():
+    from agent_engine import get_user_mode, set_user_mode
+
+    test_uid = 999111
+    # Default is smart
+    assert await get_user_mode(test_uid) == "smart"
+
+    # Set to agent
+    await set_user_mode(test_uid, "agent")
+    assert await get_user_mode(test_uid) == "agent"
+
+    # Set to fast
+    await set_user_mode(test_uid, "fast")
+    assert await get_user_mode(test_uid) == "fast"
+
+    # Invalid mode rejected
+    assert await set_user_mode(test_uid, "invalid_mode") is False
+
+
+def test_tiered_candidate_endpoints():
+    from config import get_candidate_endpoints
+
+    # Force hermes puts hermes candidate first if configured
+    hermes_candidates = get_candidate_endpoints(force_hermes=True)
+    assert len(hermes_candidates) >= 1
+
+    # Force fast puts 9router candidates first
+    fast_candidates = get_candidate_endpoints(force_fast=True)
+    assert len(fast_candidates) >= 1
+    assert fast_candidates[0][2] == "ag/gemini-3.8-flash-low"
+
+
+def test_identity_sanitizer_gemini_and_google():
+    raw = "من مدل جمینای هستم که توسط شرکت گوگل توسعه یافته‌ام."
+    clean = sanitize_identity(raw)
+    assert "جمینای" not in clean
+    assert "گوگل" not in clean
+    assert "پرومته" in clean
+
+
+
 
 

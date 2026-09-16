@@ -17,20 +17,27 @@ import logging
 import asyncio
 from typing import Optional, Tuple
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatType, ChatAction
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters
 )
 from telegram.request import HTTPXRequest
 
 from config import settings, is_admin
-from agent_engine import execute_hermes_agent, clear_session, sanitize_identity
+from agent_engine import (
+    execute_hermes_agent,
+    clear_session,
+    sanitize_identity,
+    get_user_mode,
+    set_user_mode,
+)
 from tools.financial import get_fiat_and_gold_rates, get_crypto_price
 from tools.system import get_current_time, calculate_math
 from tools.weather import get_weather
@@ -107,9 +114,16 @@ async def _send_typing_loop(bot, chat_id: int):
         logger.debug(f"Chat action TYPING error: {e}")
 
 
-async def _process_and_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
+async def _process_and_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    prompt: str,
+    force_agent: bool = False,
+    force_fast: bool = False,
+):
     """
-    Dispatches query directly to autonomous agent engine with active Telegram typing indicator.
+    Dispatches query directly to autonomous agent engine with active Telegram typing indicator
+    and tiered speed/agent routing.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -124,6 +138,8 @@ async def _process_and_reply(update: Update, context: ContextTypes.DEFAULT_TYPE,
             user_prompt=prompt,
             user_id=user.id if user else 0,
             username=user.username or "" if user else "",
+            force_agent=force_agent,
+            force_fast=force_fast,
         )
     except Exception as e:
         logger.error(f"Error executing Prometheus Agent: {e}")
@@ -260,16 +276,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"⚡ **درود {u_name}! به پرومته (Prometheus AI) خوش آمدید.**\n\n"
-        "من **پرومته** هستم؛ دستیار هوش مصنوعی پیشرفته، پرسرعت و خودمختار شما که مجهز به ابزارهای بلادرنگ، دیتابیس ابری کلودفلر و مغز استدلال ایجنتیک است:\n\n"
-        "• 📊 **نرخ لحظه‌ای دلار، تتر، طلا و سکه** (`/rates`, `/dollar`)\n"
-        "• 🪙 **استعلام زنده رمزارزها** (`/crypto btc` یا `/crypto eth`)\n"
-        "• 🕒 **ساعت رسمی تهران و تقویم شمسی** (`/time`)\n"
-        "• 🌦 **پیش‌بینی آب و هوای شهرها** (`/weather تهران`)\n"
-        "• 🛍 **استعلام و قیمت کالا در دیجی‌کالا** (`/digikala آیفون 16`)\n"
-        "• 🎵 **دانلود و آپلود خودکار موزیک ۳۲۰** (`/music هایده سوغاتی`)\n"
-        "• 📝 **انتشار فوری در تلگراف (Telegra.ph)** (`/telegraph عنوان | متن` یا ریپلای)\n"
-        "• 🧮 **محاسبات ریاضی و علمی** (`/calc`)\n"
-        "• 🔍 **تحلیل پیشرفته، استدلال و کدنویسی خودکار**\n\n"
+        "من **پرومته** هستم؛ دستیار هوش مصنوعی پیشرفته، پرسرعت و خودمختار شما که ادغام‌شده با **مغز پردازش غول‌آسای هرمس ایجنت**، دیتابیس ابری کلودفلر و ابزارهای تخصصی زنده است:\n\n"
+        "• 🧠 **غول ایجنت خودمختار:** `/agent [پرسش یا موضوع تحقیق]` (اجرای تمام ابزارها، وب‌گردی، مرورگر و کدنویسی)\n"
+        "• ⚡ **حالت فوق‌سریع:** `/fast [پرسش]` (پاسخ‌دهی زیر ۱ ثانیه با شبکه خصوصی)\n"
+        "• ⚙️ **تنظیم حالت پاسخ‌دهی:** `/mode` (انتخاب بین هوشمند، غول ایجنت و فوق‌سریع)\n"
+        "• 📊 **نرخ لحظه‌ای دلار، تتر، طلا و سکه:** `/rates` یا `/dollar`\n"
+        "• 🪙 **استعلام زنده رمزارزها:** `/crypto btc` یا `/crypto eth`\n"
+        "• 🎵 **دانلود و آپلود مستقیم موزیک ۳۲۰:** `/music نام ترانه`\n"
+        "• 📝 **انتشار فوری در تلگراف:** `/telegraph عنوان | متن`\n"
+        "• 🛍 **استعلام و قیمت دیجی‌کالا:** `/digikala نام کالا`\n"
+        "• 🌦 **پیش‌بینی آب و هوای زنده:** `/weather نام شهر`\n"
+        "• 🕒 **ساعت رسمی و تقویم شمسی:** `/time`\n"
+        "• 🧮 **ماشین حساب و ریاضی:** `/calc`\n\n"
         "💡 *در گروه‌ها، من تنها زمانی پاسخ می‌دهم که نام «پرومته» را بیاورید، مرا منشن (@) کنید یا روی پیامم ریپلای بزنید.*"
     )
     formatted = markdown_to_telegram_html(text)
@@ -281,22 +299,116 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     text = (
         "📖 **راهنمای جامع دستورات پرومته (Prometheus AI):**\n\n"
+        "🧠 **هسته غول‌آسای هرمس ایجنت (Hermes Titan Brain):**\n"
+        "• `/agent [پرسش]` یا `/research [موضوع]` - ارجاع مستقیم به غول هرمس ایجنت برای وب‌گردی خودکار با Chromium، پژوهش عمیق، تحلیل چندمرحله‌ای و اجرای کد sandbox\n"
+        "• `/fast [پرسش]` - پاسخ‌دهی رعدآسا (زیر ۱ ثانیه) برای مکالمات و سوالات سریع\n"
+        "• `/mode` - مشاهده و تغییر حالت کاری (هوشمند خودکار / غول ایجنت / فوق‌سریع)\n\n"
+        "🛠 **ابزارهای اختصاصی و بلادرنگ:**\n"
         "• `/rates` یا `/dollar` - قیمت زنده دلار، تتر، یورو، طلا و سکه در بازار ایران\n"
         "• `/crypto [نماد]` - نرخ لحظه‌ای رمزارزها به دلار و تومان (مثال: `/crypto btc`)\n"
+        "• `/music [نام ترانه]` - جستجو و ارسال فایل کامل MP3 با کیفیت اصلی ۳۲۰\n"
+        "• `/telegraph [عنوان | متن]` - انتشار فوری در تلگراف با Instant View\n"
+        "• `/read [لینک]` - استخراج و خلاصه متن صفحات وب\n"
+        "• `/weather [شهر]` - وضعیت آب و هوای زنده شهرها\n"
+        "• `/digikala [کالا]` - استعلام قیمت و موجودی دیجی‌کالا\n"
         "• `/time` - ساعت رسمی تهران و تاریخ دقیق شمسی\n"
-        "• `/weather [شهر]` - آب و هوای زنده شهرها (مثال: `/weather تهران`)\n"
-        "• `/digikala [کالا]` - استعلام زنده قیمت، موجودی و لینک خرید دیجی‌کالا\n"
-        "• `/music [نام آهنگ]` - جستجو، استخراج و ارسال مستقیم فایل صوتی با کیفیت اصلی ۳۲۰\n"
-        "• `/telegraph [عنوان | متن]` - انتشار فوری مقالات و متن‌های بلند در تلگراف با قابلیت نمایش فوری (Instant View)\n"
-        "• `/read [لینک]` - استخراج و مطالعه متن صفحات وب\n"
-        "• `/calc [عبارت]` - محاسبات ریاضی و علمی (مثال: `/calc sqrt(144) + 10`)\n"
-        "• `/clear` - پاکسازی حافظه نشست و دیتابیس گفتگو\n"
-        "• `/ping` - تست بیداری و سرعت پاسخ‌دهی سرور\n\n"
-        "🗣 **مکالمه طبیعی و هوشمند:**\n"
-        "می‌توانید هر سوالی را به زبان ساده بپرسید؛ پرومته به صورت هوشمند و بدون نیاز به تایپ دستور پاسخ می‌دهد."
+        "• `/calc [عبارت]` - محاسبات ریاضی و علمی\n"
+        "• `/clear` - پاکسازی حافظه نشست جاری\n"
+        "• `/ping` - بررسی بیداری و سرعت پاسخ‌دهی سرور\n\n"
+        "🗣 **مکالمه روان:** هر سوالی بپرسید، پرومته به صورت هوشمند و خودکار بهترین روش پاسخ را انتخاب می‌کند."
     )
     formatted = markdown_to_telegram_html(text)
     await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
+
+
+async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Directly invokes the autonomous Hermes Agent Titan Brain with all tools."""
+    args = context.args or []
+    if not args:
+        guide = (
+            "🧠 **موتور غول‌آسای هرمس ایجنت (Hermes Titan Brain):**\n\n"
+            "برای پژوهش‌های عمیق وب، تحلیل‌های چندمرحله‌ای، اجرای ابزارهای خودکار و کدنویسی، پرسش خود را وارد کنید:\n\n"
+            "مثال:\n"
+            "• `/agent آخرین وضعیت و مشخصات فنی مدل Gemini 3 را به طور کامل تحلیل و گزارش کن`\n"
+            "• `/agent یک اسکریپت پایتون بنویس برای تحلیل داده‌های مالی و نمودار شبیه‌سازی کن`"
+        )
+        await update.effective_message.reply_text(guide, parse_mode=ParseMode.MARKDOWN)
+        return
+    query = " ".join(args).strip()
+    await _process_and_reply(update, context, query, force_agent=True)
+
+
+async def fast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Directly invokes ultra low-latency fast engine (<800ms) for quick answers."""
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text(
+            "⚡ **حالت فوق‌سریع پرومته:**\nلطفاً سوال یا پیام خود را بعد از دستور وارد کنید. مثال:\n`/fast پایتخت برزیل کجاست؟`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    query = " ".join(args).strip()
+    await _process_and_reply(update, context, query, force_fast=True)
+
+
+async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allows user to inspect or toggle their execution mode (smart, agent, fast)."""
+    user = update.effective_user
+    uid = user.id if user else 0
+    current_mode = await get_user_mode(uid)
+
+    mode_titles = {
+        "smart": "🎯 حالت هوشمند (Smart Hybrid - خودکار)",
+        "agent": "🧠 حالت غول ایجنت (Hermes Titan Brain)",
+        "fast": "⚡ حالت فوق‌سریع (Ultra Fast <1s)",
+    }
+
+    text = (
+        f"⚙️ **تنظیمات حالت اجرایی پرومته:**\n\n"
+        f"وضعیت فعلی شما: **{mode_titles.get(current_mode, '🎯 حالت هوشمند')}**\n\n"
+        "یکی از حالت‌های زیر را برای پردازش پیام‌های خود انتخاب نمایید:\n\n"
+        "• 🎯 **حالت هوشمند (پیش‌فرض):** پاسخ‌های چت زیر ۱ ثانیه، و ارجاع خودکار سوالات پژوهشی و تخصصی به غول هرمس ایجنت.\n"
+        "• 🧠 **حالت غول ایجنت:** اجرای تمام پیام‌ها توسط مغز خودمختار هرمس ایجنت با تمام ابزارهای وب، مرورگر و استدلال عمیق.\n"
+        "• ⚡ **حالت فوق‌سریع:** پاسخ‌دهی رعدآسا (زیر ۱ ثانیه) برای تمام پیام‌ها از شبکه خصوصی داخلی."
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🎯 حالت هوشمند", callback_data="setmode_smart"),
+            InlineKeyboardButton("🧠 غول ایجنت", callback_data="setmode_agent"),
+        ],
+        [
+            InlineKeyboardButton("⚡ فوق‌سریع", callback_data="setmode_fast"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.effective_message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+
+
+async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles inline keyboard selection for modes."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    data = query.data or ""
+    if data.startswith("setmode_"):
+        new_mode = data.replace("setmode_", "").strip()
+        user = update.effective_user
+        uid = user.id if user else 0
+        await set_user_mode(uid, new_mode)
+
+        mode_names = {
+            "smart": "🎯 حالت هوشمند (Smart Hybrid)",
+            "agent": "🧠 حالت غول ایجنت (Hermes Titan Brain)",
+            "fast": "⚡ حالت فوق‌سریع (Ultra Fast)",
+        }
+        name = mode_names.get(new_mode, new_mode)
+        await query.edit_message_text(
+            f"✅ **حالت اجرایی شما با موفقیت به «{name}» تغییر یافت.**\nاز این پس پیام‌های شما با این الگو پردازش خواهند شد.",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -629,6 +741,10 @@ def build_application():
     # Commands & Aliases
     app.add_handler(CommandHandler(["start"], start_command))
     app.add_handler(CommandHandler(["help"], help_command))
+    app.add_handler(CommandHandler(["agent", "research", "hermes"], agent_command))
+    app.add_handler(CommandHandler(["fast", "speed"], fast_command))
+    app.add_handler(CommandHandler(["mode", "setting", "settings"], mode_command))
+    app.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^setmode_"))
     app.add_handler(CommandHandler(["rates", "dollar", "arz", "gheymat"], rates_command))
     app.add_handler(CommandHandler(["crypto"], crypto_command))
     app.add_handler(CommandHandler(["time", "saat"], time_command))

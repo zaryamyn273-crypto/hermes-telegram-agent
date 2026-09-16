@@ -161,6 +161,13 @@ def sanitize_identity(text: str) -> str:
         (r"نوس\s*ریسرچ", "توسعه‌دهندگان پرومته"),
         (r"nous\s*research", "Prometheus Core"),
         (r"NousResearch", "Prometheus"),
+        (r"\bgemini\b", "Prometheus"),
+        (r"\bGemini\b", "Prometheus"),
+        (r"جمینای", "پرومته"),
+        (r"توسط گوگل", "توسط تیم پرومته"),
+        (r"مدل گوگل", "مدل اختصاصی پرومته"),
+        (r"\bGoogle\b", "Prometheus Core"),
+        (r"گوگل", "پرومته"),
     ]
     for pat, rep in replacements:
         text = re.sub(pat, rep, text, flags=re.IGNORECASE)
@@ -235,6 +242,55 @@ def clear_session(chat_id: int):
 
 
 # =========================================================================
+# Intent Classification & User Mode Management
+# =========================================================================
+
+_HERMES_INTENT_KEYWORDS = (
+    "تحقیق", "پژوهش", "جستجو", "سرچ", "search", "web", "وب",
+    "بررسی کن", "تحلیل", "آنالیز", "analyze", "مقایسه", "کد",
+    "برنامه", "پایتون", "python", "اسکریپت", "اجرا کن", "تست کن",
+    "اخبار", "خبر", "جدیدترین", "امروز چه خبر", "آخرین اطلاعات",
+    "اطلاعات جامع", "توضیح کامل", "گزارش", "داکیومنت", "مقاله",
+    "لینک", "سایت", "وبسایت", "url", "صفحه"
+)
+
+
+def should_use_hermes_agent(prompt: str) -> bool:
+    """
+    Determines whether a user prompt requires the autonomous Hermes Agent tools
+    (e.g., deep web search, browser automation, code execution, multi-step analysis).
+    """
+    if not prompt:
+        return False
+    p_lower = prompt.lower()
+    if any(kw in p_lower for kw in _HERMES_INTENT_KEYWORDS):
+        return True
+    if len(p_lower.split()) > 25:
+        return True
+    if "http://" in p_lower or "https://" in p_lower:
+        return True
+    return False
+
+
+async def get_user_mode(user_id: int) -> str:
+    """Returns user execution mode: 'smart' (default), 'agent', or 'fast'."""
+    if not user_id:
+        return "smart"
+    mode = await database.kv_get(f"USER_MODE_{user_id}")
+    if mode in ("smart", "agent", "fast"):
+        return mode
+    return "smart"
+
+
+async def set_user_mode(user_id: int, mode: str) -> bool:
+    """Saves user execution mode in L1 RAM and Cloudflare KV."""
+    if mode not in ("smart", "agent", "fast"):
+        return False
+    await database.kv_set(f"USER_MODE_{user_id}", mode, ttl_sec=86400 * 60)
+    return True
+
+
+# =========================================================================
 # Main Autonomous Agent Execution
 # =========================================================================
 
@@ -243,12 +299,14 @@ async def execute_hermes_agent(
     user_prompt: str,
     user_id: int = 0,
     username: str = "",
+    force_agent: bool = False,
+    force_fast: bool = False,
 ) -> str:
     """
-    Directly dispatches queries to the Hermes Agent backend with model 'ag/gemini-3.8-flash-low'
-    (with private 9router failover), utilizing Cloudflare KV and L1 RAM caching.
-    Automatically handles URL extraction & webpage reading.
-    Returns the final synthesized answer promptly without Telegram rate-limit or placeholder bugs.
+    Directly dispatches queries to the appropriate engine:
+    - Tier 1 (Fast Mode): Ultra low-latency 9router private network (~400-800ms) for casual chat.
+    - Tier 2 (Agent Mode): Autonomous Hermes Agent Titan Brain for deep web research, tools & code.
+    - Automatic resilient failover guarantees 100% uptime with Cloudflare L1/KV caching.
     """
     # 1. Local Security & Jailbreak Guardrail Check
     violation = check_security_guardrails(user_prompt)
@@ -289,8 +347,21 @@ async def execute_hermes_agent(
     if turn_history and turn_history[-1].get("role") == "user":
         turn_history[-1] = {"role": "user", "content": augmented_prompt}
 
-    # 5. Resolve Candidate Endpoints (Hermes Agent first with 3.8-flash-low, then 9router)
-    candidate_endpoints = get_candidate_endpoints()
+    # 5. Determine Routing Strategy (Speed vs Titan Hermes Agent)
+    if force_agent:
+        wants_agent = True
+    elif force_fast:
+        wants_agent = False
+    else:
+        user_mode = await get_user_mode(user_id)
+        if user_mode == "agent":
+            wants_agent = True
+        elif user_mode == "fast":
+            wants_agent = False
+        else:
+            wants_agent = should_use_hermes_agent(user_prompt)
+
+    candidate_endpoints = get_candidate_endpoints(force_hermes=wants_agent, force_fast=not wants_agent)
     if not candidate_endpoints:
         candidate_endpoints = [(
             get_effective_router_url(),
@@ -303,8 +374,12 @@ async def execute_hermes_agent(
     ] + turn_history
 
     final_answer: Optional[str] = None
+    client = get_http_client()
 
     for api_url, api_key, model in candidate_endpoints:
+        is_hermes = (model == "hermes-agent") or ("hermes" in api_url.lower())
+        timeout_sec = 28.0 if is_hermes else 10.0
+
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
@@ -319,11 +394,12 @@ async def execute_hermes_agent(
         }
 
         try:
-            client = get_http_client()
+            logger.info(f"Dispatching to {api_url} (model={model}, is_hermes={is_hermes}, timeout={timeout_sec}s)")
             resp = await client.post(
                 f"{api_url}/chat/completions",
                 headers=headers,
-                json=payload
+                json=payload,
+                timeout=timeout_sec
             )
             if resp.status_code != 200:
                 logger.warning(f"Endpoint {api_url} returned HTTP {resp.status_code}: {resp.text[:200]}")

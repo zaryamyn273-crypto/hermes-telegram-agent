@@ -24,6 +24,8 @@ try:
 
         HERMES_ENDPOINT: str = Field(default="", env="HERMES_ENDPOINT")
         HERMES_API_KEY: str = Field(default="", env="HERMES_API_KEY")
+        HERMES_MODEL: str = Field(default="hermes-agent", env="HERMES_MODEL")
+        HERMES_PUBLIC_URL: str = Field(default="", env="HERMES_PUBLIC_URL")
 
         TAVILY_API_KEYS: str = Field(default="", env="TAVILY_API_KEYS")
         CLOUDFLARE_ACCOUNT_ID: str = Field(default="", env="CLOUDFLARE_ACCOUNT_ID")
@@ -60,6 +62,8 @@ except ImportError:
 
         HERMES_ENDPOINT: str = os.getenv("HERMES_ENDPOINT", "")
         HERMES_API_KEY: str = os.getenv("HERMES_API_KEY", "")
+        HERMES_MODEL: str = os.getenv("HERMES_MODEL", "hermes-agent")
+        HERMES_PUBLIC_URL: str = os.getenv("HERMES_PUBLIC_URL", "")
 
         TAVILY_API_KEYS: str = os.getenv("TAVILY_API_KEYS", "")
         CLOUDFLARE_ACCOUNT_ID: str = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
@@ -100,37 +104,54 @@ def is_admin(user_id: Optional[int]) -> bool:
         return False
 
 
-def get_candidate_endpoints() -> List[Tuple[str, str, str]]:
+def get_candidate_endpoints(force_hermes: bool = False, force_fast: bool = False) -> List[Tuple[str, str, str]]:
     """
     Returns ordered list of (base_url, api_key, model) candidates for resilient failover.
-    Prioritizes ultra low-latency internal 9router first, then public 9router, then Hermes Agent fallback.
+    - If force_hermes=True: Prioritizes autonomous Hermes Agent first (model='hermes-agent'), then 9router failover.
+    - If force_fast=True: Prioritizes ultra low-latency internal 9router first, then public 9router, then Hermes.
+    - If default: Prioritizes internal 9router for sub-second responses, backed by Hermes Agent and public mirrors.
     """
-    candidates = []
     fast_model = settings.ROUTER_FAST_MODEL or "ag/gemini-3.8-flash-low"
+    hermes_model = getattr(settings, "HERMES_MODEL", "hermes-agent") or "hermes-agent"
 
-    # 1. 9router Internal (Ultra low-latency Railway private network - 0ms network transit)
+    hermes_candidates: List[Tuple[str, str, str]] = []
+    if settings.HERMES_ENDPOINT:
+        hermes_candidates.append((
+            settings.HERMES_ENDPOINT.rstrip("/"),
+            settings.HERMES_API_KEY or settings.ROUTER_API_KEY,
+            hermes_model
+        ))
+    pub_hermes = getattr(settings, "HERMES_PUBLIC_URL", "")
+    if pub_hermes and pub_hermes != settings.HERMES_ENDPOINT:
+        hermes_candidates.append((
+            pub_hermes.rstrip("/"),
+            settings.HERMES_API_KEY or settings.ROUTER_API_KEY,
+            hermes_model
+        ))
+
+    fast_candidates: List[Tuple[str, str, str]] = []
     if settings.ROUTER_INTERNAL_BASE_URL:
-        candidates.append((
+        fast_candidates.append((
             settings.ROUTER_INTERNAL_BASE_URL.rstrip("/"),
             settings.ROUTER_API_KEY,
             fast_model
         ))
-
-    # 2. 9router Public (Public Railway fallback)
     if settings.ROUTER_BASE_URL:
-        candidates.append((
+        fast_candidates.append((
             settings.ROUTER_BASE_URL.rstrip("/"),
             settings.ROUTER_API_KEY,
             fast_model
         ))
 
-    # 3. Hermes Agent Service (Fallback)
-    if settings.HERMES_ENDPOINT:
-        candidates.append((
-            settings.HERMES_ENDPOINT.rstrip("/"),
-            settings.HERMES_API_KEY or settings.ROUTER_API_KEY,
-            fast_model
-        ))
+    if force_hermes:
+        candidates = hermes_candidates + fast_candidates
+    elif force_fast:
+        candidates = fast_candidates + hermes_candidates
+    else:
+        candidates = fast_candidates + hermes_candidates
+
+    if not candidates:
+        candidates.append(("https://api.openai.com/v1", settings.ROUTER_API_KEY, fast_model))
 
     return candidates
 
