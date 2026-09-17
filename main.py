@@ -412,20 +412,24 @@ async def _deliver_reply(message, final_text: str):
 
     try:
         formatted = markdown_to_telegram_html(cleaned)
-        chunks = split_message(formatted, max_len=3900) if len(formatted) > 3900 else [formatted]
+        chunks = split_message(formatted, max_len=3900)
         for ch in chunks:
             try:
                 await message.reply_text(ch, parse_mode=ParseMode.HTML)
             except Exception as html_err:
-                logger.warning(f"HTML delivery failed ({html_err}), falling back to plain text")
-                plain_ch = strip_thinking(cleaned)[:3900]
-                await message.reply_text(plain_ch)
+                logger.warning(f"HTML delivery failed for chunk ({html_err}), attempting sanitized fallback...")
+                clean_ch = re.sub(r"<[^>]+>", "", ch).strip()
+                if clean_ch:
+                    await message.reply_text(clean_ch)
     except BadRequest as e:
         logger.warning(f"Telegram BadRequest in response delivery: {e}")
     except Exception as e:
         logger.error(f"Failed to deliver message: {e}")
         try:
-            await message.reply_text(cleaned[:3900])
+            plain_fallback = re.sub(r"<[^>]+>", "", cleaned).strip()
+            chunks = split_message(plain_fallback, max_len=3900)
+            for ch in chunks:
+                await message.reply_text(ch)
         except Exception:
             pass
 

@@ -46,6 +46,23 @@ def test_markdown_formatter():
     assert "<code>code</code>" in html_out
     assert '<a href="https://example.com">link</a>' in html_out
 
+    # Test Telegram-native conversions
+    md2 = """# تیتر اصلی
+> این یک نقل قول تلگرامی است
+---
+||اسپویلر||
+__زیرخط__
+~~خط‌خورده~~
+"""
+    html_out2 = markdown_to_telegram_html(md2)
+    assert "<b>تیتر اصلی</b>" in html_out2
+    assert "<blockquote>" in html_out2
+    assert "این یک نقل قول تلگرامی است" in html_out2
+    assert "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯" in html_out2
+    assert "<tg-spoiler>اسپویلر</tg-spoiler>" in html_out2
+    assert "<u>زیرخط</u>" in html_out2
+    assert "<s>خط‌خورده</s>" in html_out2
+
 
 def test_split_message():
     long_txt = "A" * 5000
