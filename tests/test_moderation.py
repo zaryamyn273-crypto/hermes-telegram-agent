@@ -460,3 +460,77 @@ async def test_group_list_commands_and_interception():
     handled3 = await handle_admin_text_command(up, context, "/groups")
     assert handled3 is True
     msg.reply_text.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_admin_directives_and_permanent_settings():
+    from main import handle_admin_text_command
+    from tools.moderation import (
+        set_admin_setting,
+        get_admin_setting,
+        delete_admin_setting,
+        get_all_admin_settings,
+        get_cached_admin_directives,
+        log_admin_command,
+        get_admin_commands_log,
+    )
+
+    admin_id = 8814471014
+    context = MagicMock()
+    context.bot.username = "AMZprometheusopenbot"
+
+    # 1. Direct programmatic API test
+    await set_admin_setting("test_rule_1", "همیشه خلاصه بگو", category="directive", admin_id=admin_id)
+    val = await get_admin_setting("test_rule_1")
+    assert val == "همیشه خلاصه بگو"
+
+    directives = get_cached_admin_directives()
+    assert any(d["key_name"] == "test_rule_1" for d in directives)
+
+    # 2. Test audit log
+    logs = await get_admin_commands_log(limit=10)
+    assert any(l["command"] == "set_setting" and "test_rule_1" in l["args"] for l in logs)
+
+    # 3. Test deletion
+    await delete_admin_setting("test_rule_1", admin_id=admin_id)
+    assert await get_admin_setting("test_rule_1") is None
+    assert not any(d["key_name"] == "test_rule_1" for d in get_cached_admin_directives())
+
+    # 4. Persian Natural Language Admin Command Interception
+    up = MagicMock()
+    up.effective_user.id = admin_id
+    up.effective_user.username = "admin"
+    up.effective_chat.id = admin_id
+    up.effective_chat.type = "private"
+    msg = MagicMock()
+    msg.reply_text = AsyncMock()
+    up.effective_message = msg
+
+    # a) "ثبت دستور: همیشه پاسخ‌ها کوتاه باشد"
+    handled = await handle_admin_text_command(up, context, "ثبت دستور: همیشه پاسخ‌ها کوتاه باشد")
+    assert handled is True
+    msg.reply_text.assert_called()
+    all_text = "".join(c[0][0] for c in msg.reply_text.call_args_list)
+    assert "دستور دائمی ادمین با موفقیت در دیتابیس ثبت شد" in all_text
+
+    # b) "دستور دائمی style: پاسخ‌ها بسیار رسمی باشد"
+    msg.reply_text.reset_mock()
+    handled2 = await handle_admin_text_command(up, context, "دستور دائمی style: پاسخ‌ها بسیار رسمی باشد")
+    assert handled2 is True
+    assert await get_admin_setting("style") == "پاسخ‌ها بسیار رسمی باشد"
+
+    # c) "دستورات ادمین"
+    msg.reply_text.reset_mock()
+    handled3 = await handle_admin_text_command(up, context, "دستورات ادمین")
+    assert handled3 is True
+    msg.reply_text.assert_called()
+    listing_text = "".join(c[0][0] for c in msg.reply_text.call_args_list)
+    assert "پایگاه فرامین و تنظیمات دائمی ادمین" in listing_text
+    assert "style" in listing_text
+
+    # d) "حذف دستور style"
+    msg.reply_text.reset_mock()
+    handled4 = await handle_admin_text_command(up, context, "حذف دستور style")
+    assert handled4 is True
+    msg.reply_text.assert_called()
+    assert await get_admin_setting("style") is None

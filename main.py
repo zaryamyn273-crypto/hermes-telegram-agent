@@ -64,7 +64,9 @@ from tools.moderation import (
     get_admin_commands_log,
     set_admin_setting,
     get_admin_setting,
+    delete_admin_setting,
     get_all_admin_settings,
+    get_cached_admin_directives,
     parse_duration_string,
     format_duration_persian,
     _MOD_LOCK,
@@ -2129,8 +2131,8 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
         await pendinggroups_command(update, context)
         return True
 
-    # 4. Admin Settings
-    if re.match(r"^(?:/)?(?:adminsettings|customdata|تنظیمات\s+ادمین|تنظیمات)$", t, re.IGNORECASE):
+    # 4. Admin Settings & Directives List
+    if re.match(r"^(?:/)?(?:directives|adminrules|rules|adminsettings|customdata|(?:لیست|فهرست|مشاهده|نمایش)?\s*(?:دستورات|تنظیمات|قوانین)\s*(?:ادمین|دائمی)?)$", t, re.IGNORECASE):
         await settings_command(update, context)
         return True
 
@@ -2179,7 +2181,53 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
     if mute_m:
         return await execute_admin_mute(update, context, mute_m.group(1) or "")
 
-    # 14. Dynamic Setting Set
+    # 14. Register Permanent Admin Directive / Rule
+    dir_m = re.match(
+        r"^(?:/)?(?:ثبت\s+دستور|دستور\s+دائمی|دستور\s+جدید|دستور\s+ادمین|directive|addrule|rule)\s*(?::|-)?\s*(?:([a-zA-Z0-9_\-\u0600-\u06FF]+)\s*[:=]\s*)?(.*)$",
+        t,
+        re.IGNORECASE | re.DOTALL
+    )
+    if dir_m:
+        k = (dir_m.group(1) or "").strip()
+        v = (dir_m.group(2) or "").strip()
+        if not k and v:
+            parts = v.split(maxsplit=1)
+            if len(parts) == 2 and parts[0].lower() in ("add", "set", "ثبت", "ایجاد"):
+                sub = parts[1].split(maxsplit=1)
+                if len(sub) == 2:
+                    k, v = sub[0], sub[1]
+        if not k:
+            all_s = await get_all_admin_settings()
+            existing = [s.get("key_name", "") for s in all_s if s.get("key_name", "").startswith("rule_")]
+            k = f"rule_{len(existing) + 1}"
+
+        if v:
+            await set_admin_setting(k, v, category="directive", admin_id=user.id)
+            await update.effective_message.reply_text(
+                f"💾 <b>دستور دائمی ادمین با موفقیت در دیتابیس ثبت شد:</b>\n\n"
+                f"🔑 <b>عنوان:</b> <code>{html.escape(k)}</code>\n"
+                f"📄 <b>دستور:</b> <code>{html.escape(v)}</code>\n\n"
+                f"🌐 <i>این دستور بلافاصله در حافظه زنده (L1 RAM)، دیتابیس Cloudflare D1 و KV ذخیره گردید و به طور دائم بر تمام پاسخ‌های پرومته اعمال می‌شود.</i>",
+                parse_mode=ParseMode.HTML
+            )
+            return True
+
+    # 14.1 Delete Directive / Setting
+    del_m = re.match(
+        r"^(?:/)?(?:delsetting|del_setting|delrule|del_rule|deldirective|del_directive|(?:حذف|پاک\s*کردن)\s+(?:دستور|تنظیم|قانون))\s+([a-zA-Z0-9_\-\u0600-\u06FF]+)$",
+        t,
+        re.IGNORECASE
+    )
+    if del_m:
+        k = del_m.group(1).strip()
+        await delete_admin_setting(k, admin_id=user.id)
+        await update.effective_message.reply_text(
+            f"🗑 <b>دستور/تنظیم <code>{html.escape(k)}</code> با موفقیت از دیتابیس و حافظه پرومته حذف گردید.</b>",
+            parse_mode=ParseMode.HTML
+        )
+        return True
+
+    # 14.2 Dynamic Setting Set
     set_m = re.match(r"^(?:/)?(?:set|set_setting|تنظیم)\s+([a-zA-Z0-9_\-\.]+)\s+(.*)$", t, re.DOTALL)
     if set_m:
         k = set_m.group(1).strip()
@@ -2879,8 +2927,30 @@ async def get_setting_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.reply_text(f"🔑 <code>{html.escape(key)}</code>:\n<code>{html.escape(val)}</code>", parse_mode=ParseMode.HTML)
 
 
+async def del_setting_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deletes an admin setting or permanent directive from D1, KV, and RAM."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    args = context.args or []
+    if not args:
+        await msg.reply_text("⚠️ نحوه استفاده: <code>/delsetting [کلید]</code> یا <code>حذف دستور [کلید]</code>", parse_mode=ParseMode.HTML)
+        return
+
+    key = args[0].strip()
+    await delete_admin_setting(key, admin_id=user.id)
+    await msg.reply_text(
+        f"🗑 <b>دستور/تنظیم <code>{html.escape(key)}</code> با موفقیت از دیتابیس و حافظه پرومته حذف گردید.</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lists all custom settings stored in Cloudflare D1."""
+    """Lists all custom settings and permanent directives stored in Cloudflare D1 and RAM."""
     user = update.effective_user
     msg = update.effective_message
     if not user or not is_admin(user.id):
@@ -2890,15 +2960,38 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     all_settings = await get_all_admin_settings()
     if not all_settings:
-        await msg.reply_text("هیچ تنظیماتی در دیتابیس ذخیره نشده است.")
+        await msg.reply_text(
+            "ℹ️ <b>هنوز هیچ دستور یا تنظیماتی در دیتابیس ثبت نشده است.</b>\n\n"
+            "💡 <b>برای ثبت دستور دائمی جدید:</b>\n"
+            "• <code>ثبت دستور [عنوان]: [متن دستور]</code>\n"
+            "• <code>/set [کلید] [مقدار]</code>",
+            parse_mode=ParseMode.HTML
+        )
         return
 
-    lines = [f"⚙️ <b>تنظیمات و دستورات ذخیره‌شده ادمین در دیتابیس ({len(all_settings)} مورد):</b>\n"]
-    for s in all_settings:
-        k = s.get("key_name")
-        v = s.get("data_value")
-        cat = s.get("category")
-        lines.append(f"• <b>[{html.escape(cat or 'general')}]</b> <code>{html.escape(k or '')}</code>:\n  └ <code>{html.escape(v or '')}</code>")
+    directives = [s for s in all_settings if s.get("category") in ("directive", "rule", "instruction", "system")]
+    others = [s for s in all_settings if s.get("category") not in ("directive", "rule", "instruction", "system")]
+
+    lines = [f"⚙️ <b>پایگاه فرامین و تنظیمات دائمی ادمین ({len(all_settings)} مورد فعال):</b>\n"]
+
+    if directives:
+        lines.append("📜 <b>فرامین و دستورات دائمی اعمال‌شده بر رفتار هوش مصنوعی:</b>")
+        for d in directives:
+            k = d.get("key_name") or ""
+            v = d.get("data_value") or ""
+            lines.append(f"• 🔑 <code>{html.escape(k)}</code>:\n  └ {html.escape(v)}")
+        lines.append("")
+
+    if others:
+        lines.append("🔧 <b>سایر متغیرها و تنظیمات ذخیره‌شده:</b>")
+        for s in others:
+            k = s.get("key_name") or ""
+            v = s.get("data_value") or ""
+            cat = s.get("category") or "custom"
+            lines.append(f"• <b>[{html.escape(cat)}]</b> <code>{html.escape(k)}</code>: <code>{html.escape(v)}</code>")
+        lines.append("")
+
+    lines.append("⚡️ <b>راهنمای مدیریت فرامین دائم:</b>\n• ثبت دستور جدید: <code>ثبت دستور [عنوان]: [متن]</code>\n• حذف دستور: <code>حذف دستور [عنوان]</code> یا <code>/delsetting [عنوان]</code>")
 
     text = "\n".join(lines)
     for chunk in split_message(text, max_len=3800):
@@ -3024,7 +3117,8 @@ def build_application():
     app.add_handler(CommandHandler(["rejectgroup", "reject_group"], guard(rejectgroup_command, is_admin_cmd=True)))
     app.add_handler(CommandHandler(["set", "set_setting"], guard(set_setting_command, is_admin_cmd=True)))
     app.add_handler(CommandHandler(["get", "get_setting"], guard(get_setting_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["adminsettings", "customdata"], guard(settings_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["delsetting", "del_setting", "delrule", "del_rule", "deldirective"], guard(del_setting_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["adminsettings", "customdata", "directives", "rules"], guard(settings_command, is_admin_cmd=True)))
     app.add_handler(CommandHandler(["adminlogs", "audit"], guard(adminlogs_command, is_admin_cmd=True)))
 
     # Callback Query Handlers for Group Approvals

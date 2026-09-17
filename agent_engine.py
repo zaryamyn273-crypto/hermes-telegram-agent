@@ -566,6 +566,26 @@ async def execute_hermes_agent(
     parts = [PROMETHEUS_SYSTEM_PROMPT]
     if time_ctx:
         parts.append(f"[تقویم، سال و زمان زنده رسمی کشور (ایران - تهران)]:\n{time_ctx}")
+
+    # Inject permanent admin directives stored in database and L1 cache
+    try:
+        from tools.moderation import get_cached_admin_directives
+        active_directives = get_cached_admin_directives()
+    except Exception:
+        active_directives = []
+
+    if active_directives:
+        dir_lines = [
+            "[فرامین و دستورات دائمی ثبت‌شده توسط ادمین اصلی ربات]:\n"
+            "ادمین ربات فرامین زیر را به عنوان قوانین دائمی و غیرقابل تغییر در دیتابیس ثبت کرده است. رعایت کامل این دستورات در تمام پاسخ‌ها الزامی و قطعی است:"
+        ]
+        for d in active_directives:
+            k = d.get("key_name", "")
+            v = d.get("data_value", "")
+            if v:
+                dir_lines.append(f"• **{k}**: {v}")
+        parts.append("\n".join(dir_lines))
+
     parts.append(brevity_directive)
     sys_prompt = "\n\n".join(parts)
 

@@ -1050,3 +1050,39 @@ async def test_delete_message_flow():
     user_msg2.delete.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_agent_engine_injects_admin_directives():
+    from tools.moderation import set_admin_setting, delete_admin_setting
+    from unittest.mock import patch, AsyncMock, MagicMock
+    from agent_engine import execute_hermes_agent
+
+    admin_id = 8814471014
+    await set_admin_setting("bot_signature", "همیشه نام پرومته را با افتخار بیاور", category="directive", admin_id=admin_id)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "choices": [{"message": {"content": "پاسخ پرومته"}}]
+    }
+
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_resp
+
+    with patch("agent_engine.get_http_client", return_value=mock_client):
+        await execute_hermes_agent(chat_id=12345, user_prompt="سلام")
+
+    # Inspect post call payload messages
+    assert mock_client.post.called
+    call_args = mock_client.post.call_args
+    sent_payload = call_args[1]["json"]
+    sent_messages = sent_payload["messages"]
+    sys_msg = next(m for m in sent_messages if m["role"] == "system")
+    sys_content = sys_msg["content"]
+
+    assert "فرامین و دستورات دائمی ثبت‌شده توسط ادمین اصلی ربات" in sys_content
+    assert "همیشه نام پرومته را با افتخار بیاور" in sys_content
+
+    # Clean up
+    await delete_admin_setting("bot_signature", admin_id=admin_id)
+
+

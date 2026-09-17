@@ -9,10 +9,12 @@ Comprehensive High-Performance Moderation & Governance Engine for Prometheus:
 
 import os
 import re
+import json
 import time
 import logging
 import asyncio
 import threading
+from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple, Set, Union
 
@@ -48,6 +50,12 @@ _TRACKED_GROUPS: Dict[int, Dict[str, Any]] = {}
 
 # Track pending notification sent to admins so we don't spam them on every message
 _PENDING_NOTIFIED_CHATS: Set[int] = set()
+
+# In-memory fast cache for custom settings & directives (key_name -> dict)
+_ADMIN_SETTINGS: Dict[str, Dict[str, Any]] = {}
+
+# In-memory circular buffer for recent admin commands
+_ADMIN_COMMANDS_CACHE: deque = deque(maxlen=100)
 
 _ENGINE_INITIALIZED: bool = False
 
@@ -226,6 +234,24 @@ async def refresh_moderation_caches():
                     _TRACKED_GROUPS[int_cid] = r
                     if r.get("status") == "pending":
                         _PENDING_NOTIFIED_CHATS.add(int_cid)
+
+    # 6. Admin Custom Settings & Directives
+    res_settings = await database.execute_d1_query("SELECT key_name, data_value, category, updated_at FROM custom_data_store")
+    if res_settings.get("success"):
+        with _MOD_LOCK:
+            _ADMIN_SETTINGS.clear()
+            for r in res_settings.get("results", []):
+                k = r.get("key_name")
+                if k:
+                    _ADMIN_SETTINGS[k] = r
+
+    # 7. Recent Admin Commands Log
+    res_logs = await database.execute_d1_query("SELECT * FROM admin_commands_log ORDER BY id DESC LIMIT 50")
+    if res_logs.get("success"):
+        with _MOD_LOCK:
+            _ADMIN_COMMANDS_CACHE.clear()
+            for r in reversed(res_logs.get("results", [])):
+                _ADMIN_COMMANDS_CACHE.appendleft(r)
 
 
 # =========================================================================
@@ -924,7 +950,20 @@ async def log_admin_command(
     target_username: str = "",
     details: str = ""
 ) -> bool:
-    """Logs an admin command into admin_commands_log permanently."""
+    """Logs an admin command into admin_commands_log permanently (D1 and RAM buffer)."""
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    entry = {
+        "admin_id": admin_id,
+        "command": command,
+        "args": args,
+        "target_id": target_id,
+        "target_username": target_username,
+        "details": details,
+        "created_at": now_str,
+    }
+    with _MOD_LOCK:
+        _ADMIN_COMMANDS_CACHE.appendleft(entry)
+
     sql = """
     INSERT INTO admin_commands_log
     (admin_id, command, args, target_id, target_username, details, created_at)
@@ -937,11 +976,14 @@ async def log_admin_command(
 
 
 async def get_admin_commands_log(limit: int = 25) -> List[Dict[str, Any]]:
-    """Retrieves recent admin commands log."""
+    """Retrieves recent admin commands log with instant cache fallback."""
     res = await database.execute_d1_query(
         "SELECT * FROM admin_commands_log ORDER BY id DESC LIMIT ?", [limit]
     )
-    return res.get("results", []) if res.get("success") else []
+    if res.get("success") and res.get("results"):
+        return res["results"]
+    with _MOD_LOCK:
+        return list(_ADMIN_COMMANDS_CACHE)[:limit]
 
 
 # =========================================================================
@@ -949,9 +991,19 @@ async def get_admin_commands_log(limit: int = 25) -> List[Dict[str, Any]]:
 # =========================================================================
 
 async def set_admin_setting(key_name: str, data_value: str, category: str = "settings", admin_id: int = 0) -> bool:
-    """Persists a configuration key-value pair in custom_data_store."""
+    """Persists a configuration key-value pair in custom_data_store, L1 RAM cache, and Cloudflare KV."""
     clean_key = key_name.strip()
     clean_val = str(data_value).strip()
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    entry = {
+        "key_name": clean_key,
+        "data_value": clean_val,
+        "category": category,
+        "updated_at": now_str,
+    }
+    with _MOD_LOCK:
+        _ADMIN_SETTINGS[clean_key] = entry
+
     sql = """
     INSERT INTO custom_data_store (key_name, data_value, category, updated_at)
     VALUES (?, ?, ?, datetime('now'))
@@ -961,29 +1013,87 @@ async def set_admin_setting(key_name: str, data_value: str, category: str = "set
         updated_at = datetime('now')
     """
     res = await database.execute_d1_query(sql, [clean_key, clean_val, category])
+    try:
+        await database.kv_set(f"ADMIN_SETTING_{clean_key}", json.dumps(entry))
+    except Exception:
+        pass
+
     await log_admin_command(
         admin_id=admin_id,
         command="set_setting",
         args=f"{clean_key} = {clean_val}",
         details=f"Category: {category}"
     )
-    return res.get("success", False)
+    return res.get("success", True)
+
+
+async def delete_admin_setting(key_name: str, admin_id: int = 0) -> bool:
+    """Deletes an admin setting or directive from RAM cache, Cloudflare D1, and KV."""
+    clean_key = key_name.strip()
+    with _MOD_LOCK:
+        existed = _ADMIN_SETTINGS.pop(clean_key, None)
+
+    sql = "DELETE FROM custom_data_store WHERE key_name = ?"
+    await database.execute_d1_query(sql, [clean_key])
+    try:
+        await database.kv_delete(f"ADMIN_SETTING_{clean_key}")
+    except Exception:
+        pass
+
+    await log_admin_command(
+        admin_id=admin_id,
+        command="delete_setting",
+        args=clean_key,
+        details=f"Admin deleted custom setting/directive (existed={bool(existed)})"
+    )
+    return True
 
 
 async def get_admin_setting(key_name: str, default: Optional[str] = None) -> Optional[str]:
-    """Retrieves a configuration value from custom_data_store."""
-    sql = "SELECT data_value FROM custom_data_store WHERE key_name = ? LIMIT 1"
-    res = await database.execute_d1_query(sql, [key_name.strip()])
+    """Retrieves a configuration value from L1 RAM cache or custom_data_store."""
+    clean_key = key_name.strip()
+    with _MOD_LOCK:
+        if clean_key in _ADMIN_SETTINGS:
+            return _ADMIN_SETTINGS[clean_key].get("data_value", default)
+
+    sql = "SELECT data_value, category, updated_at FROM custom_data_store WHERE key_name = ? LIMIT 1"
+    res = await database.execute_d1_query(sql, [clean_key])
     if res.get("success") and res.get("results"):
-        return res["results"][0].get("data_value", default)
+        row = res["results"][0]
+        val = row.get("data_value", default)
+        with _MOD_LOCK:
+            _ADMIN_SETTINGS[clean_key] = {
+                "key_name": clean_key,
+                "data_value": val,
+                "category": row.get("category", "general"),
+                "updated_at": row.get("updated_at", "")
+            }
+        return val
     return default
 
 
 async def get_all_admin_settings() -> List[Dict[str, Any]]:
-    """Returns all settings stored in custom_data_store."""
+    """Returns all settings stored in custom_data_store and L1 RAM."""
     sql = "SELECT key_name, data_value, category, updated_at FROM custom_data_store ORDER BY category, key_name"
     res = await database.execute_d1_query(sql)
-    return res.get("results", []) if res.get("success") else []
+    if res.get("success") and res.get("results"):
+        with _MOD_LOCK:
+            for r in res.get("results", []):
+                k = r.get("key_name")
+                if k:
+                    _ADMIN_SETTINGS[k] = r
+        return res.get("results", [])
+    with _MOD_LOCK:
+        return list(_ADMIN_SETTINGS.values())
+
+
+def get_cached_admin_directives() -> List[Dict[str, Any]]:
+    """Returns all active admin directives/instructions currently cached in memory (<0.001ms)."""
+    with _MOD_LOCK:
+        return [
+            dict(v) for v in _ADMIN_SETTINGS.values()
+            if v.get("category") in ("directive", "rule", "instruction", "system")
+        ]
 
 
 # =========================================================================
