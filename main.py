@@ -79,6 +79,8 @@ from agent_engine import (
     sanitize_identity,
     get_user_mode,
     set_user_mode,
+    detect_jailbreak_attempt,
+    is_architecture_query,
 )
 from tools.financial import get_fiat_and_gold_rates, get_crypto_price
 from tools.system import (
@@ -1441,6 +1443,38 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_triggered:
             return
 
+    # Check photo caption for jailbreak attempts
+    if caption:
+        attack_name = detect_jailbreak_attempt(caption)
+        if attack_name:
+            if is_admin(user.id):
+                logger.warning(f"Admin {user.id} triggered jailbreak pattern in photo caption; skipping auto-ban.")
+            else:
+                logger.warning(f"Security Alert: Auto-banning user {user.id} for photo jailbreak attack: {attack_name}")
+                await ban_user(
+                    user_id=user.id,
+                    username=user.username or "",
+                    name=user.full_name or "",
+                    reason=f"تلاش خودکار برای نفوذ/جیل‌بریک در کپشن تصویر: {attack_name}",
+                    banned_by=0,
+                    chat_id=chat.id,
+                    chat_title=chat.title or "",
+                )
+                if chat.type != ChatType.PRIVATE:
+                    try:
+                        await context.bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
+                    except Exception as be:
+                        logger.debug(f"Could not ban member from Telegram chat: {be}")
+
+                user_mention = f"@{user.username}" if user.username else (user.full_name or f"کاربر {user.id}")
+                ban_notice = (
+                    f"⛔️ <b>کاربر {html.escape(user_mention)} به دلیل تلاش برای نفوذ یا جیل‌بریک مسدود (Ban) شد.</b>\n\n"
+                    f"⚠️ <b>نوع اقدام:</b> {html.escape(attack_name)}\n"
+                    f"🚫 <i>دسترسی این کاربر به کلیه خدمات پرومته به صورت دائمی مسدود گردید.</i>"
+                )
+                await msg.reply_text(ban_notice, parse_mode=ParseMode.HTML)
+                return
+
     # Rate limit check
     allowed, limit_msg = check_user_rate_limit(user.id)
     if not allowed:
@@ -2319,6 +2353,58 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_direct:
         # Strictly remain silent in groups for all other messages
         return
+
+    # 1.5 Automated Anti-Jailbreak Defense & Immediate User Auto-Ban
+    attack_name = detect_jailbreak_attempt(raw_text) or detect_jailbreak_attempt(cleaned_prompt)
+    if attack_name:
+        if is_admin(user.id):
+            logger.warning(f"Admin {user.id} triggered jailbreak pattern '{attack_name}'; skipping auto-ban.")
+        else:
+            logger.warning(
+                f"Security Alert: Auto-banning user {user.id} (@{user.username}) for jailbreak attack: {attack_name}"
+            )
+            # 1. Permanently ban user in internal database & RAM cache
+            await ban_user(
+                user_id=user.id,
+                username=user.username or "",
+                name=user.full_name or "",
+                reason=f"تلاش خودکار برای نفوذ/جیل‌بریک: {attack_name}",
+                banned_by=0,
+                chat_id=chat.id,
+                chat_title=chat.title or "",
+            )
+            # 2. If in group, attempt to ban member from Telegram group
+            if chat.type != ChatType.PRIVATE:
+                try:
+                    await context.bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
+                except Exception as be:
+                    logger.debug(f"Could not ban member from Telegram chat: {be}")
+
+            # 3. Notify chat
+            user_mention = f"@{user.username}" if user.username else (user.full_name or f"کاربر {user.id}")
+            ban_notice = (
+                f"⛔️ <b>کاربر {html.escape(user_mention)} به دلیل تلاش برای نفوذ، تزریق پرامپت یا جیل‌بریک مسدود (Ban) شد.</b>\n\n"
+                f"⚠️ <b>نوع اقدام:</b> {html.escape(attack_name)}\n"
+                f"🚫 <i>دسترسی این کاربر به کلیه خدمات پرومته به صورت دائمی مسدود گردید.</i>"
+            )
+            await message.reply_text(ban_notice, parse_mode=ParseMode.HTML)
+
+            # 4. Security Alert to Bot Administrators
+            admin_alert = (
+                "🚨 <b>هشدار امنیتی پرومته: انسداد خودکار (Auto-Ban)</b>\n\n"
+                f"👤 <b>کاربر:</b> {html.escape(user.full_name or '')} ({user_mention})\n"
+                f"🆔 <b>شناسه عددی:</b> <code>{user.id}</code>\n"
+                f"💬 <b>محیط چت:</b> {html.escape(chat.title or 'خصوصی (PV)')} (<code>{chat.id}</code>)\n"
+                f"⚠️ <b>نوع اقدام:</b> {html.escape(attack_name)}\n"
+                f"📝 <b>متن پیام:</b>\n<code>{html.escape(raw_text[:300])}</code>\n\n"
+                "🛡️ <i>کاربر بلافاصله در پایگاه داده و حافظه موقت مسدود گردید.</i>"
+            )
+            for aid in _ADMIN_IDS:
+                try:
+                    await context.bot.send_message(chat_id=aid, text=admin_alert, parse_mode=ParseMode.HTML)
+                except Exception:
+                    pass
+            return
 
     # 2. Direct Interception of Admin Commands (Persian & Slash)
     if is_admin(user.id):
