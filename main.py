@@ -183,6 +183,14 @@ async def _check_moderation_guard(update: Update, context: ContextTypes.DEFAULT_
             status = st
             if is_new and not is_admin(uid):
                 await _notify_admin_group_request(context.bot, chat, user)
+                try:
+                    await chat.send_message(
+                        "⏳ <b>درخواست فعال‌سازی پرومته در این گروه برای ادمین ارسال شد.</b>\n"
+                        "پس از بررسی و تایید ادمین، ربات فعال خواهد شد.",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
 
         if status != "approved":
             # If authorized admin is issuing an administrative command or interacting, permit through
@@ -216,7 +224,10 @@ async def _notify_admin_group_request(bot, chat, user):
         f"🔗 <b>لینک/یوزرنیم:</b> {chat_uname}\n"
         f"👤 <b>افزوده شده توسط:</b> {html.escape(user_name)} ({user_uname})\n"
         f"🔢 <b>شناسه کاربر:</b> <code>{user_id_str}</code>\n\n"
-        "⚠️ <i>ربات تا زمان تایید شما در این گروه غیرفعال می‌ماند و به هیچ پیامی پاسخ نخواهد داد.</i>"
+        "⚠️ <i>ربات تا زمان تایید شما در این گروه غیرفعال می‌ماند و به هیچ پیامی پاسخ نخواهد داد.</i>\n\n"
+        f"⚡️ <b>دستورات سریع:</b>\n"
+        f"• تایید: <code>/approvegroup {chat.id}</code>\n"
+        f"• رد: <code>/rejectgroup {chat.id}</code>"
     )
 
     admin_targets = set()
@@ -262,15 +273,22 @@ async def group_approval_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.answer("شناسه گروه نامعتبر است.", show_alert=True)
         return
 
+    admin_display_name = html.escape(user.full_name or "ادمین")
+    orig_text = ""
+    if query.message:
+        orig_text = query.message.text_html or (html.escape(query.message.text) if query.message.text else "")
+
     if action == "grp_app":
         await approve_group(target_chat_id, reviewed_by=user.id)
         await query.answer("✅ گروه تایید و فعال شد.", show_alert=True)
-        orig_text = query.message.text_html if query.message else ""
-        new_text = orig_text + f"\n\n<b>✅ وضعیت: توسط {html.escape(user.full_name)} تایید و فعال گردید.</b>"
+        new_text = (orig_text + f"\n\n<b>✅ وضعیت: توسط {admin_display_name} تایید و فعال گردید.</b>") if orig_text else f"✅ <b>گروه <code>{target_chat_id}</code> توسط {admin_display_name} تایید و فعال گردید.</b>"
         try:
-            await query.edit_message_text(new_text, parse_mode=ParseMode.HTML)
+            await query.edit_message_text(new_text, parse_mode=ParseMode.HTML, reply_markup=None)
         except Exception:
-            pass
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
         try:
             await context.bot.send_message(
                 chat_id=target_chat_id,
@@ -283,10 +301,20 @@ async def group_approval_callback(update: Update, context: ContextTypes.DEFAULT_
     elif action == "grp_rej":
         await reject_group(target_chat_id, reviewed_by=user.id)
         await query.answer("❌ گروه رد شد و ربات در حال خروج است.", show_alert=True)
-        orig_text = query.message.text_html if query.message else ""
-        new_text = orig_text + f"\n\n<b>❌ وضعیت: توسط {html.escape(user.full_name)} رد شد و ربات خارج گردید.</b>"
+        new_text = (orig_text + f"\n\n<b>❌ وضعیت: توسط {admin_display_name} رد شد و ربات خارج گردید.</b>") if orig_text else f"❌ <b>گروه <code>{target_chat_id}</code> توسط {admin_display_name} رد شد و ربات خارج گردید.</b>"
         try:
-            await query.edit_message_text(new_text, parse_mode=ParseMode.HTML)
+            await query.edit_message_text(new_text, parse_mode=ParseMode.HTML, reply_markup=None)
+        except Exception:
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        try:
+            await context.bot.send_message(
+                chat_id=target_chat_id,
+                text="❌ <b>درخواست فعال‌سازی پرومته در این گروه توسط ادمین تایید نشد. ربات از گروه خارج می‌شود.</b>",
+                parse_mode=ParseMode.HTML
+            )
         except Exception:
             pass
         try:
@@ -326,8 +354,16 @@ async def chat_member_update_handler(update: Update, context: ContextTypes.DEFAU
                 )
             except Exception:
                 pass
-        else:
+        elif is_new:
             await _notify_admin_group_request(context.bot, chat, user)
+            try:
+                await chat.send_message(
+                    "⏳ <b>درود! پرومته به گروه افزوده شد.</b>\n"
+                    "درخواست فعال‌سازی برای ادمین ربات ارسال شد. به محض تأیید ادمین، ربات فعال و پاسخگوی شما خواهد بود.",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
 
     elif new_status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
         await database.execute_d1_query(
@@ -1186,33 +1222,70 @@ async def read_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def telegraph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct Telegraph article publishing command."""
+    """Direct Telegraph article publishing command with AI generation support."""
     msg = update.effective_message
     if not msg:
         return
 
-    if update.effective_chat:
-        await update.effective_chat.send_action(ChatAction.TYPING)
+    chat = update.effective_chat
+    user = update.effective_user
 
     # Check if this command is a reply to another message
     reply_msg = msg.reply_to_message
     args_text = " ".join(context.args or []).strip()
 
     if reply_msg and (reply_msg.text or reply_msg.caption):
+        if chat:
+            await chat.send_action(ChatAction.TYPING)
         content = reply_msg.text or reply_msg.caption or ""
         title = args_text if args_text else "مستند تلگراف پرومته"
-    elif args_text:
+    elif "|" in args_text:
+        if chat:
+            await chat.send_action(ChatAction.TYPING)
         title, content = extract_telegraph_args(args_text)
+    elif "\n" in args_text or len(args_text) >= 120:
+        if chat:
+            await chat.send_action(ChatAction.TYPING)
+        title, content = extract_telegraph_args(args_text)
+    elif args_text:
+        # User provided a topic to research, generate, and publish as an article
+        topic = args_text.strip()
+        status_msg = await msg.reply_text(
+            f"✍️ <b>پرومته در حال نگارش مقاله تخصصی درباره «{html.escape(topic)}» و انتشار در تلگراف است...</b>",
+            parse_mode=ParseMode.HTML
+        )
+        article_prompt = (
+            f"یک مقاله تخصصی، عمیق و جامع به زبان فارسی با ساختار مارک‌داون حرفه‌ای، "
+            f"تیتربندی استاندارد، چکیده اجرایی، جدول و نکات کلیدی درباره «{topic}» بنویس."
+        )
+        article_body = await execute_hermes_agent(
+            chat_id=chat.id if chat else 0,
+            user_prompt=article_prompt,
+            user_id=user.id if user else 0,
+            username=user.username or "" if user else "",
+            force_agent=True
+        )
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+        res = await create_telegraph_article(title=topic, content=article_body)
+        await _deliver_reply(msg, res)
+        return
     else:
         guide = (
-            "📝 **راهنمای انتشار در تلگراف (Telegra.ph):**\n\n"
-            "برای انتشار فوری متن یا مقاله در تلگراف می‌توانید از روش‌های زیر استفاده کنید:\n\n"
-            "۱. **فرمت مستقیم:**\n"
+            "📝 **راهنمای انتشار مقالات در تلگراف (Telegra.ph):**\n\n"
+            "برای انتشار مقاله با نمایش فوری (Instant View) می‌توانید از روش‌های زیر استفاده کنید:\n\n"
+            "۱. **تولید خودکار مقاله با هوش مصنوعی:**\n"
+            "`/article هوش مصنوعی در سال 2026`\n"
+            "`/telegraph ترندهای فناوری کوانتومی`\n\n"
+            "۲. **فرمت مستقیم عنوان و متن:**\n"
             "`/telegraph عنوان مقاله | متن کامل مقاله`\n\n"
-            "۲. **ریپلای روی پیام:**\n"
-            "روی هر پیام بلندی ریپلای بزنید و دستور `/telegraph [عنوان دلخواه]` را ارسال کنید.\n\n"
-            "۳. **مکالمه با هوش مصنوعی:**\n"
-            "به پرومته بگویید: *«یک مقاله درباره هوش مصنوعی بنویس و توی تلگراف منتشر کن»*"
+            "۳. **ریپلای روی پیام:**\n"
+            "روی هر پیام بلندی ریپلای بزنید و دستور `/telegraph [عنوان اختیاری]` را ارسال کنید.\n\n"
+            "۴. **گفتگوی آزاد با پرومته:**\n"
+            "*«یک مقاله کامل در مورد بلاکچین بنویس و در تلگراف منتشر کن»*"
         )
         await msg.reply_text(guide, parse_mode=ParseMode.MARKDOWN)
         return
@@ -2397,7 +2470,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
             reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
             t_title = cleaned_prompt
-            for rem in ["تلگرافش کن", "توی تلگراف بذار", "در تلگراف منتشر کن", "توی تلگراف منتشر کن", "تلگراف", "telegraph"]:
+            for rem in [
+                "تلگرافش کن", "توی تلگراف بذار", "توی تلگراف بزار", "در تلگراف منتشر کن",
+                "توی تلگراف منتشر کن", "تلگراف کن", "تلگراف بفرست", "تلگراف", "telegraph"
+            ]:
                 t_title = t_title.replace(rem, "")
             t_title = t_title.strip() or "مستند تلگراف پرومته"
             res = await create_telegraph_article(title=t_title, content=reply_text)
@@ -2405,7 +2481,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Case B: Direct "تلگراف: عنوان | متن" or "عنوان | متن" with telegraph intent
-        if "|" in cleaned_prompt and any(a in cleaned_lower for a in ["بساز", "منتشر", "صفحه", "پست", "publish", "create"]):
+        if "|" in cleaned_prompt and any(a in cleaned_lower for a in ["بساز", "منتشر", "صفحه", "پست", "publish", "create", "بذار", "بزار", "کن"]):
             t_title, t_content = extract_telegraph_args(cleaned_prompt)
             for rem in ["تلگراف:", "تلگراف", "telegraph:", "telegraph"]:
                 t_title = t_title.replace(rem, "").strip()

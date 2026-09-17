@@ -222,7 +222,10 @@ async def refresh_moderation_caches():
             for r in res_tgroups.get("results", []):
                 cid = r.get("chat_id")
                 if cid:
-                    _TRACKED_GROUPS[int(cid)] = r
+                    int_cid = int(cid)
+                    _TRACKED_GROUPS[int_cid] = r
+                    if r.get("status") == "pending":
+                        _PENDING_NOTIFIED_CHATS.add(int_cid)
 
 
 # =========================================================================
@@ -703,7 +706,10 @@ async def register_group_event(
                 return "banned", False
             if current_status == "rejected":
                 return "rejected", False
-            return "pending", (cid not in _PENDING_NOTIFIED_CHATS)
+            is_new = (cid not in _PENDING_NOTIFIED_CHATS)
+            if is_new:
+                _PENDING_NOTIFIED_CHATS.add(cid)
+            return "pending", is_new
 
     # Not existing yet: evaluate who added the bot
     if is_admin(added_by_id):

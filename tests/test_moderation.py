@@ -219,6 +219,16 @@ async def test_group_approval_workflow():
     assert is_group_approved(chat_id_user) is False
     assert get_group_status(chat_id_user) == "pending"
 
+    # Second call for the same pending group must return is_new=False (prevent duplicate notifications)
+    st_user2, is_new_user2 = await register_group_event(
+        chat_id=chat_id_user,
+        title="Random User Group",
+        chat_type="supergroup",
+        added_by_id=regular_user_id
+    )
+    assert st_user2 == "pending"
+    assert is_new_user2 is False
+
     # Pending list
     pending = await get_pending_groups_list()
     assert any(g.get("chat_id") == chat_id_user for g in pending)
@@ -435,9 +445,9 @@ async def test_group_list_commands_and_interception():
     handled = await handle_admin_text_command(up, context, "لیست گروه")
     assert handled is True
     msg.reply_text.assert_called()
-    call_text = msg.reply_text.call_args[0][0]
-    assert "فهرست گروه‌های ثبت‌شده" in call_text
-    assert str(cid_test) in call_text
+    all_text = "".join(c[0][0] for c in msg.reply_text.call_args_list)
+    assert "فهرست گروه‌های ثبت‌شده" in all_text
+    assert str(cid_test) in all_text
 
     # Admin sending "لیست گروه‌ها"
     msg.reply_text.reset_mock()

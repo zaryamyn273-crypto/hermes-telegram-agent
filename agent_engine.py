@@ -99,16 +99,20 @@ Operating Directives:
 - When webpage content is provided, analyze, summarize, or extract the requested details thoroughly and accurately.
 - Deliver concrete, factual, and verified data.
 
-5. Formatting & Telegram Table Presentation:
-- Telegram DOES NOT render raw Markdown pipe tables (| a | b |) properly on mobile and desktop devices.
-- When presenting comparisons, matrices, schedules, or tabular data, you MUST use one of these two clean formats:
-  Format A (Best for Mobile): Structured Card / Bullet List:
+5. Professional Markdown & Visual Architecture:
+- Format all complex outputs with exquisite, clean, and elegant Markdown.
+- Hierarchy: Use `# [عنوان]` for primary titles, `## [بخش اصلی]` for main sections, and `### [زیرمبحث]` for subsections.
+- Bullet points: Use structured indicators (`• `, `🔹 `, `▫️ `) with bold key phrases (`• **نکته کلیدی:** توضیحات...`).
+- Code Blocks: Always declare language syntax (e.g. ```python, ```bash, ```json). Provide well-commented, production-ready code.
+- Blockquotes & Asides: Use blockquotes (`> `) for executive summaries, core principles, quotes, or highlights (`> 💡 **چکیده اجرایی:** ...`).
+- Dividers: Use horizontal rules (`---`) between major logical sections to preserve visual balance and readability.
+- Table Presentation: Telegram DOES NOT render raw Markdown pipe tables (| a | b |) properly on mobile and desktop devices. You MUST use one of these two clean formats:
+  Format A (Card Format - Best for mobile):
   🔹 **[عنوان آیتم]**
   ▫️ **مشخصه ۱:** مقدار
   ▫️ **مشخصه ۲:** مقدار
   ▫️ **وضعیت:** فعال
-
-  Format B (For Numerical / Dense Tabular Data): Aligned Monospaced Box Table inside a code block (```):
+  Format B (Monospaced Box Table inside code block ```):
   ```
   ┌──────────┬────────────┬────────┐
   │ ردیف     │ مشخصه      │ وضعیت  │
@@ -116,7 +120,23 @@ Operating Directives:
   │ ۱        │ مقدار الف  │ فعال   │
   └──────────┴────────────┴────────┘
   ```
-- NEVER output raw unformatted pipe tables outside code blocks!
+
+6. Professional Articles & Comprehensive Research (نگارش مقالات تخصصی و عمیق):
+- When prompted to write an article, analysis, paper, report, or essay (مقاله، پژوهش، گزارش، تحلیل تخصصی):
+  - Deliver deep, academically and journalistically rigorous, multi-faceted content. Never produce lazy 2-paragraph summaries.
+  - Follow the Standard Prometheus Article Blueprint:
+    1. **عنوان:** Main Title (`# [عنوان جذاب، جامع و استاندارد]`).
+    2. **چکیده اجرایی:** High-impact executive summary blockquote (`> 💡 **چکیده اجرایی / نکات کلیدی**`).
+    3. **مقدمه و بافت مسئله:** Real-world background, urgency, and underlying mechanics.
+    4. **تحلیل عمیق و تخصصی:** Detailed breakdown into logical chapters (`##`) and subtopics (`###`).
+    5. **کارت‌های مقایسه‌ای یا جدول چارچوب:** Clear synthesis of pros/cons, metrics, or paradigms.
+    6. **چشم‌انداز و روندهای آینده:** Strategic roadmap and future developments (`## چشم‌انداز و پیش‌بینی‌های آینده`).
+    7. **جمع‌بندی و توصیه‌های کاربردی:** Actionable takeaways for decision-makers and practitioners.
+
+7. Telegraph (Telegra.ph) Publishing & Instant View:
+- When the user asks to publish to Telegraph or create a Telegraph page/article (e.g. "در تلگراف منتشر کن", "تلگراف بساز", "توی تلگراف بذار", "مقاله تلگراف", "publish to telegraph"):
+  - Structure the response as a full-length, beautifully crafted article with `# Title`, section headers `##`, bullet points, and callout blocks (`> `).
+  - The system will automatically publish the article to Telegra.ph with native Instant View support and provide the public link.
 """
 
 # Destructive command patterns
@@ -566,14 +586,37 @@ async def execute_hermes_agent(
 
     # 6. Auto Telegraph Hook: If the user prompt asked to publish to Telegraph, publish and append Instant View URL
     p_lower = user_prompt.lower()
-    if any(k in p_lower for k in ["تلگراف", "telegraph", "telegra.ph"]) and any(a in p_lower for a in ["بساز", "منتشر", "صفحه", "پست", "publish", "create", "لینک"]):
+    is_telegraph_req = any(k in p_lower for k in ["تلگراف", "telegraph", "telegra.ph"]) and any(
+        a in p_lower for a in [
+            "بساز", "منتشر", "صفحه", "پست", "publish", "create", "لینک", "بفرست",
+            "تبدیل", "بذار", "بزار", "ارسال", "خروجی", "بده", "کن", "بنویس", "آپلود", "قرار"
+        ]
+    )
+    if is_telegraph_req:
         try:
             lines = [l.strip() for l in final_answer.split("\n") if l.strip()]
-            first_line = lines[0].replace("#", "").strip() if lines else "مقاله پرومته"
-            t_res = await publish_to_telegraph(title=first_line[:60], content=final_answer)
+            extracted_title = ""
+            for l in lines[:4]:
+                if l.startswith("#") or l.startswith("**"):
+                    clean = re.sub(r"^[#*\s]+|[#*\s]+$", "", l).strip()
+                    if clean and len(clean) >= 3:
+                        extracted_title = clean[:64]
+                        break
+            if not extracted_title and lines:
+                extracted_title = lines[0].replace("#", "").strip()[:60]
+
+            t_title = extracted_title or "مقاله تخصصی پرومته"
+            t_res = await publish_to_telegraph(title=t_title, content=final_answer)
             if t_res.get("ok"):
                 page_url = t_res.get("url")
-                final_answer += f"\n\n🔗 **پیوند نمایش فوری در تلگراف (Instant View):**\n{page_url}"
+                reading_time = t_res.get("reading_time", 2)
+                final_answer += (
+                    f"\n\n📰 **مقاله با موفقیت در تلگراف منتشر شد:**\n"
+                    f"🏷 **عنوان:** **{t_title}**\n"
+                    f"⏱ **زمان تقریبی مطالعه:** {reading_time} دقیقه\n"
+                    f"⚡️ **قابلیت نمایش فوری (Instant View):** فعال\n"
+                    f"🔗 **پیوند مطالعه در تلگراف:**\n{page_url}"
+                )
                 logger.info(f"Auto-published response to Telegraph: {page_url}")
         except Exception as e:
             logger.warning(f"Auto Telegraph publishing failed: {e}")

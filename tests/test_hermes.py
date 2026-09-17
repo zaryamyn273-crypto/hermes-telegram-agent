@@ -872,3 +872,58 @@ def test_twitter_tool():
     assert "200,000,000" in profile_html
     assert "Tesla &amp; SpaceX" in profile_html
 
+
+def test_telegraph_nodes_converter():
+    from tools.telegraph import markdown_to_telegraph_nodes, estimate_reading_time, clean_article_title_and_body
+
+    sample_md = """# مبانی هوش مصنوعی مدرن
+> [!NOTE] این یک چکیده اجرایی راهبردی است.
+---
+![دیاگرام معماری ترنسفورمر](https://images.unsplash.com/photo-1)
+
+## بخش اول: مقدمه
+هوش مصنوعی دستخوش تحول عظیمی شده است.
+
+### مفاهیم کلیدی
+- **یادگیری عمیق** با راندمان بالا
+- *شبکه‌های عصبی* پیچیده
+- استفاده از `PyTorch` و [مستندات](https://pytorch.org)
+- تست ~~حذف شده~~ و __زیرخط دار__
+
+1. مرحله جمع‌آوری دیتا
+2. آموزش مدل چندوجهی
+
+```python
+def forward(x):
+    return x * 2
+```
+"""
+    nodes = markdown_to_telegraph_nodes(sample_md)
+    tags = [n.get("tag") for n in nodes]
+
+    assert "h3" in tags  # # Title
+    assert "aside" in tags  # > [!NOTE]
+    assert "hr" in tags  # ---
+    assert "figure" in tags  # ![alt](url)
+    assert "h4" in tags  # ###
+    assert "ul" in tags  # - bullet items
+    assert "ol" in tags  # 1. 2. numbered items
+    assert "pre" in tags  # ```python
+
+    # Check figure children
+    fig_node = next(n for n in nodes if n.get("tag") == "figure")
+    assert fig_node["children"][0]["tag"] == "img"
+    assert fig_node["children"][0]["attrs"]["src"] == "https://images.unsplash.com/photo-1"
+    assert fig_node["children"][1]["tag"] == "figcaption"
+    assert "دیاگرام معماری ترنسفورمر" in fig_node["children"][1]["children"]
+
+    # Check reading time and title clean
+    t_est = estimate_reading_time(sample_md)
+    assert t_est >= 1
+
+    extracted_title, clean_body = clean_article_title_and_body("مستند تلگراف پرومته", sample_md)
+    assert extracted_title == "مبانی هوش مصنوعی مدرن"
+    # Ensure redundant title line was stripped from beginning of clean_body
+    assert not clean_body.startswith("# مبانی هوش مصنوعی مدرن")
+
+
