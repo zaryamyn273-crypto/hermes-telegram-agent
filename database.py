@@ -191,14 +191,46 @@ async def kv_delete(key: str):
 # Tier 3: Cloudflare D1 Serverless SQL Database Operations
 # =========================================================================
 
+import sqlite3
+
+_SQLITE_CONN = None
+_SQLITE_LOCK = threading.RLock()
+
+def _get_sqlite_conn():
+    global _SQLITE_CONN
+    if _SQLITE_CONN is None:
+        with _SQLITE_LOCK:
+            if _SQLITE_CONN is None:
+                db_path = os.getenv("SQLITE_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "bot.db"))
+                os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+                _SQLITE_CONN = sqlite3.connect(db_path, check_same_thread=False)
+                _SQLITE_CONN.row_factory = sqlite3.Row
+    return _SQLITE_CONN
+
+def _execute_sqlite(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
+    with _SQLITE_LOCK:
+        try:
+            conn = _get_sqlite_conn()
+            cur = conn.cursor()
+            cur.execute(sql, params or [])
+            if sql.strip().upper().startswith("SELECT") or "RETURNING" in sql.upper():
+                rows = [dict(r) for r in cur.fetchall()]
+                return {"success": True, "results": rows}
+            conn.commit()
+            return {"success": True, "results": []}
+        except Exception as e:
+            logger.debug(f"SQLite fallback error: {e}")
+            return {"success": False, "results": []}
+
 async def execute_d1_query(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     """
     Executes a parameterized SQL query on Cloudflare D1.
+    If Cloudflare D1 credentials are not configured, seamlessly falls back to local SQLite.
     """
     account_id = settings.CLOUDFLARE_ACCOUNT_ID or os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
     d1_id = settings.CLOUDFLARE_D1_ID or os.getenv("CLOUDFLARE_D1_ID", "")
     if not account_id or not d1_id:
-        return {"success": False, "results": []}
+        return _execute_sqlite(sql, params)
 
     clean_params = [
         p if isinstance(p, (int, float, str, bool)) or p is None else str(p)
@@ -220,7 +252,8 @@ async def execute_d1_query(sql: str, params: Optional[List[Any]] = None) -> Dict
     except Exception as e:
         logger.debug(f"D1 query exception: {e}")
 
-    return {"success": False, "results": []}
+    # Fallback to local SQLite if cloud D1 temporarily fails
+    return _execute_sqlite(sql, clean_params)
 
 
 # =========================================================================

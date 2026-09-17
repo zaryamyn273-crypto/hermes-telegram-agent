@@ -15,22 +15,61 @@ import html
 import time
 import logging
 import asyncio
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any, Set, Union
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode, ChatType, ChatAction
+from telegram.constants import ParseMode, ChatType, ChatAction, ChatMemberStatus
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ChatMemberHandler,
     ContextTypes,
     filters
 )
 from telegram.request import HTTPXRequest
 
-from config import settings, is_admin
+from config import settings, is_admin, _ADMIN_IDS
+import database
+from utils.formatter import split_message, markdown_to_telegram_html
+from tools.moderation import (
+    init_moderation_engine,
+    is_user_banned,
+    is_user_muted,
+    is_group_banned,
+    is_group_muted,
+    is_group_approved,
+    get_group_status,
+    register_group_event,
+    approve_group,
+    reject_group,
+    ban_user,
+    unban_user,
+    mute_user,
+    unmute_user,
+    ban_group,
+    unban_group,
+    mute_group,
+    unmute_group,
+    get_banned_users_list,
+    get_muted_users_list,
+    get_banned_groups_list,
+    get_muted_groups_list,
+    get_pending_groups_list,
+    get_unbanned_history,
+    get_admin_commands_log,
+    set_admin_setting,
+    get_admin_setting,
+    get_all_admin_settings,
+    parse_duration_string,
+    format_duration_persian,
+    _MOD_LOCK,
+    _BANNED_USERNAMES,
+    _MUTED_USERNAMES,
+)
 from agent_engine import (
     execute_hermes_agent,
     clear_session,
@@ -82,6 +121,244 @@ def check_rate_limit(user_id: int) -> bool:
     """Microsecond in-memory & multi-tier rate limiter wrapper."""
     allowed, _ = check_user_rate_limit(user_id)
     return allowed
+
+
+# =========================================================================
+# Moderation Gatekeeper & Group Workflow Helpers
+# =========================================================================
+
+async def _check_moderation_guard(update: Update, context: ContextTypes.DEFAULT_TYPE, is_admin_cmd: bool = False) -> bool:
+    """
+    Global Security & Moderation Gatekeeper:
+    1. Banned Users: completely blocked and ignored.
+    2. Muted Users: ignored until mute period expires.
+    3. Groups:
+       - If banned: bot is completely silent.
+       - If muted: bot is silent.
+       - If unapproved: bot remains inactive; if new, notifies admins with inline approval buttons.
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat:
+        return True
+
+    uid = user.id
+    uname = user.username
+
+    # 1. User Ban Check
+    if is_user_banned(uid, uname):
+        logger.info(f"Gatekeeper: blocked banned user {uid} (@{uname})")
+        return False
+
+    # 2. User Mute Check
+    muted, remaining = is_user_muted(uid, uname)
+    if muted:
+        logger.info(f"Gatekeeper: blocked muted user {uid} (@{uname}), remaining: {remaining:.1f}s")
+        return False
+
+    # 3. Group Chat Moderation
+    if chat.type != ChatType.PRIVATE:
+        # Group ban check
+        if is_group_banned(chat.id):
+            logger.info(f"Gatekeeper: blocked banned group {chat.id}")
+            return False
+
+        # Group bot mute check
+        g_muted, _ = is_group_muted(chat.id)
+        if g_muted and not (is_admin_cmd and is_admin(uid)):
+            logger.info(f"Gatekeeper: bot is muted in group {chat.id}")
+            return False
+
+        # Group approval check
+        status = get_group_status(chat.id)
+        if status == "unknown":
+            st, is_new = await register_group_event(
+                chat_id=chat.id,
+                title=chat.title or "گروه",
+                chat_type=chat.type,
+                added_by_id=uid if is_admin(uid) else 0,
+                username=chat.username or ""
+            )
+            status = st
+            if is_new and not is_admin(uid):
+                await _notify_admin_group_request(context.bot, chat, user)
+
+        if status != "approved":
+            # If authorized admin is issuing an administrative command, permit through
+            if is_admin_cmd and is_admin(uid):
+                return True
+            logger.info(f"Gatekeeper: group {chat.id} status is '{status}'; bot remains inactive.")
+            return False
+
+    return True
+
+
+async def _notify_admin_group_request(bot, chat, user):
+    """Notifies authorized bot admins when the bot is placed in a new unapproved group."""
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ تایید فعال‌سازی", callback_data=f"grp_app:{chat.id}"),
+            InlineKeyboardButton("❌ رد و ترک گروه", callback_data=f"grp_rej:{chat.id}"),
+        ]
+    ])
+
+    user_name = (user.full_name or "کاربر") if user else "نامشخص"
+    user_uname = f"@{user.username}" if (user and user.username) else "ندارد"
+    user_id_str = str(user.id) if user else "0"
+    chat_title = chat.title or "بدون نام"
+    chat_uname = f"@{chat.username}" if chat.username else "گروه خصوصی (بدون لینک عمومی)"
+
+    text = (
+        "🚨 <b>درخواست فعال‌سازی پرومته در گروه جدید</b>\n\n"
+        f"🏷 <b>نام گروه:</b> {html.escape(chat_title)}\n"
+        f"🆔 <b>شناسه گروه:</b> <code>{chat.id}</code>\n"
+        f"🔗 <b>لینک/یوزرنیم:</b> {chat_uname}\n"
+        f"👤 <b>افزوده شده توسط:</b> {html.escape(user_name)} ({user_uname})\n"
+        f"🔢 <b>شناسه کاربر:</b> <code>{user_id_str}</code>\n\n"
+        "⚠️ <i>ربات تا زمان تایید شما در این گروه غیرفعال می‌ماند و به هیچ پیامی پاسخ نخواهد داد.</i>"
+    )
+
+    admin_targets = set()
+    if settings.ADMIN_ID > 0:
+        admin_targets.add(settings.ADMIN_ID)
+    if hasattr(settings, "ADMIN_USER_IDS") and settings.ADMIN_USER_IDS:
+        admin_targets.update(settings.ADMIN_USER_IDS)
+    admin_targets.update(_ADMIN_IDS)
+
+    for aid in admin_targets:
+        if aid > 0:
+            try:
+                await bot.send_message(
+                    chat_id=aid,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.warning(f"Could not send group approval notification to admin {aid}: {e}")
+
+
+async def group_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles admin click on approval/rejection inline buttons."""
+    query = update.callback_query
+    if not query:
+        return
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        await query.answer("⛔️ این اقدام فقط توسط ادمین مجاز ربات قابل انجام است.", show_alert=True)
+        return
+
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) != 2:
+        await query.answer("داده نامعتبر است.", show_alert=True)
+        return
+
+    action, chat_id_str = parts[0], parts[1]
+    try:
+        target_chat_id = int(chat_id_str)
+    except ValueError:
+        await query.answer("شناسه گروه نامعتبر است.", show_alert=True)
+        return
+
+    if action == "grp_app":
+        await approve_group(target_chat_id, reviewed_by=user.id)
+        await query.answer("✅ گروه تایید و فعال شد.", show_alert=True)
+        orig_text = query.message.text_html if query.message else ""
+        new_text = orig_text + f"\n\n<b>✅ وضعیت: توسط {html.escape(user.full_name)} تایید و فعال گردید.</b>"
+        try:
+            await query.edit_message_text(new_text, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        try:
+            await context.bot.send_message(
+                chat_id=target_chat_id,
+                text="✅ <b>ربات توسط ادمین در این گروه تایید شد و هم‌اکنون فعال و آماده خدمت‌رسانی است.</b>",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+
+    elif action == "grp_rej":
+        await reject_group(target_chat_id, reviewed_by=user.id)
+        await query.answer("❌ گروه رد شد و ربات در حال خروج است.", show_alert=True)
+        orig_text = query.message.text_html if query.message else ""
+        new_text = orig_text + f"\n\n<b>❌ وضعیت: توسط {html.escape(user.full_name)} رد شد و ربات خارج گردید.</b>"
+        try:
+            await query.edit_message_text(new_text, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        try:
+            await context.bot.leave_chat(chat_id=target_chat_id)
+        except Exception as e:
+            logger.warning(f"Could not leave chat {target_chat_id}: {e}")
+
+
+async def chat_member_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detects when the bot is added to or removed from groups."""
+    result = update.my_chat_member
+    if not result:
+        return
+
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type == ChatType.PRIVATE:
+        return
+
+    new_status = result.new_chat_member.status
+    if new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
+        added_by_id = user.id if user else 0
+        st, is_new = await register_group_event(
+            chat_id=chat.id,
+            title=chat.title or "گروه",
+            chat_type=chat.type,
+            added_by_id=added_by_id,
+            username=chat.username or ""
+        )
+
+        if st == "approved":
+            try:
+                await chat.send_message(
+                    "👋 <b>درود! پرومته در این گروه فعال شد.</b>\n"
+                    "برای ارتباط، نام من را صدا بزنید یا روی پیام‌هایم ریپلای فرمایید.",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+        else:
+            await _notify_admin_group_request(context.bot, chat, user)
+
+    elif new_status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+        await database.execute_d1_query(
+            "UPDATE tracked_groups SET status = 'left' WHERE chat_id = ?", [chat.id]
+        )
+
+
+def extract_target_entity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Tuple[Optional[int], Optional[str], Optional[str], List[str]]:
+    """
+    Extracts target user ID, username, and full name from reply or args.
+    Returns: (target_id, target_username, target_name, remaining_args)
+    """
+    msg = update.effective_message
+    if not msg:
+        return None, None, None, []
+
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        tu = msg.reply_to_message.from_user
+        args = list(context.args) if context.args else []
+        return tu.id, tu.username, tu.full_name, args
+
+    args = list(context.args) if context.args else []
+    if args:
+        first = args[0].strip()
+        remaining = args[1:]
+        if first.lstrip("-+").isdigit():
+            return int(first), None, None, remaining
+        if first.startswith("@") or not first.isdigit():
+            uname = first.lstrip("@")
+            return None, uname, None, remaining
+
+    return None, None, None, []
 
 
 # =========================================================================
@@ -522,6 +799,9 @@ def extract_digikala_query(text: str) -> Optional[str]:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler with Prometheus intro."""
+    if not await _check_moderation_guard(update, context):
+        return
+
     msg = update.effective_message
     user = update.effective_user
     u_name = user.first_name if user else "کاربر"
@@ -554,7 +834,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command handler."""
+    if not await _check_moderation_guard(update, context):
+        return
+
     msg = update.effective_message
+    user = update.effective_user
+
     text = (
         "📖 **راهنمای جامع دستورات پرومته (Prometheus AI):**\n\n"
         "🧠 **هسته غول‌آسای هرمس ایجنت (Hermes Titan Brain):**\n"
@@ -583,6 +868,29 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 **درک هوشمند ریپلای:** روی هر پیامی ریپلای بزنید و بپرسید «این رو ترجمه کن»، «نظرت چیه؟» یا «خلاصه‌اش کن» تا پرومته محتوای ریپلای‌شده را هوشمندانه بخواند و تحلیل کند.\n\n"
         "🗣 **مکالمه روان:** هر سوالی بپرسید، پرومته به صورت هوشمند و خودکار بهترین روش پاسخ را انتخاب می‌کند."
     )
+
+    if user and is_admin(user.id):
+        text += (
+            "\n\n👮‍♂️ **دستورات مدیریت و نظارت ادمین (Admin Governance):**\n"
+            "• `/ban [کاربر/ریپلای] [علت]` - مسدودسازی دائم کاربر از ربات\n"
+            "• `/unban [کاربر/ریپلای]` - رفع مسدودیت کاربر و ثبت در دیتابیس\n"
+            "• `/mute [کاربر/ریپلای] [مدت] [علت]` - سکوت کاربر (مثال: `/mute 30m` یا `/mute 2h`)\n"
+            "• `/unmute [کاربر/ریپلای]` - لغو سکوت کاربر\n"
+            "• `/bangroup [شناسه گروه] [علت]` - مسدودسازی کامل ربات در گروه\n"
+            "• `/unbangroup [شناسه گروه]` - رفع مسدودیت گروه\n"
+            "• `/mutegroup [مدت]` - میوت کردن ربات در گروه\n"
+            "• `/unmutegroup` - لغو سکوت ربات در گروه\n"
+            "• `/banlist` - لیست دائم افراد و گروه‌های بن‌شده با یوزرنیم و آیدی عددی\n"
+            "• `/mutelist` - لیست فعال افراد و گروه‌های میوت‌شده با زمان باقیمانده\n"
+            "• `/pendinggroups` - لیست گروه‌های جدید در انتظار تایید ادمین\n"
+            "• `/approvegroup [شناسه]` - تایید دستی فعال‌سازی ربات در گروه\n"
+            "• `/rejectgroup [شناسه]` - رد فعال‌سازی و خروج ربات از گروه\n"
+            "• `/set [کلید] [مقدار]` - ثبت دائم دستور و تنظیمات در دیتابیس\n"
+            "• `/get [کلید]` - خواندن تنظیمات از دیتابیس\n"
+            "• `/adminsettings` - مشاهده تمامی تنظیمات ذخیره‌شده\n"
+            "• `/adminlogs` - تاریخچه و لاگ دائم تمامی دستورات ادمین‌ها"
+        )
+
     formatted = markdown_to_telegram_html(text)
     await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
 
@@ -904,6 +1212,9 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.photo or not chat or not user:
         return
 
+    if not await _check_moderation_guard(update, context):
+        return
+
     is_private = (chat.type == ChatType.PRIVATE)
     bot_id = context.bot.id
     bot_username = (context.bot.username or "").lower()
@@ -1042,6 +1353,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
 
     if not message or not user or not chat:
+        return
+
+    if not await _check_moderation_guard(update, context):
         return
 
     raw_text = message.text or message.caption or ""
@@ -1351,6 +1665,634 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================================
+# Admin Governance & Moderation Commands
+# =========================================================================
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bans a user from using the bot (via reply, numeric ID, or username)."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ این دستور منحصراً برای ادمین‌های مجاز ربات تعریف شده است.")
+        return
+
+    tid, tuname, tname, rem_args = extract_target_entity(update, context)
+    if not tid and not tuname:
+        await msg.reply_text(
+            "⚠️ <b>نحوه استفاده از دستور مسدودسازی (/ban):</b>\n\n"
+            "۱. <b>با ریپلای:</b> روی پیام کاربر ریپلای کنید و بنویسید: <code>/ban [علت]</code>\n"
+            "۲. <b>با آیدی عددی:</b> <code>/ban 123456789 [علت]</code>\n"
+            "۳. <b>با یوزرنیم:</b> <code>/ban @username [علت]</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if tid and is_admin(tid):
+        await msg.reply_text("⛔️ خطا: مسدود کردن ادمین ربات مجاز نمی‌باشد.")
+        return
+
+    reason = " ".join(rem_args).strip() or "دستور مستقیم ادمین"
+    target_id = tid or 0
+
+    await ban_user(
+        user_id=target_id,
+        username=tuname or "",
+        name=tname or "",
+        reason=reason,
+        banned_by=user.id,
+        chat_id=update.effective_chat.id if update.effective_chat else 0,
+        chat_title=update.effective_chat.title if update.effective_chat else ""
+    )
+
+    display_target = f"<code>{target_id}</code>"
+    if tuname:
+        display_target += f" (@{tuname})"
+    if tname:
+        display_target += f" ({tname})"
+
+    confirm = (
+        "🚫 <b>کاربر با موفقیت از خدمات پرومته مسدود (Ban) شد:</b>\n\n"
+        f"👤 <b>کاربر:</b> {display_target}\n"
+        f"📝 <b>علت:</b> {reason}\n"
+        f"👮‍♂️ <b>ثبت‌کننده:</b> <code>{user.id}</code> ({user.full_name})\n"
+        f"💾 ذخیره دائمی در Cloudflare D1 و حافظه L1 RAM."
+    )
+    await msg.reply_text(confirm, parse_mode=ParseMode.HTML)
+
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Unbans a user and logs to unbanned_log in D1."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ این دستور منحصراً برای ادمین‌های مجاز ربات تعریف شده است.")
+        return
+
+    tid, tuname, _, rem_args = extract_target_entity(update, context)
+    if not tid and not tuname:
+        await msg.reply_text(
+            "⚠️ <b>نحوه استفاده از دستور رفع مسدودیت (/unban):</b>\n\n"
+            "• ریپلای روی پیام: <code>/unban</code>\n"
+            "• با آیدی عددی: <code>/unban 123456789</code>\n"
+            "• با یوزرنیم: <code>/unban @username</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target_id = tid
+    if not target_id and tuname:
+        with _MOD_LOCK:
+            rec = _BANNED_USERNAMES.get(tuname.lower())
+            if rec:
+                target_id = int(rec.get("user_id") or 0)
+
+    if target_id is None:
+        target_id = 0
+
+    reason = " ".join(rem_args).strip() or "رفع مسدودیت توسط ادمین"
+    ok, prev_info = await unban_user(user_id=target_id, unbanned_by=user.id, reason=reason)
+
+    u_name = tuname or (prev_info.get("username") if prev_info else "")
+    t_name = (prev_info.get("name") or prev_info.get("first_name")) if prev_info else ""
+    disp = f"<code>{target_id}</code>"
+    if u_name:
+        disp += f" (@{u_name})"
+    if t_name:
+        disp += f" ({t_name})"
+
+    await msg.reply_text(
+        f"✅ <b>کاربر {disp} با موفقیت رفع مسدودیت (Unban) شد.</b>\n"
+        f"📝 ثبت دائم در لاگ بازرسی دیتابیس (unbanned_log).",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mutes a user for a specified duration."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    tid, tuname, tname, rem_args = extract_target_entity(update, context)
+    if not tid and not tuname:
+        await msg.reply_text(
+            "⚠️ <b>نحوه استفاده از دستور سکوت موقت (/mute):</b>\n\n"
+            "• ریپلای روی پیام: <code>/mute 30m [علت]</code>\n"
+            "• با آیدی عددی: <code>/mute 123456789 2h [علت]</code>\n"
+            "• با یوزرنیم: <code>/mute @username 1d [علت]</code>\n\n"
+            "💡 زمان‌ها: <code>10m</code> (دقیقه)، <code>2h</code> (ساعت)، <code>1d</code> (روز) یا فارسی مانند <code>۳۰ دقیقه</code>.\n"
+            "در صورت عدم درج زمان، پیش‌فرض ۶۰ دقیقه اعمال می‌شود.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if tid and is_admin(tid):
+        await msg.reply_text("⛔️ امکان میوت کردن ادمین وجود ندارد.")
+        return
+
+    duration_sec = 3600.0
+    reason_parts = []
+    if rem_args:
+        parsed = parse_duration_string(rem_args[0])
+        if parsed:
+            duration_sec = parsed
+            reason_parts = rem_args[1:]
+        else:
+            reason_parts = rem_args
+
+    reason = " ".join(reason_parts).strip() or "سکوت موقت به دستور ادمین"
+    target_id = tid or 0
+
+    ok, until_ts = await mute_user(
+        user_id=target_id,
+        duration_sec=duration_sec,
+        username=tuname or "",
+        first_name=tname or "",
+        reason=reason,
+        muted_by=user.id,
+        chat_id=update.effective_chat.id if update.effective_chat else 0,
+        chat_title=update.effective_chat.title if update.effective_chat else ""
+    )
+
+    dur_fa = format_duration_persian(duration_sec)
+    disp = f"<code>{target_id}</code>"
+    if tuname:
+        disp += f" (@{tuname})"
+
+    confirm = (
+        f"🤐 <b>کاربر {disp} به مدت {dur_fa} میوت شد:</b>\n\n"
+        f"⏱ <b>زمان سکوت:</b> {dur_fa}\n"
+        f"📝 <b>علت:</b> {reason}\n"
+        f"🔒 <b>عملکرد ربات:</b> پرومته تا پایان این زمان به هیچ پیامی از این کاربر پاسخ نخواهد داد.\n"
+        f"💾 ذخیره در Cloudflare D1 با لغو خودکار پس از انقضا."
+    )
+    await msg.reply_text(confirm, parse_mode=ParseMode.HTML)
+
+
+async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Unmutes a user immediately."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    tid, tuname, _, _ = extract_target_entity(update, context)
+    if not tid and not tuname:
+        await msg.reply_text(
+            "⚠️ <b>نحوه استفاده از دستور لغو سکوت (/unmute):</b>\n\n"
+            "• ریپلای روی پیام: <code>/unmute</code>\n"
+            "• با آیدی عددی: <code>/unmute 123456789</code>\n"
+            "• با یوزرنیم: <code>/unmute @username</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target_id = tid
+    if not target_id and tuname:
+        with _MOD_LOCK:
+            rec = _MUTED_USERNAMES.get(tuname.lower())
+            if rec:
+                target_id = int(rec.get("user_id") or 0)
+
+    if target_id is None:
+        target_id = 0
+
+    await unmute_user(user_id=target_id, unmuted_by=user.id)
+    disp = f"<code>{target_id}</code>"
+    if tuname:
+        disp += f" (@{tuname})"
+
+    await msg.reply_text(
+        f"🔊 <b>سکوت کاربر {disp} لغو شد. ربات مجدداً به پیام‌های ایشان پاسخ می‌دهد.</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def bangroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bans a group from using the bot."""
+    user = update.effective_user
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    args = context.args or []
+    target_chat_id = None
+    reason_parts = []
+    if args and args[0].lstrip("-+").isdigit():
+        target_chat_id = int(args[0])
+        reason_parts = args[1:]
+    elif chat and chat.type != ChatType.PRIVATE:
+        target_chat_id = chat.id
+        reason_parts = args
+
+    if not target_chat_id:
+        await msg.reply_text(
+            "⚠️ دستور را در گروه مربوطه اجرا کرده یا شناسه چت را قید فرمایید:\n<code>/bangroup -100xxxxxxxxxx [علت]</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    reason = " ".join(reason_parts).strip() or "مسدودسازی گروه به دستور ادمین"
+    title = chat.title if (chat and chat.id == target_chat_id) else f"گروه {target_chat_id}"
+    await ban_group(chat_id=target_chat_id, title=title, reason=reason, banned_by=user.id)
+
+    await msg.reply_text(
+        f"🚫 <b>گروه <code>{target_chat_id}</code> ({html.escape(title)}) با موفقیت مسدود شد.</b>\n"
+        f"ربات در این گروه به صورت کامل غیرفعال خواهد بود.",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def unbangroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Unbans a group."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    args = context.args or []
+    if not args or not args[0].lstrip("-+").isdigit():
+        await msg.reply_text("⚠️ لطفاً شناسه گروه را قید فرمایید:\n<code>/unbangroup -100xxxxxxxxxx</code>", parse_mode=ParseMode.HTML)
+        return
+
+    target_chat_id = int(args[0])
+    reason = " ".join(args[1:]).strip() or "رفع مسدودیت توسط ادمین"
+    await unban_group(chat_id=target_chat_id, unbanned_by=user.id, reason=reason)
+
+    await msg.reply_text(
+        f"✅ <b>مسدودیت گروه <code>{target_chat_id}</code> رفع شد و در لاگ دیتابیس ثبت گردید.</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def mutegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mutes the bot in a group."""
+    user = update.effective_user
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    args = context.args or []
+    target_chat_id = None
+    duration_str = ""
+
+    if chat and chat.type != ChatType.PRIVATE:
+        target_chat_id = chat.id
+        if args:
+            duration_str = args[0]
+    elif args and args[0].lstrip("-+").isdigit():
+        target_chat_id = int(args[0])
+        if len(args) > 1:
+            duration_str = args[1]
+
+    if not target_chat_id:
+        await msg.reply_text(
+            "⚠️ لطفاً این دستور را در گروه مربوطه اجرا کرده یا شناسه گروه را قید نمایید:\n"
+            "<code>/mutegroup 2h</code> یا <code>/mutegroup -100xxxxxxxxxx 1d</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    duration_sec = 0.0
+    if duration_str:
+        parsed = parse_duration_string(duration_str)
+        if parsed:
+            duration_sec = parsed
+
+    title = chat.title if (chat and chat.id == target_chat_id) else f"گروه {target_chat_id}"
+    await mute_group(chat_id=target_chat_id, duration_sec=duration_sec, title=title, muted_by=user.id)
+
+    dur_text = format_duration_persian(duration_sec) if duration_sec > 0 else "نامحدود (تا زمان اجرای /unmutegroup)"
+    await msg.reply_text(
+        f"🔇 <b>پرومته در این گروه ساکت شد:</b>\n\n"
+        f"📌 <b>گروه:</b> <code>{target_chat_id}</code>\n"
+        f"⏱ <b>مدت زمان سکوت:</b> {dur_text}\n"
+        f"ربات در این گروه به هیچ پیامی واکنش نخواهد داد.",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def unmutegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Unmutes the bot in a group."""
+    user = update.effective_user
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    args = context.args or []
+    target_chat_id = None
+    if chat and chat.type != ChatType.PRIVATE:
+        target_chat_id = chat.id
+    elif args and args[0].lstrip("-+").isdigit():
+        target_chat_id = int(args[0])
+
+    if not target_chat_id:
+        await msg.reply_text("⚠️ شناسه گروه مشخص نیست. نحوه استفاده: <code>/unmutegroup -100xxxxxxxxxx</code>", parse_mode=ParseMode.HTML)
+        return
+
+    await unmute_group(chat_id=target_chat_id, unmuted_by=user.id)
+    await msg.reply_text(
+        f"🔊 <b>سکوت پرومته در گروه <code>{target_chat_id}</code> برداشته شد. ربات مجدداً فعال است.</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def banlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays permanently stored banned users and groups with username and numeric ID."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    users = await get_banned_users_list()
+    groups = await get_banned_groups_list()
+
+    lines = ["📋 <b>لیست دائم کاربران و گروه‌های مسدودشده (Banned):</b>\n"]
+
+    if not users and not groups:
+        lines.append("<i>هیچ موردی در دیتابیس ثبت نشده است.</i>")
+    else:
+        if users:
+            lines.append(f"👤 <b>کاربران مسدودشده ({len(users)} نفر):</b>")
+            for idx, u in enumerate(users[:35], 1):
+                uid = u.get("user_id")
+                uname = f"@{u.get('username')}" if u.get("username") else "بدون یوزرنیم"
+                name = u.get("name") or u.get("first_name") or ""
+                reason = u.get("reason") or "بدون علت"
+                date = u.get("banned_at") or ""
+                lines.append(f"{idx}. <code>{uid}</code> | {html.escape(uname)} {html.escape(name)}\n   └ علت: {html.escape(reason)} ({date})")
+
+        if groups:
+            lines.append(f"\n👥 <b>گروه‌های مسدودشده ({len(groups)} گروه):</b>")
+            for idx, g in enumerate(groups[:25], 1):
+                cid = g.get("chat_id")
+                title = g.get("title") or "گروه"
+                reason = g.get("reason") or ""
+                lines.append(f"{idx}. <code>{cid}</code> | <b>{html.escape(title)}</b>\n   └ علت: {html.escape(reason)}")
+
+    text = "\n".join(lines)
+    for chunk in split_message(text, max_len=3800):
+        await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+
+async def mutelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays actively muted users and groups with remaining time."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    m_users = await get_muted_users_list()
+    m_groups = await get_muted_groups_list()
+
+    lines = ["🤐 <b>لیست فعال افراد و گروه‌های میوت‌شده (Muted):</b>\n"]
+
+    if not m_users and not m_groups:
+        lines.append("<i>در حال حاضر هیچ کاربر یا گروهی میوت نیست.</i>")
+    else:
+        if m_users:
+            lines.append(f"👤 <b>کاربران میوت‌شده ({len(m_users)} نفر):</b>")
+            for idx, u in enumerate(m_users[:35], 1):
+                uid = u.get("user_id")
+                uname = f"@{u.get('username')}" if u.get("username") else "بدون یوزرنیم"
+                rem_sec = u.get("remaining_seconds", 0)
+                rem_str = format_duration_persian(rem_sec)
+                reason = u.get("reason") or ""
+                lines.append(f"{idx}. <code>{uid}</code> | {html.escape(uname)}\n   └ مانده: <b>{rem_str}</b> | علت: {html.escape(reason)}")
+
+        if m_groups:
+            lines.append(f"\n👥 <b>سکوت در گروه‌ها ({len(m_groups)} مورد):</b>")
+            for idx, g in enumerate(m_groups[:25], 1):
+                cid = g.get("chat_id")
+                title = g.get("title") or "گروه"
+                rem_sec = g.get("remaining_seconds", 0)
+                rem_str = format_duration_persian(rem_sec) if rem_sec > 0 else "نامحدود"
+                lines.append(f"{idx}. <code>{cid}</code> | <b>{html.escape(title)}</b> (مانده: {rem_str})")
+
+    text = "\n".join(lines)
+    for chunk in split_message(text, max_len=3800):
+        await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+
+async def pendinggroups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists all groups awaiting admin approval."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    pending = await get_pending_groups_list()
+    if not pending:
+        await msg.reply_text("✅ در حال حاضر هیچ گروهی در انتظار تایید نیست.", parse_mode=ParseMode.HTML)
+        return
+
+    lines = [f"⏳ <b>گروه‌های در انتظار تایید ادمین ({len(pending)} گروه):</b>\n"]
+    for idx, g in enumerate(pending[:15], 1):
+        cid = g.get("chat_id")
+        title = g.get("title") or "بدون عنوان"
+        added_by = g.get("added_by") or 0
+        date = g.get("added_at") or ""
+        lines.append(
+            f"{idx}. <b>{html.escape(title)}</b>\n"
+            f"   🆔 شناسه: <code>{cid}</code>\n"
+            f"   👤 افزوده شده توسط: <code>{added_by}</code> ({date})\n"
+            f"   دستور تایید: <code>/approvegroup {cid}</code>\n"
+            f"   دستور رد: <code>/rejectgroup {cid}</code>\n"
+        )
+
+    await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def approvegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually approves a group for bot activation."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    args = context.args or []
+    if not args or not args[0].lstrip("-+").isdigit():
+        await msg.reply_text("⚠️ نحوه استفاده: <code>/approvegroup -100xxxxxxxxxx</code>", parse_mode=ParseMode.HTML)
+        return
+
+    cid = int(args[0])
+    await approve_group(cid, reviewed_by=user.id)
+    await msg.reply_text(f"✅ گروه <code>{cid}</code> با موفقیت تایید و فعال شد.", parse_mode=ParseMode.HTML)
+    try:
+        await context.bot.send_message(
+            chat_id=cid,
+            text="✅ <b>ربات توسط ادمین در این گروه تایید شد و هم‌اکنون فعال و آماده خدمت‌رسانی است.</b>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+
+async def rejectgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rejects a group request and leaves."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    args = context.args or []
+    if not args or not args[0].lstrip("-+").isdigit():
+        await msg.reply_text("⚠️ نحوه استفاده: <code>/rejectgroup -100xxxxxxxxxx</code>", parse_mode=ParseMode.HTML)
+        return
+
+    cid = int(args[0])
+    await reject_group(cid, reviewed_by=user.id)
+    await msg.reply_text(f"❌ گروه <code>{cid}</code> رد شد و ربات در حال خروج است.", parse_mode=ParseMode.HTML)
+    try:
+        await context.bot.leave_chat(chat_id=cid)
+    except Exception as e:
+        logger.warning(f"Could not leave chat {cid}: {e}")
+
+
+async def set_setting_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Persists an admin setting in Cloudflare D1 permanently."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    args = context.args or []
+    if len(args) < 2:
+        await msg.reply_text("⚠️ نحوه استفاده:\n<code>/set [کلید_تنظیمات] [مقدار]</code>\nمثال:\n<code>/set default_mute_time 30m</code>", parse_mode=ParseMode.HTML)
+        return
+
+    key = args[0].strip()
+    val = " ".join(args[1:]).strip()
+    await set_admin_setting(key, val, admin_id=user.id)
+    await msg.reply_text(
+        f"💾 <b>تنظیمات با موفقیت در دیتابیس ثبت شد:</b>\n\n"
+        f"🔑 <b>کلید:</b> <code>{html.escape(key)}</code>\n"
+        f"📄 <b>مقدار:</b> <code>{html.escape(val)}</code>\n"
+        f"ثبت دائمی در Cloudflare D1 و در دسترس در تمام زمان‌ها.",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def get_setting_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reads a setting from Cloudflare D1."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    args = context.args or []
+    if not args:
+        await msg.reply_text("⚠️ نحوه استفاده: <code>/get [کلید]</code>", parse_mode=ParseMode.HTML)
+        return
+
+    key = args[0].strip()
+    val = await get_admin_setting(key)
+    if val is None:
+        await msg.reply_text(f"❓ کلید <code>{html.escape(key)}</code> در دیتابیس یافت نشد.", parse_mode=ParseMode.HTML)
+    else:
+        await msg.reply_text(f"🔑 <code>{html.escape(key)}</code>:\n<code>{html.escape(val)}</code>", parse_mode=ParseMode.HTML)
+
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists all custom settings stored in Cloudflare D1."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    all_settings = await get_all_admin_settings()
+    if not all_settings:
+        await msg.reply_text("هیچ تنظیماتی در دیتابیس ذخیره نشده است.")
+        return
+
+    lines = [f"⚙️ <b>تنظیمات و دستورات ذخیره‌شده ادمین در دیتابیس ({len(all_settings)} مورد):</b>\n"]
+    for s in all_settings:
+        k = s.get("key_name")
+        v = s.get("data_value")
+        cat = s.get("category")
+        lines.append(f"• <b>[{html.escape(cat or 'general')}]</b> <code>{html.escape(k or '')}</code>:\n  └ <code>{html.escape(v or '')}</code>")
+
+    text = "\n".join(lines)
+    for chunk in split_message(text, max_len=3800):
+        await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+
+async def adminlogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists recent admin commands and unbans from D1."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    logs = await get_admin_commands_log(limit=25)
+    unbans = await get_unbanned_history(limit=10)
+
+    lines = ["📜 <b>تاریخچه و لاگ دائم اقدامات ادمین‌ها:</b>\n"]
+    if logs:
+        lines.append("👮‍♂️ <b>آخرین دستورات ثبت‌شده در دیتابیس:</b>")
+        for l in logs[:15]:
+            cmd = l.get("command")
+            aid = l.get("admin_id")
+            tid = l.get("target_id")
+            tname = l.get("target_username")
+            dt = l.get("created_at")
+            details = l.get("details") or ""
+            target_str = f"کاربر {tid}" if tid else ""
+            if tname:
+                target_str += f" (@{tname})"
+            lines.append(f"• <code>{dt}</code> | <b>{html.escape(cmd or '')}</b> توسط <code>{aid}</code>\n  └ {html.escape(target_str)} {html.escape(details)}")
+
+    if unbans:
+        lines.append("\n🔓 <b>آخرین رفع مسدودیت‌ها (Unbans):</b>")
+        for ub in unbans[:10]:
+            et = ub.get("entity_type")
+            eid = ub.get("entity_id")
+            uname = ub.get("username")
+            dt = ub.get("unbanned_at")
+            lines.append(f"• <code>{dt}</code> | {et} <code>{eid}</code> (@{html.escape(uname or '')}) توسط <code>{ub.get('unbanned_by')}</code>")
+
+    text = "\n".join(lines)
+    for chunk in split_message(text, max_len=3800):
+        await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+
+# =========================================================================
 # Application Factory
 # =========================================================================
 
@@ -1367,40 +2309,83 @@ def build_application():
         pool_timeout=10.0,
     )
 
-    app = ApplicationBuilder().token(token).request(request).concurrent_updates(True).build()
+    async def post_init(application: Application):
+        await init_moderation_engine()
+        logger.info("Prometheus moderation engine loaded in post_init.")
 
-    # Commands & Aliases
-    app.add_handler(CommandHandler(["start"], start_command))
-    app.add_handler(CommandHandler(["help"], help_command))
-    app.add_handler(CommandHandler(["agent", "research", "hermes"], agent_command))
-    app.add_handler(CommandHandler(["fast", "speed"], fast_command))
-    app.add_handler(CommandHandler(["mode", "setting", "settings"], mode_command))
-    app.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^setmode_"))
-    app.add_handler(CommandHandler(["rates", "dollar", "arz", "gheymat"], rates_command))
-    app.add_handler(CommandHandler(["crypto"], crypto_command))
-    app.add_handler(CommandHandler(["time", "saat"], time_command))
-    app.add_handler(CommandHandler(["weather", "hava"], weather_command))
-    app.add_handler(CommandHandler(["digikala", "dk"], digikala_command))
-    app.add_handler(CommandHandler(["music", "song", "ahang"], music_command))
-    app.add_handler(CommandHandler(["read", "web", "url"], read_command))
-    app.add_handler(CommandHandler(["telegraph", "telegra", "article"], telegraph_command))
-    app.add_handler(CommandHandler(["calc", "hesab"], calc_command))
-    app.add_handler(CommandHandler(["clear"], clear_command))
-    app.add_handler(CommandHandler(["id", "myid", "info", "chatid", "whoami"], id_command))
-    app.add_handler(CommandHandler(["qr", "qrcode"], barcode_command))
-    app.add_handler(CommandHandler(["barcode", "bar"], barcode_command))
-    app.add_handler(CommandHandler(["twitter", "tweet", "x"], twitter_command))
-    app.add_handler(CommandHandler(["delete", "del", "pak"], delete_command))
-    app.add_handler(CommandHandler(["ping"], ping_command))
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .request(request)
+        .post_init(post_init)
+        .concurrent_updates(True)
+        .build()
+    )
+
+    def guard(handler_func, is_admin_cmd: bool = False):
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            if not await _check_moderation_guard(update, context, is_admin_cmd=is_admin_cmd):
+                return
+            return await handler_func(update, context)
+        return wrapper
+
+    # Core Commands & Aliases
+    app.add_handler(CommandHandler(["start"], guard(start_command)))
+    app.add_handler(CommandHandler(["help"], guard(help_command)))
+    app.add_handler(CommandHandler(["agent", "research", "hermes"], guard(agent_command)))
+    app.add_handler(CommandHandler(["fast", "speed"], guard(fast_command)))
+    app.add_handler(CommandHandler(["mode", "setting", "settings"], guard(mode_command)))
+    app.add_handler(CallbackQueryHandler(guard(mode_callback), pattern=r"^setmode_"))
+    app.add_handler(CommandHandler(["rates", "dollar", "arz", "gheymat"], guard(rates_command)))
+    app.add_handler(CommandHandler(["crypto"], guard(crypto_command)))
+    app.add_handler(CommandHandler(["time", "saat"], guard(time_command)))
+    app.add_handler(CommandHandler(["weather", "hava"], guard(weather_command)))
+    app.add_handler(CommandHandler(["digikala", "dk"], guard(digikala_command)))
+    app.add_handler(CommandHandler(["music", "song", "ahang"], guard(music_command)))
+    app.add_handler(CommandHandler(["read", "web", "url"], guard(read_command)))
+    app.add_handler(CommandHandler(["telegraph", "telegra", "article"], guard(telegraph_command)))
+    app.add_handler(CommandHandler(["calc", "hesab"], guard(calc_command)))
+    app.add_handler(CommandHandler(["clear"], guard(clear_command)))
+    app.add_handler(CommandHandler(["id", "myid", "info", "chatid", "whoami"], guard(id_command)))
+    app.add_handler(CommandHandler(["qr", "qrcode"], guard(barcode_command)))
+    app.add_handler(CommandHandler(["barcode", "bar"], guard(barcode_command)))
+    app.add_handler(CommandHandler(["twitter", "tweet", "x"], guard(twitter_command)))
+    app.add_handler(CommandHandler(["delete", "del", "pak"], guard(delete_command)))
+    app.add_handler(CommandHandler(["ping"], guard(ping_command)))
+
+    # Admin Governance & Moderation Commands
+    app.add_handler(CommandHandler(["ban", "block"], guard(ban_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["unban", "unblock"], guard(unban_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["mute", "silence"], guard(mute_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["unmute", "unsilence"], guard(unmute_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["bangroup", "ban_group"], guard(bangroup_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["unbangroup", "unban_group"], guard(unbangroup_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["mutegroup", "mutebot"], guard(mutegroup_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["unmutegroup", "unmutebot"], guard(unmutegroup_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["banlist", "bans"], guard(banlist_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["mutelist", "mutes"], guard(mutelist_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["pendinggroups", "pending_groups"], guard(pendinggroups_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["approvegroup", "approve_group"], guard(approvegroup_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["rejectgroup", "reject_group"], guard(rejectgroup_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["set", "set_setting"], guard(set_setting_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["get", "get_setting"], guard(get_setting_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["adminsettings", "customdata"], guard(settings_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["adminlogs", "audit"], guard(adminlogs_command, is_admin_cmd=True)))
+
+    # Callback Query Handlers for Group Approvals
+    app.add_handler(CallbackQueryHandler(group_approval_callback, pattern=r"^grp_(app|rej):"))
+
+    # Chat Member Updates (Bot added/removed in groups)
+    app.add_handler(ChatMemberHandler(chat_member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))
 
     # Multimodal photo handler
-    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, guard(photo_handler)))
 
     # All text messages (with silence-by-default logic)
     app.add_handler(
         MessageHandler(
             filters.TEXT | filters.CAPTION,
-            message_handler
+            guard(message_handler)
         )
     )
 

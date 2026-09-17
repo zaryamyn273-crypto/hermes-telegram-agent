@@ -13,7 +13,7 @@ try:
 
     class Settings(BaseSettings):
         TELEGRAM_BOT_TOKEN: str = Field(default="", env="TELEGRAM_BOT_TOKEN")
-        ADMIN_ID: int = Field(default=0, env="ADMIN_ID")
+        ADMIN_ID: int = Field(default=8814471014, env="ADMIN_ID")
         ADMIN_IDS_RAW: str = Field(default="", env="ADMIN_IDS")
 
         ROUTER_BASE_URL: str = Field(default="https://api.openai.com/v1", env="ROUTER_BASE_URL")
@@ -38,10 +38,12 @@ try:
         DAILY_USER_LIMIT: int = Field(default=50, env="DAILY_USER_LIMIT")
         RATE_LIMIT_USER_MAX_REQUESTS: int = Field(default=40, env="RATE_LIMIT_USER_MAX_REQUESTS")
 
+        ADMIN_USER_IDS: List[int] = Field(default_factory=list)
+
         class Config:
             env_file = ".env"
             env_file_encoding = "utf-8"
-            extra = "ignore"
+            extra = "allow"
 
     settings = Settings()
 
@@ -51,7 +53,7 @@ except ImportError:
     @dataclass
     class Settings:
         TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        ADMIN_ID: int = int(os.getenv("ADMIN_ID", "0") or "0")
+        ADMIN_ID: int = int(os.getenv("ADMIN_ID", "8814471014") or "8814471014")
         ADMIN_IDS_RAW: str = os.getenv("ADMIN_IDS", "")
 
         ROUTER_BASE_URL: str = os.getenv("ROUTER_BASE_URL", "https://api.openai.com/v1")
@@ -99,7 +101,12 @@ def is_admin(user_id: Optional[int]) -> bool:
         return False
     try:
         uid = int(user_id)
-        return uid in _ADMIN_IDS or (settings.ADMIN_ID > 0 and uid == settings.ADMIN_ID)
+        if uid in _ADMIN_IDS or (settings.ADMIN_ID > 0 and uid == settings.ADMIN_ID):
+            return True
+        admin_list = getattr(settings, "ADMIN_USER_IDS", None)
+        if admin_list and uid in admin_list:
+            return True
+        return False
     except (ValueError, TypeError):
         return False
 
