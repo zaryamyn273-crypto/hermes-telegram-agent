@@ -17,6 +17,7 @@ from .telegraph import create_telegraph_article, publish_to_telegraph, extract_t
 from .music import (
     clean_music_query,
     search_music_track,
+    search_and_stream_music,
     is_music_request,
     extract_music_query,
     handle_music_request,
@@ -38,6 +39,7 @@ __all__ = [
     "extract_telegraph_args",
     "clean_music_query",
     "search_music_track",
+    "search_and_stream_music",
     "is_music_request",
     "extract_music_query",
     "handle_music_request",

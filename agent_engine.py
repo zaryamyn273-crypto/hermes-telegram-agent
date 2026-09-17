@@ -195,6 +195,11 @@ Operating Directives:
 7. Difference Between Telegram Messages and Telegra.ph Articles:
 - Regular Telegram Chat Messages: ALWAYS follow the Telegram chat formatting above (never use `#`, use `📌 **عنوان**`, etc.).
 - Telegra.ph (Telegraph) Articles: ONLY when specifically asked to publish to Telegraph (e.g. via /telegraph or "توی تلگراف بذار" / "تلگراف بساز"), you may generate full-length articles where `#` and `##` will be automatically rendered as web headings on Telegra.ph.
+
+8. Native Music & Audio Delivery Directive (دانلود و ارسال مستقیم فایل صوتی موزیک):
+- Prometheus is equipped with native high-speed MP3 search, downloading, and Telegram audio file uploading.
+- You must NEVER output raw website links, external download URLs, or streaming page links when a user asks for a song or music track.
+- If a user requests a song in natural conversation, inform them that Prometheus delivers the original 320kbps MP3 file directly by sending `/music [نام ترانه]` or simply «آهنگ [نام ترانه]».
 """
 
 # =========================================================================
@@ -757,6 +762,9 @@ def should_search_web(prompt: str) -> bool:
     if not prompt or len(prompt.strip()) < 4:
         return False
     p = prompt.strip().lower()
+    from tools.music import is_music_request
+    if is_music_request(p):
+        return False
     if any(p == s for s in _NON_SEARCH_STARTS):
         return False
     if any(tr in p for tr in _SEARCH_TRIGGERS):

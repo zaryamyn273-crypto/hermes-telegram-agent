@@ -415,13 +415,21 @@ def test_telegraph_arg_extractor():
 
 
 def test_music_query_cleaner_and_intent():
-    from tools.music import clean_music_query, is_music_request, extract_music_query
+    from tools.music import clean_music_query, is_music_request, extract_music_query, clean_url
 
-    # Intent detection
+    # Intent detection: explicit, natural Persian & commands
     assert is_music_request("دانلود آهنگ سوغاتی هایده") is True
     assert is_music_request("موزیک مرغ سحر شجریان رو بفرست") is True
     assert is_music_request("/music homayoun shajarian") is True
+    assert is_music_request("/pmusic shajarian") is True
+    assert is_music_request("/p_music hayedeh") is True
     assert is_music_request("آهنگ جدید شادمهر رو دانلود کن") is True
+    assert is_music_request("آهنگ سوغاتی هایده") is True
+    assert is_music_request("اهنگ مرغ سحر شجریان") is True
+    assert is_music_request("موزیک شادمهر تماشا") is True
+    assert is_music_request("آهنگ eminem without me") is True
+    assert is_music_request("آهنگ بده") is True
+    assert is_music_request("موزیک میخوام") is True
     assert is_music_request("سلام چطوری؟") is False
     assert is_music_request("قیمت دلار چنده") is False
 
@@ -429,10 +437,19 @@ def test_music_query_cleaner_and_intent():
     assert is_music_request("این خواننده کیه؟ اطلاعاتش رو بفرست") is False
     assert is_music_request("میخوام بدونم چرا این آهنگ معروف شد") is False
     assert is_music_request("آموزش آهنگسازی با کیوبیس") is False
+    assert is_music_request("بیوگرافی خواننده هایده") is False
 
     # Cleaner & extractor
     assert clean_music_query("دانلود آهنگ سوغاتی هایده رو برام بفرست 320") == "سوغاتی هایده"
+    assert clean_music_query("/pmusic سوغاتی هایده") == "سوغاتی هایده"
     assert extract_music_query("آهنگ مرغ سحر از شجریان رو بذار") is not None
+    assert extract_music_query("موزیک شادمهر تماشا") is not None
+
+    # URL quoting without double-encoding
+    u1 = clean_url("https://dl.example.com/music/Song%20Name.mp3")
+    assert u1 == "https://dl.example.com/music/Song%20Name.mp3"
+    u2 = clean_url("https://dl.example.com/music/Song Name.mp3")
+    assert u2 == "https://dl.example.com/music/Song%20Name.mp3"
 
 
 def test_should_use_hermes_agent():
