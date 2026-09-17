@@ -267,8 +267,12 @@ async def _extract_mp3_from_page(client: httpx.AsyncClient, page_url: str, page_
 
 
 async def download_mp3_stream(url: str, max_bytes: int = _MAX_AUDIO_BYTES, timeout_sec: float = 12.0) -> Optional[bytes]:
-    """Streams MP3 file into memory buffer with absolute wall-clock timeout, URL quoting, and HTML detection."""
+    """Streams MP3 file into memory buffer with absolute wall-clock timeout, URL quoting, SSRF protection, and HTML detection."""
     if not url or not url.startswith("http"):
+        return None
+    from tools.web_reader import is_safe_public_url
+    if not is_safe_public_url(url):
+        logger.warning(f"Blocked unsafe or private URL in music download: {url}")
         return None
     safe_url = clean_url(url)
     client = get_music_client()

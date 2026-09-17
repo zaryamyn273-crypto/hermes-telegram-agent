@@ -64,6 +64,10 @@ _MODIFYING_APT_SUBCOMMANDS = {
 }
 
 
+# Dangerous shell metacharacters that must never appear in APT arguments
+_DANGEROUS_SHELL_CHARS = re.compile(r"[;&|`$<>\n\r\(\)\{\}\\\"\']")
+
+
 def classify_apt_command(args_str: str) -> Tuple[bool, str, str]:
     """
     Analyzes APT command arguments and determines safety.
@@ -73,6 +77,10 @@ def classify_apt_command(args_str: str) -> Tuple[bool, str, str]:
     cleaned = args_str.strip()
     if not cleaned:
         return True, "help", "نمایش راهنمای ابزار APT"
+
+    # Reject dangerous shell metacharacters
+    if _DANGEROUS_SHELL_CHARS.search(cleaned):
+        return False, "invalid", "کاراکترهای نامجاز یا خطرناک در دستور"
 
     tokens = cleaned.split()
     first_sub = tokens[0].lower()
@@ -115,66 +123,57 @@ def classify_apt_command(args_str: str) -> Tuple[bool, str, str]:
 
 
 # =========================================================================
-# APT Command Execution Engine
+# APT Command Execution Engine (Zero-Shell Subprocess Exec)
 # =========================================================================
 
-def _build_apt_cli(subcommand: str, args_list: List[str]) -> str:
-    """Builds a secure, non-interactive apt command string."""
+def _build_apt_argv(subcommand: str, args_list: List[str]) -> Tuple[List[str], str]:
+    """
+    Builds a secure list of arguments for direct execve (asyncio.create_subprocess_exec).
+    Zero shell interpreter is spawned, completely eliminating shell injection vulnerabilities.
+    Returns: (argv: List[str], display_command: str)
+    """
     sub = subcommand.lower()
 
     if sub in ("search", "show", "policy"):
-        # apt-cache is fastest and standard on Debian/Ubuntu
-        return f"apt-cache {sub} {' '.join(args_list)}"
+        argv = ["apt-cache", sub] + args_list
+        return argv, " ".join(argv)
 
     if sub == "list":
-        return f"apt list {' '.join(args_list)}"
+        argv = ["apt", "list"] + args_list
+        return argv, " ".join(argv)
 
     if sub in ("--version", "-v", "version"):
-        return "apt --version"
+        argv = ["apt", "--version"]
+        return argv, " ".join(argv)
 
-    # Modifying commands: Use apt-get with non-interactive flags
+    # Modifying commands: Use apt-get with non-interactive flags passed as discrete arguments
     opts = [
-        "-o Dpkg::Options::=\"--force-confdef\"",
-        "-o Dpkg::Options::=\"--force-confold\"",
+        "-o", "Dpkg::Options::=--force-confdef",
+        "-o", "Dpkg::Options::=--force-confold",
         "-y",
         "--assume-yes"
     ]
-    opts_str = " ".join(opts)
 
     if sub == "update":
-        return f"apt-get update"
-    elif sub == "install":
-        return f"apt-get install {opts_str} {' '.join(args_list)}"
-    elif sub == "remove":
-        return f"apt-get remove {opts_str} {' '.join(args_list)}"
-    elif sub == "purge":
-        return f"apt-get purge {opts_str} {' '.join(args_list)}"
-    elif sub in ("upgrade", "dist-upgrade", "full-upgrade"):
-        return f"apt-get upgrade {opts_str} {' '.join(args_list)}"
+        argv = ["apt-get", "update"]
+    elif sub in ("install", "remove", "purge", "upgrade", "dist-upgrade", "full-upgrade", "reinstall", "build-dep", "download"):
+        argv = ["apt-get", sub] + opts + args_list
     elif sub == "autoremove":
-        return f"apt-get autoremove {opts_str}"
+        argv = ["apt-get", "autoremove"] + opts
     elif sub in ("clean", "autoclean"):
-        return f"apt-get {sub}"
+        argv = ["apt-get", sub]
+    else:
+        argv = ["apt-get", sub] + opts + args_list
 
-    # Generic fallback
-    return f"apt-get {opts_str} {sub} {' '.join(args_list)}"
+    return argv, " ".join(argv)
 
 
 async def execute_apt_command(args_str: str, timeout_sec: float = 120.0) -> Dict[str, Any]:
     """
-    Executes an APT package manager command with sanitized environment and timeout.
-    Returns:
-      {
-        "success": bool,
-        "stdout": str,
-        "stderr": str,
-        "exit_code": int,
-        "duration_ms": float,
-        "timed_out": bool,
-        "cli_command": str,
-        "error": Optional[str]
-      }
+    Executes an APT package manager command directly via execve without a shell.
+    Environment is sanitized to prevent secret leakage.
     """
+    import shutil
     cleaned = args_str.strip()
     if not cleaned:
         return {
@@ -188,6 +187,19 @@ async def execute_apt_command(args_str: str, timeout_sec: float = 120.0) -> Dict
             "error": "Empty command"
         }
 
+    # Strict check against shell metacharacters
+    if _DANGEROUS_SHELL_CHARS.search(cleaned):
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": "❌ خطای امنیتی: کاراکترهای نامجاز (مانند ; & | ` $ < >) در دستور APT شناسایی شد.",
+            "exit_code": 1,
+            "duration_ms": 0.0,
+            "timed_out": False,
+            "cli_command": cleaned,
+            "error": "Dangerous shell metacharacters detected"
+        }
+
     tokens = cleaned.split()
     first_sub = tokens[0].lower()
     if first_sub in ("apt", "apt-get", "apt-cache", "dpkg"):
@@ -197,7 +209,11 @@ async def execute_apt_command(args_str: str, timeout_sec: float = 120.0) -> Dict
     subcmd = first_sub
     args_list = tokens[1:]
 
-    cli_cmd = _build_apt_cli(subcmd, args_list)
+    argv, cli_cmd = _build_apt_argv(subcmd, args_list)
+
+    # Resolve absolute binary path for safe direct execution
+    binary_name = argv[0]
+    binary_path = shutil.which(binary_name) or f"/usr/bin/{binary_name}"
 
     t0 = time.perf_counter()
     env = _get_sanitized_env()
@@ -205,8 +221,9 @@ async def execute_apt_command(args_str: str, timeout_sec: float = 120.0) -> Dict
     env["APT_LISTCHANGES_FRONTEND"] = "none"
 
     try:
-        proc = await asyncio.create_subprocess_shell(
-            cli_cmd,
+        proc = await asyncio.create_subprocess_exec(
+            binary_path,
+            *argv[1:],
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -534,6 +551,23 @@ async def apt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     cmd = pending["cmd"]
     action_desc = pending.get("action_desc", cmd)
+
+    # Security check: User must be the requester or bot admin
+    req_uid = pending.get("user_id")
+    if user_id != req_uid and not is_admin(user_id):
+        await query.answer("⛔️ این تاییدیه صرفاً توسط کاربر درخواست‌کننده یا ادمین ربات قابل انجام است.", show_alert=True)
+        _PENDING_APT_COMMANDS[token] = pending
+        return
+
+    # Security check: Chat ID verification
+    req_chat_id = pending.get("chat_id")
+    msg_chat_id = getattr(query.message, "chat_id", None) if query.message else None
+    if msg_chat_id is None and query.message and getattr(query.message, "chat", None):
+        msg_chat_id = getattr(query.message.chat, "id", None)
+    if isinstance(msg_chat_id, int) and req_chat_id and msg_chat_id != req_chat_id:
+        await query.answer("⛔️ این تاییدیه متعلق به این چت نیست.", show_alert=True)
+        _PENDING_APT_COMMANDS[token] = pending
+        return
 
     if action_type == "apt_cancel":
         await query.answer("اجرای دستور پکیج منیجر لغو شد.")

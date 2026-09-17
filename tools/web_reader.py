@@ -28,6 +28,8 @@ _BROWSER_HEADERS = {
     "Accept-Language": "fa,en-US;q=0.9,en;q=0.8",
 }
 
+import socket
+
 _BLOCKED_HOSTNAMES = {
     "localhost", "127.0.0.1", "0.0.0.0", "::1",
     "metadata.google.internal", "169.254.169.254"
@@ -37,32 +39,54 @@ _WEB_CLIENT: Optional[httpx.AsyncClient] = None
 
 
 def get_web_client() -> httpx.AsyncClient:
-    """Returns persistent AsyncClient with keepalive connection pooling."""
+    """Returns persistent AsyncClient with keepalive connection pooling without blind redirect following."""
     global _WEB_CLIENT
     if _WEB_CLIENT is None or _WEB_CLIENT.is_closed:
         limits = httpx.Limits(max_keepalive_connections=30, max_connections=60, keepalive_expiry=60.0)
-        timeout = httpx.Timeout(connect=2.5, read=6.0, write=2.5, pool=2.5)
-        _WEB_CLIENT = httpx.AsyncClient(limits=limits, timeout=timeout, headers=_BROWSER_HEADERS, follow_redirects=True)
+        timeout = httpx.Timeout(connect=3.0, read=8.0, write=3.0, pool=3.0)
+        _WEB_CLIENT = httpx.AsyncClient(limits=limits, timeout=timeout, headers=_BROWSER_HEADERS, follow_redirects=False)
     return _WEB_CLIENT
 
 
 def is_safe_public_url(url: str) -> bool:
-    """Validates that URL points to a safe public destination (SSRF protection)."""
+    """
+    Validates that URL points to a safe public destination (SSRF protection).
+    Resolves hostname to IP to protect against DNS rebinding and internal IP aliases.
+    """
     try:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in ("http", "https"):
             return False
+        if parsed.username or parsed.password:
+            return False
         hostname = (parsed.hostname or "").lower().strip()
         if not hostname:
             return False
-        if hostname in _BLOCKED_HOSTNAMES or hostname.endswith(".internal") or hostname.endswith(".local"):
+        if hostname in _BLOCKED_HOSTNAMES or hostname.endswith(".internal") or hostname.endswith(".local") or hostname.endswith(".localhost"):
             return False
+
+        # 1. Direct IP check
         try:
             ip = ipaddress.ip_address(hostname)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
                 return False
+            return True
         except ValueError:
             pass  # Domain name
+
+        # 2. Resolve domain to check target IPs (SSRF & DNS rebinding guard)
+        try:
+            resolved_addrs = socket.getaddrinfo(hostname, None)
+            if not resolved_addrs:
+                return False
+            for addr in resolved_addrs:
+                ip_str = addr[4][0]
+                res_ip = ipaddress.ip_address(ip_str)
+                if res_ip.is_private or res_ip.is_loopback or res_ip.is_link_local or res_ip.is_reserved or res_ip.is_multicast or res_ip.is_unspecified:
+                    return False
+        except Exception:
+            return False
+
         return True
     except Exception:
         return False
@@ -70,7 +94,7 @@ def is_safe_public_url(url: str) -> bool:
 
 async def fetch_webpage_text(url: str, max_chars: int = 5000) -> str:
     """
-    Fetches clean text from a public web page with streaming byte cap to avoid downloading bloated assets.
+    Fetches clean text from a public web page with streaming byte cap and safe redirect validation.
     """
     clean_url = url.strip()
     if not clean_url.startswith("http://") and not clean_url.startswith("https://"):
@@ -86,19 +110,34 @@ async def fetch_webpage_text(url: str, max_chars: int = 5000) -> str:
 
     client = get_web_client()
     html = ""
-    try:
-        async with client.stream("GET", clean_url) as resp:
-            if resp.status_code != 200:
-                return f"⚠️ خطا در بازخوانی صفحه اینترنتی (کد وضعیت HTTP: {resp.status_code})."
+    curr_url = clean_url
 
-            total_bytes = 0
-            chunks = []
-            async for chunk in resp.aiter_text():
-                chunks.append(chunk)
-                total_bytes += len(chunk)
-                if total_bytes > 200_000:  # Cap at 200KB of HTML
-                    break
-            html = "".join(chunks)
+    try:
+        # Follow up to 3 redirects with explicit SSRF re-validation
+        for _ in range(4):
+            if not is_safe_public_url(curr_url):
+                return "⛔ دسترسی به این آدرس ریدایرکت‌شده به دلایل امنیتی مسدود است."
+
+            async with client.stream("GET", curr_url) as resp:
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("Location")
+                    if not location:
+                        break
+                    curr_url = urllib.parse.urljoin(curr_url, location)
+                    continue
+
+                if resp.status_code != 200:
+                    return f"⚠️ خطا در بازخوانی صفحه اینترنتی (کد وضعیت HTTP: {resp.status_code})."
+
+                total_bytes = 0
+                chunks = []
+                async for chunk in resp.aiter_text():
+                    chunks.append(chunk)
+                    total_bytes += len(chunk)
+                    if total_bytes > 200_000:  # Cap at 200KB of HTML
+                        break
+                html = "".join(chunks)
+                break
 
         # Parse and strip unwanted elements
         soup = BeautifulSoup(html, "html.parser")

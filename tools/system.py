@@ -125,21 +125,47 @@ _SAFE_MATH_NAMES = {
 }
 
 
+_ALLOWED_AST_NODES = (
+    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+    ast.Call, ast.Name, ast.Load,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
+    ast.USub, ast.UAdd
+)
+
+
 def calculate_math(expression: str) -> str:
     """
     Safely evaluates basic and scientific math expressions using AST parsing.
+    Strictly prevents AST injection, memory exhaustion, and exponentiation DoS.
     """
+    cleaned_expr = expression.strip()
+    if not cleaned_expr:
+        return "❌ عبارتی برای محاسبه وارد نشده است."
+
+    if len(cleaned_expr) > 250:
+        return "❌ طول عبارت ریاضی بیش از حد مجاز است (حداکثر ۲۵۰ کاراکتر)."
+
     try:
-        expr = expression.strip().replace("^", "**").replace("×", "*").replace("÷", "/")
+        expr = cleaned_expr.replace("^", "**").replace("×", "*").replace("÷", "/")
         node = ast.parse(expr, mode='eval')
 
         for subnode in ast.walk(node):
+            if not isinstance(subnode, _ALLOWED_AST_NODES):
+                return "❌ دستورات یا عبارات نامجاز در محاسبه ریاضی شناسایی شد."
+
             if isinstance(subnode, (ast.Call, ast.Name)):
                 name = getattr(subnode, 'id', None) or getattr(getattr(subnode, 'func', None), 'id', None)
                 if name and name not in _SAFE_MATH_NAMES:
                     return f"❌ تابع یا شناسه نامجاز در عبارت ریاضی: `{name}`"
-            elif isinstance(subnode, (ast.Import, ast.ImportFrom, ast.Attribute, ast.Lambda)):
-                return "❌ دستورات یا عبارات نامجاز شناسایی شد."
+
+            # Guard against exponentiation Denial of Service
+            if isinstance(subnode, ast.BinOp) and isinstance(subnode.op, ast.Pow):
+                if isinstance(subnode.right, ast.Constant):
+                    if isinstance(subnode.right.value, (int, float)) and abs(subnode.right.value) > 1000:
+                        return "❌ توان انتخابی بیش از حد بزرگ است (حداکثر ۱۰۰۰)."
+                if isinstance(subnode.left, ast.Constant) and isinstance(subnode.right, ast.Constant):
+                    if abs(subnode.left.value) > 1000 and abs(subnode.right.value) > 100:
+                        return "❌ محاسبه توان موجب سرریز حافظه می‌شود."
 
         code_obj = compile(node, "<math>", "eval")
         result = eval(code_obj, {"__builtins__": {}}, _SAFE_MATH_NAMES)
@@ -147,7 +173,9 @@ def calculate_math(expression: str) -> str:
         if isinstance(result, float) and result.is_integer():
             result = int(result)
 
-        return f"🧮 **نتیجه محاسبه:**\n\n`{expression}` = **{result}**"
+        return f"🧮 **نتیجه محاسبه:**\n\n`{cleaned_expr}` = **{result}**"
+    except (ValueError, OverflowError, ZeroDivisionError, MemoryError) as me:
+        return f"❌ خطا در محاسبه عبارت ریاضی: {str(me)}"
     except Exception as e:
         return f"❌ خطا در محاسبه عبارت ریاضی: {str(e)}"
 

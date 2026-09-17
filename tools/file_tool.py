@@ -23,6 +23,7 @@ import os
 import re
 import csv
 import json
+import html
 import zipfile
 import logging
 from typing import Optional, Tuple, Dict, Any, Union, List
@@ -217,10 +218,21 @@ def extract_file_content(
         try:
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
                 info_list = z.infolist()
+                # Zip Bomb Guard: Limit file count and uncompressed ratio
+                if len(info_list) > 1000:
+                    res["error"] = "خطای امنیتی: تعداد فایل‌های درون آرشیو ZIP بیش از حد مجاز است (حداکثر ۱۰۰۰ فایل)."
+                    return res
+                total_uncompressed = sum(item.file_size for item in info_list)
+                if total_uncompressed > 50 * 1024 * 1024:
+                    res["error"] = "خطای امنیتی: حجم فایل‌های فشرده درون آرشیو ZIP از سقف ۵۰ مگابایت فراتر است (حفاظت در برابر Zip Bomb)."
+                    return res
+
                 report_lines = [f"📦 فهرست محتویات آرشیو ZIP ({len(info_list)} فایل):"]
                 for item in info_list[:40]:
                     size_kb = item.file_size / 1024
-                    report_lines.append(f"• <code>{item.filename}</code> ({size_kb:.1f} KB)")
+                    # Sanitize filename in report
+                    safe_name = html.escape(os.path.basename(item.filename) or item.filename)
+                    report_lines.append(f"• <code>{safe_name}</code> ({size_kb:.1f} KB)")
                 if len(info_list) > 40:
                     report_lines.append(f"• ... و {len(info_list) - 40} فایل دیگر")
                 raw_text = "\n".join(report_lines)
@@ -285,9 +297,9 @@ def create_document_file(
     Supports .py, .txt, .json, .csv, .html, .md, .docx, .xlsx, .pdf, etc.
     Returns: (BytesIO_buffer, final_filename)
     """
-    fname = filename.strip()
-    if not fname:
-        fname = "document.txt"
+    # Clean and sanitize filename to prevent path traversal
+    clean_name = os.path.basename(filename.strip()).replace("/", "_").replace("\\", "_").replace("\x00", "").strip(" .")
+    fname = clean_name if clean_name else "document.txt"
 
     ext = (fname.rsplit(".", 1)[-1].lower() if "." in fname else "").strip()
     if not ext:

@@ -2885,6 +2885,78 @@ async def test_shell_selective_grant_workflow():
     await revoke_user_tool(test_uid, "*")
 
 
+def test_security_hardenings():
+    """Verifies all recent security hardening layers across Hermes modules."""
+    import io
+    import os
+    import zipfile
+    from tools.system import calculate_math
+    from tools.web_reader import is_safe_public_url
+    from tools.shell_tool import classify_shell_command
+    from tools.file_tool import create_document_file, extract_file_content
+    from tools.sandbox import _get_sanitized_env
+
+    # 1. Math AST guards & DoS prevention
+    assert "طول عبارت" in calculate_math("1+" * 200)
+    assert "نامجاز" in calculate_math("__import__('os').system('ls')")
+    assert "نامجاز" in calculate_math("().__class__.__base__")
+    assert "بزرگ است" in calculate_math("2 ** 1005")
+    assert "سرریز" in calculate_math("2000 ** 200")
+
+    # 2. SSRF & URL safety
+    assert not is_safe_public_url("http://127.0.0.1:8080/admin")
+    assert not is_safe_public_url("http://localhost/metrics")
+    assert not is_safe_public_url("http://169.254.169.254/latest/meta-data")
+    assert not is_safe_public_url("http://user:pass@example.com")
+    assert not is_safe_public_url("file:///etc/passwd")
+    assert not is_safe_public_url("gopher://127.0.0.1:6379")
+    assert not is_safe_public_url("http://10.0.0.5:8000")
+    assert not is_safe_public_url("http://192.168.1.1/")
+    assert is_safe_public_url("https://www.google.com")
+
+    # 3. Shell dangerous patterns & multiline checks
+    is_safe, _ = classify_shell_command("echo $(whoami)")
+    assert not is_safe
+    is_safe, _ = classify_shell_command("echo `id`")
+    assert not is_safe
+    is_safe, _ = classify_shell_command("cat < /etc/passwd")
+    assert not is_safe
+    is_safe, _ = classify_shell_command("eval 'rm -rf /'")
+    assert not is_safe
+    is_safe, _ = classify_shell_command("source /tmp/evil.sh")
+    assert not is_safe
+    is_safe, _ = classify_shell_command(". /tmp/evil.sh")
+    assert not is_safe
+    is_safe, _ = classify_shell_command("ls -la\ncat /etc/shadow")
+    assert not is_safe
+    is_safe, _ = classify_shell_command("uptime\rrm -rf /")
+    assert not is_safe
+
+    # 4. File tool path traversal & zip bomb prevention
+    _, safe_filename = create_document_file("../../../../../etc/cron.d/evil.py", "hello")
+    assert ".." not in safe_filename
+    assert "/" not in safe_filename
+    assert safe_filename == "evil.py"
+
+    _, safe_null = create_document_file("test\x00.txt", "hello")
+    assert "\x00" not in safe_null
+
+    # Zip Bomb test (over 50MB uncompressed)
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("huge.txt", b"0" * (55 * 1024 * 1024))
+    res = extract_file_content(zip_buf.getvalue(), "huge.zip")
+    assert "Zip Bomb" in res.get("error", "")
+
+    # 5. Sandbox env scrubbing
+    os.environ["TAVILY_API_KEY"] = "secret_tavily_val"
+    os.environ["DATABASE_URL"] = "postgres://user:pass@host/db"
+    clean_env = _get_sanitized_env()
+    assert "TAVILY_API_KEY" not in clean_env
+    assert "DATABASE_URL" not in clean_env
+
+
+
 
 
 

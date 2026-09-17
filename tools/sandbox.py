@@ -34,7 +34,8 @@ _MAX_OUTPUT_CHARS = 10000
 # Keys to sanitize and scrub from the sandbox environment
 _SENSITIVE_ENV_PREFIXES = (
     "BOT_", "TELEGRAM_", "HERMES_", "ROUTER_", "API_", "TOKEN",
-    "CLOUDFLARE_", "ADMIN_", "VIRUSTOTAL_", "SECRET", "PASSWORD", "KEY", "E2B_"
+    "CLOUDFLARE_", "ADMIN_", "VIRUSTOTAL_", "SECRET", "PASSWORD", "KEY",
+    "E2B_", "TAVILY_", "DATABASE_", "SQLITE_", "AUTH_", "PRIVATE_"
 )
 
 
@@ -177,12 +178,18 @@ async def run_python_sandbox(code: str, timeout_sec: float = 8.0) -> Dict[str, A
     t0 = time.perf_counter()
     env = _get_sanitized_env()
 
+    # Isolate execution directory to temporary folder away from project files
+    import tempfile
+    sandbox_dir = os.path.join(tempfile.gettempdir(), "hermes_local_sandbox")
+    os.makedirs(sandbox_dir, exist_ok=True)
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "python3", "-c", cleaned_code,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=env
+            env=env,
+            cwd=sandbox_dir
         )
 
         try:

@@ -88,6 +88,10 @@ _DANGEROUS_PATTERNS: list[Tuple[str, str]] = [
     (r"\bnc\b|\bnetcat\b|\bsocat\b", "سوکت شبکه و ابزارهای شنود (netcat)"),
     (r"(?:\bcurl\b|\bwget\b).*?\|\s*(?:bash|sh)", "دانلود و اجرای مستقیم اسکریپت ریموت"),
     (r">\s*", "تغییر یا بازنویسی محتوای فایل با ریدایرکت (>)"),
+    (r"<\s*", "تغییر ورودی با ریدایرکت (<)"),
+    (r"\$\(.*?\)", "اجرای کد در پس‌زمینه با Command Substitution ($())"),
+    (r"`.*?`", "اجرای کد درون بک‌تیک (``)"),
+    (r"\b(?:eval|exec|source|\.)\s+", "اجرای کد داینامیک درون شل"),
     (r":\(\)\s*\{\s*:\|:&\s*\};:", "حمله Fork Bomb"),
     (r"\b(?:python3?|node|ruby|perl|bash|sh|zsh)\s+-[ce]\b", "اجرای کد داینامیک درون شل"),
 ]
@@ -127,9 +131,9 @@ def classify_shell_command(cmd: str) -> Tuple[bool, str]:
         if re.search(r_pat, cleaned, re.IGNORECASE):
             return False, "تلاش برای خواندن فایل‌های حساس یا کلیدهای امنیتی"
 
-    # Split pipelines and sequential commands
-    # e.g. "ls -la | grep py ; uptime"
-    segments = re.split(r"[|;&]", cleaned)
+    # Split pipelines, sequential commands, and newlines
+    # e.g. "ls -la | grep py ; uptime \n whoami"
+    segments = re.split(r"[|;&\n\r]+", cleaned)
     for seg in segments:
         seg_clean = seg.strip()
         if not seg_clean:
@@ -480,6 +484,23 @@ async def shell_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     cmd = pending["cmd"]
+
+    # Security check: User must be original requester or bot admin
+    req_uid = pending.get("user_id")
+    if user_id != req_uid and not is_admin(user_id):
+        await query.answer("⛔️ این تاییدیه صرفاً توسط کاربر درخواست‌کننده یا ادمین ربات قابل انجام است.", show_alert=True)
+        _PENDING_SHELL_COMMANDS[token] = pending
+        return
+
+    # Security check: Chat ID verification
+    req_chat_id = pending.get("chat_id")
+    msg_chat_id = getattr(query.message, "chat_id", None) if query.message else None
+    if msg_chat_id is None and query.message and getattr(query.message, "chat", None):
+        msg_chat_id = getattr(query.message.chat, "id", None)
+    if isinstance(msg_chat_id, int) and req_chat_id and msg_chat_id != req_chat_id:
+        await query.answer("⛔️ این درخواست متعلق به این چت نیست.", show_alert=True)
+        _PENDING_SHELL_COMMANDS[token] = pending
+        return
 
     if action_type == "sh_cancel":
         await query.answer("اجرای دستور لغو شد.")
