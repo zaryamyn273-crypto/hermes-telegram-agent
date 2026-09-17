@@ -34,7 +34,10 @@ from telegram.request import HTTPXRequest
 
 from config import settings, is_admin, _ADMIN_IDS
 import database
-from utils.formatter import split_message, markdown_to_telegram_html
+from utils.formatter import split_message, markdown_to_telegram_html, apply_expandable_containers, wrap_in_expandable_blockquote
+
+from tools.summary_tool import parse_summary_request, summarize_group_messages
+from tools.search_tool import parse_search_request, search_group_messages
 from tools.moderation import (
     init_moderation_engine,
     is_user_banned,
@@ -436,6 +439,8 @@ def extract_target_entity(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def _deliver_reply(message, final_text: str):
     """
     Delivers finalized response cleanly to Telegram without streaming or typing animations.
+    Applies Telegram-native Expandable Blockquotes (<blockquote expandable>) for long answers,
+    and persists bot assistant messages to the database for full conversation memory.
     """
     cleaned = sanitize_identity(final_text).strip()
     if not cleaned:
@@ -443,10 +448,28 @@ async def _deliver_reply(message, final_text: str):
 
     try:
         formatted = markdown_to_telegram_html(cleaned)
+        # Apply collapsible expandable container if response is long
+        formatted = apply_expandable_containers(formatted, char_threshold=550)
         chunks = split_message(formatted, max_len=3900)
         for ch in chunks:
             try:
-                await message.reply_text(ch, parse_mode=ParseMode.HTML)
+                sent = await message.reply_text(ch, parse_mode=ParseMode.HTML)
+                if sent and message.chat:
+                    bot_user = sent.from_user
+                    asyncio.create_task(
+                        database.persist_message(
+                            chat_id=message.chat.id,
+                            message_id=sent.message_id,
+                            user_id=bot_user.id if bot_user else 0,
+                            username=bot_user.username or "" if bot_user else "",
+                            full_name=bot_user.full_name or "Prometheus" if bot_user else "Prometheus",
+                            role="assistant",
+                            content=cleaned,
+                            reply_to_message_id=message.message_id,
+                            media_type="text",
+                            is_bot=1
+                        )
+                    )
             except Exception as html_err:
                 logger.warning(f"HTML delivery failed for chunk ({html_err}), attempting sanitized fallback...")
                 clean_ch = re.sub(r"<[^>]+>", "", ch).strip()
@@ -454,6 +477,7 @@ async def _deliver_reply(message, final_text: str):
                     await message.reply_text(clean_ch)
     except BadRequest as e:
         logger.warning(f"Telegram BadRequest in response delivery: {e}")
+
     except Exception as e:
         logger.error(f"Failed to deliver message: {e}")
         try:
@@ -1468,6 +1492,58 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(report, parse_mode=ParseMode.HTML)
 
 
+async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Summarizes recent chat messages (up to 3000) using lightweight sub-agents."""
+    chat = update.effective_chat
+    message = update.effective_message
+    if not chat or not message:
+        return
+
+    count = 100
+    if context.args:
+        try:
+            val = int(context.args[0])
+            count = min(3000, max(10, val))
+        except ValueError:
+            pass
+
+    t0 = time.perf_counter()
+    report = await summarize_group_messages(
+        chat_id=chat.id,
+        count=count,
+        chat_title=chat.title or ""
+    )
+    record_chat_latency(chat.id, time.perf_counter() - t0, f"ساب‌اجنت‌های خلاصه‌ساز گفتگو ({count} پیام)")
+    await message.reply_text(report, parse_mode=ParseMode.HTML)
+
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Searches past messages in the chat using SQLite FTS5 BM25 full-text search."""
+    chat = update.effective_chat
+    message = update.effective_message
+    if not chat or not message:
+        return
+
+    query = " ".join(context.args).strip() if context.args else ""
+    if not query:
+        await message.reply_text(
+            "ℹ️ لطفاً عبارت مورد نظر جهت جستجو را پس از دستور بنویسید:\nمثال: <code>/search هوش مصنوعی</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    t0 = time.perf_counter()
+    report = await search_group_messages(
+        chat_id=chat.id,
+        query=query,
+        limit=10,
+        chat_title=chat.title or ""
+    )
+    record_chat_latency(chat.id, time.perf_counter() - t0, "جستجوی FTS5 در دیتابیس")
+    await message.reply_text(report, parse_mode=ParseMode.HTML)
+
+
+
 async def barcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generates QR codes and barcodes directly in Telegram."""
     msg = update.effective_message
@@ -2440,15 +2516,41 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raw_text.strip():
         return
 
-    # 1. Enforce Direct Bot Request Policy:
-    # In groups, the bot strictly ignores any message that does not directly call or address it.
-    is_direct, cleaned_prompt = is_direct_bot_request(update, context, raw_text)
-    if not is_direct:
-        # Strictly remain silent in groups for all other messages
-        return
+    # Ingest ALL incoming messages asynchronously into database for rich search & summarization
+    media_type = "text"
+    if message.photo:
+        media_type = "photo"
+    elif message.document:
+        media_type = "document"
+    elif message.video:
+        media_type = "video"
+    elif message.audio:
+        media_type = "audio"
+    elif message.voice:
+        media_type = "voice"
+    elif message.sticker:
+        media_type = "sticker"
 
-    # 1.5 Automated Anti-Jailbreak Defense & Immediate User Auto-Ban
-    attack_name = detect_jailbreak_attempt(raw_text) or detect_jailbreak_attempt(cleaned_prompt)
+    reply_id = message.reply_to_message.message_id if message.reply_to_message else 0
+    asyncio.create_task(
+        database.persist_message(
+            chat_id=chat.id,
+            user_id=user.id,
+            role="user",
+            content=raw_text,
+            username=user.username or "",
+            full_name=user.full_name or "",
+            message_id=message.message_id,
+            reply_to_message_id=reply_id,
+            media_type=media_type,
+            is_bot=1 if user.is_bot else 0
+        )
+    )
+
+    # 1. Automated Anti-Jailbreak Defense & Immediate User Auto-Ban (Global check across all incoming text)
+    # Evaluated immediately so attacks even without explicit bot mentions in groups are neutralized,
+    # while educational questions about jailbreak are explicitly exempted and never banned.
+    attack_name = detect_jailbreak_attempt(raw_text)
     if attack_name:
         if is_admin(user.id):
             logger.warning(f"Admin {user.id} triggered jailbreak pattern '{attack_name}'; skipping auto-ban.")
@@ -2498,6 +2600,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
             return
+
+    # 2. Enforce Direct Bot Request Policy:
+    # In groups, the bot strictly ignores any message that does not directly call or address it.
+    is_direct, cleaned_prompt = is_direct_bot_request(update, context, raw_text)
+    if not is_direct:
+        # Strictly remain silent in groups for all other messages
+        return
 
     # 2. Direct Interception of Admin Commands (Persian & Slash)
     if is_admin(user.id):
@@ -2555,6 +2664,34 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = format_id_report(update)
         await message.reply_text(report, parse_mode=ParseMode.HTML)
         return
+
+    # Fast-Path -2.5: Group Message Search in Database (FTS5 BM25) (<5ms)
+    is_search, search_q = parse_search_request(cleaned_prompt)
+    if is_search and search_q:
+        t0 = time.perf_counter()
+        search_res = await search_group_messages(
+            chat_id=chat.id,
+            query=search_q,
+            limit=10,
+            chat_title=chat.title or ""
+        )
+        record_chat_latency(chat.id, time.perf_counter() - t0, "جستجوی پیشرفته در دیتابیس FTS5")
+        await message.reply_text(search_res, parse_mode=ParseMode.HTML)
+        return
+
+    # Fast-Path -2.2: Multi-Subagent Conversation Summarization (Up to 3,000 Messages)
+    is_sum, sum_count = parse_summary_request(cleaned_lower)
+    if is_sum:
+        t0 = time.perf_counter()
+        summary_rep = await summarize_group_messages(
+            chat_id=chat.id,
+            count=sum_count,
+            chat_title=chat.title or ""
+        )
+        record_chat_latency(chat.id, time.perf_counter() - t0, f"ساب‌اجنت‌های خلاصه‌ساز گفتگو ({sum_count} پیام)")
+        await message.reply_text(summary_rep, parse_mode=ParseMode.HTML)
+        return
+
 
     # Fast-Path -1: Bot Message Deletion (/del, /delete, /پاک, "پاکش کن", "حذف کن", "حذف", "پاک")
     if is_delete_request(cleaned_lower):
@@ -3317,6 +3454,9 @@ def build_application():
     app.add_handler(CommandHandler(["twitter", "tweet", "x"], guard(twitter_command)))
     app.add_handler(CommandHandler(["delete", "del", "pak", "hazf", "remove"], guard(delete_command)))
     app.add_handler(CommandHandler(["ping"], guard(ping_command)))
+    app.add_handler(CommandHandler(["summarize", "recap", "summary", "kholase"], guard(summarize_command)))
+    app.add_handler(CommandHandler(["search", "find", "searchdb", "jostojoo"], guard(search_command)))
+
 
     # Admin Governance & Moderation Commands
     app.add_handler(CommandHandler(["ban", "block"], guard(ban_command, is_admin_cmd=True)))

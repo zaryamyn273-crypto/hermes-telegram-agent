@@ -6,6 +6,7 @@ High-Performance Multi-Tier Storage Engine for Prometheus (Hermes Telegram Agent
 """
 
 import os
+import re
 import time
 import json
 import logging
@@ -196,6 +197,94 @@ import sqlite3
 _SQLITE_CONN = None
 _SQLITE_LOCK = threading.RLock()
 
+def _init_sqlite_tables(conn: sqlite3.Connection):
+    """Initializes and migrates SQLite tables, indexes, and FTS5 full-text search engine."""
+    cur = conn.cursor()
+    try:
+        # 1. Ensure messages table exists with full metadata
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER DEFAULT 0,
+            user_id INTEGER NOT NULL,
+            username TEXT DEFAULT '',
+            full_name TEXT DEFAULT '',
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            reply_to_message_id INTEGER DEFAULT 0,
+            media_type TEXT DEFAULT 'text',
+            is_bot INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        # 2. Dynamic schema migration for existing databases
+        cur.execute("PRAGMA table_info(messages);")
+        existing_cols = {row["name"] for row in cur.fetchall()}
+        needed_cols = {
+            "message_id": "INTEGER DEFAULT 0",
+            "full_name": "TEXT DEFAULT ''",
+            "reply_to_message_id": "INTEGER DEFAULT 0",
+            "media_type": "TEXT DEFAULT 'text'",
+            "is_bot": "INTEGER DEFAULT 0",
+        }
+        for col_name, col_def in needed_cols.items():
+            if col_name not in existing_cols:
+                try:
+                    cur.execute(f"ALTER TABLE messages ADD COLUMN {col_name} {col_def};")
+                except Exception as ex:
+                    logger.debug(f"Migration note for messages.{col_name}: {ex}")
+
+        # 3. High-performance composite indexes for strict chat isolation & speed
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id ON messages (chat_id, id DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_user ON messages (chat_id, user_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_msg_id ON messages (chat_id, message_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages (chat_id, created_at DESC);")
+
+        # 4. Initialize SQLite FTS5 full-text search virtual table and synchronization triggers
+        try:
+            cur.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                content,
+                username,
+                full_name,
+                content='messages',
+                content_rowid='id',
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            """)
+
+            cur.execute("""
+            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+              INSERT INTO messages_fts(rowid, content, username, full_name)
+              VALUES (new.id, new.content, new.username, new.full_name);
+            END;
+            """)
+
+            cur.execute("""
+            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+              INSERT INTO messages_fts(messages_fts, rowid, content, username, full_name)
+              VALUES ('delete', old.id, old.content, old.username, old.full_name);
+            END;
+            """)
+
+            cur.execute("""
+            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+              INSERT INTO messages_fts(messages_fts, rowid, content, username, full_name)
+              VALUES ('delete', old.id, old.content, old.username, old.full_name);
+              INSERT INTO messages_fts(rowid, content, username, full_name)
+              VALUES (new.id, new.content, new.username, new.full_name);
+            END;
+            """)
+        except Exception as fts_err:
+            logger.debug(f"SQLite FTS5 virtual table initialization notice: {fts_err}")
+
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"Error during SQLite tables initialization: {e}")
+
+
 def _get_sqlite_conn():
     global _SQLITE_CONN
     if _SQLITE_CONN is None:
@@ -205,7 +294,17 @@ def _get_sqlite_conn():
                 os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
                 _SQLITE_CONN = sqlite3.connect(db_path, check_same_thread=False)
                 _SQLITE_CONN.row_factory = sqlite3.Row
+                _init_sqlite_tables(_SQLITE_CONN)
     return _SQLITE_CONN
+
+
+async def init_database():
+    """Explicitly initializes the local SQLite database and its tables/FTS5 indexes."""
+    _get_sqlite_conn()
+
+
+init_db = init_database
+
 
 def _execute_sqlite(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     with _SQLITE_LOCK:
@@ -257,19 +356,58 @@ async def execute_d1_query(sql: str, params: Optional[List[Any]] = None) -> Dict
 
 
 # =========================================================================
-# Persistent Session & Message History in D1
+# Persistent Session, Full-Text Search & Message History
 # =========================================================================
 
-async def persist_message_to_d1(chat_id: int, user_id: int, role: str, content: str, username: str = ""):
-    """Asynchronously persists a message to Cloudflare D1."""
-    sql = """
-    INSERT INTO messages (chat_id, user_id, username, role, content, created_at)
-    VALUES (?, ?, ?, ?, ?, datetime('now'))
+async def persist_message(
+    chat_id: int,
+    user_id: int,
+    role: str,
+    content: str,
+    username: str = "",
+    full_name: str = "",
+    message_id: int = 0,
+    reply_to_message_id: int = 0,
+    media_type: str = "text",
+    is_bot: int = 0
+) -> bool:
     """
-    await execute_d1_query(sql, [chat_id, user_id, username, role, content])
+    Persists a message with complete Telegram metadata into the database.
+    Automatically indexed by SQLite FTS5 for sub-millisecond retrieval.
+    """
+    if not content or not content.strip():
+        return False
+
+    clean_content = content.strip()
+    clean_role = role if role in ("user", "assistant", "system") else "user"
+
+    sql = """
+    INSERT INTO messages (chat_id, message_id, user_id, username, full_name, role, content, reply_to_message_id, media_type, is_bot, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    """
+    params = [
+        chat_id,
+        int(message_id or 0),
+        int(user_id or 0),
+        str(username or ""),
+        str(full_name or ""),
+        clean_role,
+        clean_content,
+        int(reply_to_message_id or 0),
+        str(media_type or "text"),
+        int(is_bot or 0)
+    ]
+    res = await execute_d1_query(sql, params)
+    return bool(res.get("success"))
+
+
+async def persist_message_to_d1(chat_id: int, user_id: int, role: str, content: str, username: str = ""):
+    """Legacy wrapper for backwards compatibility."""
+    await persist_message(chat_id=chat_id, user_id=user_id, role=role, content=content, username=username)
+
 
 async def load_session_history_from_d1(chat_id: int, limit: int = 15) -> List[Dict[str, Any]]:
-    """Loads recent messages from Cloudflare D1 for session restoration."""
+    """Loads recent messages for a specific chat_id with strict chat isolation."""
     sql = """
     SELECT role, content FROM messages
     WHERE chat_id = ?
@@ -282,7 +420,101 @@ async def load_session_history_from_d1(chat_id: int, limit: int = 15) -> List[Di
         return [{"role": r["role"], "content": r["content"]} for r in rows if r.get("content")]
     return []
 
+
 async def clear_session_in_d1(chat_id: int):
-    """Deletes all messages for chat_id in Cloudflare D1."""
+    """Deletes all messages for chat_id in database."""
     sql = "DELETE FROM messages WHERE chat_id = ?"
     await execute_d1_query(sql, [chat_id])
+
+
+async def search_messages_db(
+    chat_id: int,
+    query: str,
+    limit: int = 20,
+    user_id: Optional[int] = None,
+    role: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    High-performance full-text search strictly scoped to the given chat_id.
+    Uses SQLite FTS5 BM25 ranking when available, with automatic fallback to indexed LIKE.
+    """
+    if not query or not query.strip():
+        return []
+
+    clean_query = query.strip()
+    clean_limit = min(100, max(1, int(limit)))
+
+    # 1. Try SQLite FTS5 with BM25 ranking
+    # Sanitize FTS search term: wrap terms in quotes to handle punctuation safely
+    fts_tokens = [f'"{tok}"*' for tok in re.findall(r"[\w\u0600-\u06FF]+", clean_query) if tok]
+    if fts_tokens:
+        fts_match_expr = " AND ".join(fts_tokens)
+        fts_sql = """
+        SELECT m.id, m.chat_id, m.message_id, m.user_id, m.username, m.full_name, m.role, m.content, m.media_type, m.created_at, bm25(messages_fts) as rank
+        FROM messages_fts f
+        JOIN messages m ON f.rowid = m.id
+        WHERE m.chat_id = ? AND messages_fts MATCH ?
+        ORDER BY rank ASC
+        LIMIT ?
+        """
+        try:
+            res = await execute_d1_query(fts_sql, [chat_id, fts_match_expr, clean_limit])
+            if res.get("success") and res.get("results"):
+                return res["results"]
+        except Exception as ex:
+            logger.debug(f"FTS5 query fallback triggered for '{clean_query}': {ex}")
+
+    # 2. Fallback to indexed LIKE search
+    like_pattern = f"%{clean_query}%"
+    base_sql = """
+    SELECT id, chat_id, message_id, user_id, username, full_name, role, content, media_type, created_at
+    FROM messages
+    WHERE chat_id = ? AND (content LIKE ? OR username LIKE ? OR full_name LIKE ?)
+    """
+    params: List[Any] = [chat_id, like_pattern, like_pattern, like_pattern]
+    if user_id:
+        base_sql += " AND user_id = ?"
+        params.append(int(user_id))
+    if role:
+        base_sql += " AND role = ?"
+        params.append(str(role))
+
+    base_sql += " ORDER BY id DESC LIMIT ?"
+    params.append(clean_limit)
+
+    res = await execute_d1_query(base_sql, params)
+    return res.get("results", []) if res.get("success") else []
+
+
+async def get_chat_messages_for_summary(
+    chat_id: int,
+    limit: int = 100
+) -> List[Dict[str, Any]]:
+    """
+    Retrieves up to limit messages (max 3000) for a given chat_id in chronological order.
+    Strictly isolated to chat_id.
+    """
+    clean_limit = min(3000, max(1, int(limit)))
+    sql = """
+    SELECT id, chat_id, message_id, user_id, username, full_name, role, content, media_type, is_bot, created_at
+    FROM messages
+    WHERE chat_id = ?
+    ORDER BY id DESC
+    LIMIT ?
+    """
+    res = await execute_d1_query(sql, [chat_id, clean_limit])
+    if res.get("success"):
+        rows = res.get("results", [])
+        rows.reverse()  # Return chronological order (oldest to newest)
+        return rows
+    return []
+
+
+async def get_chat_message_count(chat_id: int) -> int:
+    """Returns the total number of recorded messages for a specific chat_id."""
+    sql = "SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ?"
+    res = await execute_d1_query(sql, [chat_id])
+    if res.get("success") and res.get("results"):
+        return int(res["results"][0].get("cnt", 0))
+    return 0
+

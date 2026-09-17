@@ -346,6 +346,14 @@ def markdown_to_telegram_html(text: str) -> str:
     # 2. Convert raw markdown tables to aligned Unicode box tables
     text = convert_markdown_tables_to_box(text)
 
+    # 2.5 Protect raw HTML blockquotes (<blockquote ...>...</blockquote>)
+    raw_bqs = []
+    def _save_raw_bq(match):
+        raw_bqs.append(match.group(0))
+        return f"###RBQ{len(raw_bqs)-1}###"
+
+    text = re.sub(r"<blockquote(?:\s+[^>]*)?>[\s\S]*?</blockquote>", _save_raw_bq, text, flags=re.IGNORECASE)
+
     # 3. Protect code blocks (```code```)
     code_blocks = []
     def _save_code_block(match):
@@ -373,13 +381,23 @@ def markdown_to_telegram_html(text: str) -> str:
 
     text = re.sub(r"`([^`\n]+)`", _save_inline_code, text)
 
-    # 4. Protect Blockquotes (> text)
+    # 4. Protect Blockquotes (> text, >! text for expandable, >> text)
     bqs = []
     def _save_blockquote(match):
         raw_lines = match.group(0).strip().split("\n")
-        inner_lines = [re.sub(r"^\s*>\s?", "", l) for l in raw_lines]
+        is_expandable = False
+        inner_lines = []
+        for l in raw_lines:
+            cleaned_l = re.sub(r"^\s*>\s?", "", l)
+            if cleaned_l.startswith("!") or cleaned_l.startswith(">"):
+                is_expandable = True
+                cleaned_l = cleaned_l[1:].strip()
+            elif "[expandable]" in cleaned_l.lower():
+                is_expandable = True
+                cleaned_l = re.sub(r"\[expandable\]", "", cleaned_l, flags=re.IGNORECASE).strip()
+            inner_lines.append(cleaned_l)
         inner_content = "\n".join(inner_lines).strip()
-        bqs.append(inner_content)
+        bqs.append((inner_content, is_expandable))
         return f"###BQ{len(bqs)-1}###\n"
 
     text = re.sub(r"(?:^[ \t]*>.*(?:\n|$))+", _save_blockquote, text, flags=re.MULTILINE)
@@ -417,14 +435,19 @@ def markdown_to_telegram_html(text: str) -> str:
         text
     )
 
-    # 14. Restore Blockquotes with formatted inner text
-    for idx, bq_text in enumerate(bqs):
+    # 14. Restore Blockquotes with formatted inner text (including expandable blockquotes)
+    for idx, (bq_text, is_expandable) in enumerate(bqs):
         escaped_bq = html.escape(bq_text)
         # Format bold, italic, code inside blockquote
         escaped_bq = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped_bq)
         escaped_bq = re.sub(r"(?<!\*)\*([^\*\n]+)\*(?!\*)", r"<i>\1</i>", escaped_bq)
         escaped_bq = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", escaped_bq)
-        text = text.replace(f"###BQ{idx}###", f"<blockquote>{escaped_bq}</blockquote>")
+        tag_open = "<blockquote expandable>" if is_expandable else "<blockquote>"
+        text = text.replace(f"###BQ{idx}###", f"{tag_open}{escaped_bq}</blockquote>")
+
+    # 14.5 Restore raw HTML blockquotes
+    for idx, raw_bq in enumerate(raw_bqs):
+        text = text.replace(f"###RBQ{idx}###", raw_bq)
 
     # 15. Restore inline codes & code blocks
     for idx, tag in enumerate(inline_codes):
@@ -435,6 +458,44 @@ def markdown_to_telegram_html(text: str) -> str:
 
     # 16. Sanitize and balance all tags for 100% Telegram compliance
     return sanitize_telegram_html(text)
+
+
+def wrap_in_expandable_blockquote(text: str) -> str:
+    """Wraps text in a Telegram-native expandable blockquote container."""
+    if not text or not text.strip():
+        return ""
+    return f"<blockquote expandable>\n{text.strip()}\n</blockquote>"
+
+
+def apply_expandable_containers(text: str, char_threshold: int = 550) -> str:
+    """
+    Telegram Collapsible Container (کانتینر بازشونده تلگرام):
+    If text length exceeds char_threshold, wraps the detailed body in <blockquote expandable>,
+    keeping the opening summary or headline visible outside for instant comprehension.
+    """
+    if not text or len(text) < char_threshold:
+        return text
+
+    # If the text already has a blockquote, leave it as is
+    if "<blockquote" in text.lower():
+        return text
+
+    # First attempt: break at first double newline (intro headline + body)
+    parts = text.split("\n\n", 1)
+    if len(parts) == 2 and len(parts[0]) <= 250:
+        intro = parts[0].strip()
+        body = parts[1].strip()
+        return f"{intro}\n\n<blockquote expandable>\n{body}\n</blockquote>"
+
+    # Second attempt: break at newline after line 1 or 2
+    lines = text.split("\n")
+    if len(lines) >= 4:
+        intro = "\n".join(lines[:2]).strip()
+        body = "\n".join(lines[2:]).strip()
+        return f"{intro}\n\n<blockquote expandable>\n{body}\n</blockquote>"
+
+    return f"<blockquote expandable>\n{text.strip()}\n</blockquote>"
+
 
 
 def split_message(text: str, max_len: int = 3900) -> List[str]:

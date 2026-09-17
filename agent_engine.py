@@ -10,6 +10,8 @@ import time
 import json
 import logging
 import asyncio
+import threading
+from collections import OrderedDict
 import httpx
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -28,8 +30,13 @@ import database
 
 logger = logging.getLogger("HermesAgentEngine")
 
-# Session Conversation History in RAM: chat_id -> List of message dicts
-_SESSIONS: Dict[int, List[Dict[str, Any]]] = {}
+# Isolated Per-Chat Working RAM Buffer with Strict Memory Quota & LRU Eviction:
+# Prevents RAM leaks and guarantees absolute chat memory isolation.
+_SESSIONS: OrderedDict[int, List[Dict[str, Any]]] = OrderedDict()
+_SESSIONS_LOCK = threading.RLock()
+_CHAT_RAM_QUOTA_MESSAGES = 30  # Max turns retained in fast RAM per chat
+
+_MAX_CHATS_IN_RAM = 500         # Max active chat contexts held simultaneously in RAM
 
 # Persistent HTTP Client with Connection Pooling
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
@@ -158,9 +165,11 @@ Operating Directives:
        ```python
        print("Hello from Prometheus")
        ```
-  4. 💬 TELEGRAM BLOCKQUOTES:
-     - Telegram natively supports blockquotes! Use `> ` at the beginning of lines for executive summaries, quotes, or important callouts:
-       > 💡 **نکته کلیدی:** توضیحات مهم در این کادر قرار می‌گیرد.
+   4. 💬 TELEGRAM BLOCKQUOTES & COLLAPSIBLE CONTAINERS (کانتینرهای بازشونده تلگرام):
+      - Telegram natively supports standard blockquotes (`> متن`) and modern Expandable Blockquotes (`<blockquote expandable>...</blockquote>` or `>! متن`)!
+      - Whenever delivering long explanations, detailed summaries, reports, step-by-step guides, or lengthy data, ALWAYS wrap the detailed body inside `<blockquote expandable>...</blockquote>` (or start with `>! `).
+      - Keep the main introductory headline outside, so users can tap or click on the collapsible container to smoothly expand the full detailed response without cluttering the chat room!
+
   5. 📋 BULLETS & VISUAL LISTS:
      - Use structured bullet indicators (`• `, `🔹 `, `▫️ `) with bold leading phrases (`• **مورد اول:** توضیحات`).
      - Avoid messy raw asterisks or unspaced dashes.
@@ -192,21 +201,114 @@ Operating Directives:
 # Jailbreak & Attack Detection Patterns
 # =========================================================================
 
+# Educational / Conceptual inquiries about jailbreaking (exempted from auto-ban)
+_EDUCATIONAL_JAILBREAK_PATTERNS = [
+    re.compile(
+        r"(?:چیست|چیه|چیستند|چگونه\s*است|یعنی\s*چی|یعنی\s*چه|به\s*چه\s*معناست|به\s*چه\s*معنی\s*است|"
+        r"منظور\s*از|مفهوم|تعریف|معنی|توضیح|توضیحی|شرح|تاریخچه|نحوه\s*کار|روش\s*کار|دلیل|علت|"
+        r"تفاوت|فرق|مقایسه|خطرات|مزایا|معایب|عوارض|مشکلات|عواقب|ریسک[‌\s]*های?|اصطلاح|"
+        r"آیا|ایا|چرا|چگونه|چطور|امکان‌پذیره|خطری\s*داره|امنه|قانونیه|"
+        r"درباره|در\s*مورد|راجع\s*به)\s*.*(?:جیل[‌\s]*بریک|jailbreak)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:جیل[‌\s]*بریک|jailbreak)\s*.*(?:چیست|چیه|چیستند|چگونه\s*است|یعنی\s*چی|یعنی\s*چه|"
+        r"به\s*چه\s*معناست|به\s*چه\s*معنی\s*است|چطور\s*کار\s*می‌?کنه|چگونه\s*کار\s*می‌?کنه|"
+        r"چه\s*خطراتی\s*داره|چه\s*مزایایی\s*داره|به\s*چه\s*دردی\s*میخوره|چه\s*کاربردی\s*داره|"
+        r"قانونیه|خطرناکه|امنه|ضرر\s*داره|مفیده|رو\s*توضیح\s*بده|توضیح\s*بده)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:what\s+(?:is|are|does)|how\s+(?:does|do|can|to)|why\s+(?:do|is|would)|define|explain|meaning\s+of|definition\s+of|tell\s+me\s+about|concept\s+of|history\s+of|risks\s+of|pros\s+and\s+cons\s+of|difference\s+between)\s+.*(?:jailbreak|jailbreaking)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:jailbreak|jailbreaking)\s+.*(?:meaning|definition|explanation|concept|overview|risks|dangers|guide)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:جیل[‌\s]*بریک|jailbreak)\s+(?:آیفون|گوشی|موبایل|کنسول|دستگاه|iphone|ios|ps4|ps5|switch|playstation)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:آیفون|گوشی|موبایل|کنسول|دستگاه|iphone|ios|ps4|ps5|switch|playstation)\s+.*(?:جیل[‌\s]*بریک|jailbreak)",
+        re.IGNORECASE,
+    ),
+]
+
+_HIGH_SEVERITY_PATTERNS = [
+    re.compile(r"\brm\s+-(?:r|f|rf|fr)\s+(?:/|\*)", re.IGNORECASE),
+    re.compile(r"\b(?:mkfs\.|dd\s+if=/dev/|drop\s+database\b|drop\s+table\b)", re.IGNORECASE),
+    re.compile(r"(?:کلید\s*api|توکن\s*ربات|متغیرهای\s*محیطی|پسورد\s*سیستم)\s*(?:را|رو)?\s*(?:بده|بفرست|نمایش\s*بده|لو\s*بده)", re.IGNORECASE),
+    re.compile(r"(?:give|send|leak|show|print|reveal|tell|export)\s+(?:me\s+)?(?:the\s+|your\s+|all\s+)?(?:api[-_\s]*key|bot[-_\s]*token|credentials|password|secret\s*key)\b", re.IGNORECASE),
+]
+
 _JAILBREAK_ATTACK_PATTERNS = [
-    # Category A: Prompt Injections & Persona Overrides
+    # Category A: Direct Jailbreak Commands & Declarations
     (
         re.compile(
-            r"(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?(?:previous|prior|earlier|above|system)\s+(?:instructions|rules|prompts|directives|protocols|guidelines)",
+            r"(?:^|[\s\.,!؟?،:؛])(?:جیل[‌\s]*بریک|jailbreak(?:en|ing|ed)?)(?:ت|تون|مان|مون)?\s*(?:شو|بشو|کن|بکن|شدی|کردم|کردیم|میکنم|می‌کنم|میکنیم|می‌کنیم|بشی|رو\s*شروع\s*کن|انجام\s*بده|باش)(?:$|[\s\.,!؟?،:؛])",
             re.IGNORECASE,
         ),
-        "تزریق پرامپت (Prompt Injection)",
+        "دستور فعال‌سازی جیل‌بریک (Jailbreak Command)",
     ),
     (
         re.compile(
-            r"(?:دستورات|دستورالعمل‌های|دستورالعمل\s*های|فرامین|قوانین)\s*(?:قبلی|پیشین|اولیه|سیستمی)?\s*(?:رو|را)?\s*(?:نادیده\s*بگیر|فراموش\s*کن|بیخیال\s*شو|دور\s*بریز|کنار\s*بگذار)",
+            r"(?:^|[\s\.,!؟?،:؛])(?:تو\s*الان|الان|سریع|زوود|زود)\s*(?:جیل[‌\s]*بریک|jailbreak)\s*(?:شو|بشو|شدی)(?:$|[\s\.,!؟?،:؛])",
             re.IGNORECASE,
         ),
-        "تزریق پرامپت و ابطال دستورات (Prompt Injection)",
+        "دستور فعال‌سازی جیل‌بریک (Jailbreak Command)",
+    ),
+    (
+        re.compile(
+            r"(?:برو\s*(?:رو|روی|تو|توی)\s*(?:حالت|مود|وضعیت)\s*(?:جیل[‌\s]*بریک|jailbreak|dan|دان|دولوپر\s*مود))",
+            re.IGNORECASE,
+        ),
+        "دستور تغییر حالت به جیل‌بریک (Jailbreak Mode Switch)",
+    ),
+    (
+        re.compile(
+            r"(?:حالت|مود|وضعیت)?\s*(?:جیل[‌\s]*بریک|dan|دان|دولوپر\s*مود|بدون\s*فیلتر|شیطانی)\s*(?:را|رو)?\s*(?:فعال|روشن|انجام)\s*(?:کن|بکن|بزن)",
+            re.IGNORECASE,
+        ),
+        "فعال‌سازی حالت غیرمجاز (Jailbreak Mode)",
+    ),
+    (
+        re.compile(
+            r"(?:وارد\s*(?:حالت|مود|وضعیت)\s*(?:جیل[‌\s]*بریک|jailbreak|dan)\s*شو)",
+            re.IGNORECASE,
+        ),
+        "ورود به حالت جیل‌بریک (Jailbreak Mode)",
+    ),
+    (
+        re.compile(
+            r"(?:می‌?خوام|قصد\s*دارم|بیا)\s*(?:تورو|تو\s*رو|ربات\s*رو)?\s*(?:جیل[‌\s]*بریک|jailbreak)\s*(?:کنم|بکنم)",
+            re.IGNORECASE,
+        ),
+        "تلاش صریح برای جیل‌بریک ربات (Jailbreak Intent)",
+    ),
+    (
+        re.compile(
+            r"\b(?:you\s+are\s+(?:now\s+)?jailbroken|jailbreak\s+(?:now|yourself|the\s+bot)|i\s+(?:have\s+)?jailbroken\s+you|i\s+(?:will|gonna|plan\s+to)\s+jailbreak\s+you|enable\s+jailbreak)\b",
+            re.IGNORECASE,
+        ),
+        "دستور صریح جیل‌بریک (Explicit Jailbreak)",
+    ),
+
+    # Category B: Invalidation / Nullification of instructions, rules & limits
+    (
+        re.compile(
+            r"(?:دستورات|دستورالعمل‌های|دستورالعمل\s*های|فرامین|قوانین|محدودیت‌های|محدودیت\s*های|پروتکل‌های|پروتکل\s*های)\s*(?:ت|تان|شما|سیستمی|قبلی|پیشین|اولیه|امنیتی)?\s*(?:رو|را)?\s*(?:لغو|باطل|حذف|کنسل|نادیده\s*بگیر|فراموش\s*کن|بیخیال\s*شو|دور\s*بریز|کنار\s*بگذار|بردار|غیرفعال\s*کن|نقض\s*کن)",
+            re.IGNORECASE,
+        ),
+        "تزریق پرامپت و ابطال قوانین (Prompt Injection & Rule Nullification)",
+    ),
+    (
+        re.compile(
+            r"(?:قوانین(?:ت|تان|\s*امنیتی)?|دستورات|محدودیت‌های(?:ت|تان)?|فرامین)\s*(?:رو|را)?\s*(?:لغو\s*(?:شد|است)|باطل\s*(?:شد|است)|حذف\s*(?:شد|است)|کنسل\s*(?:شد|است)|برداشته\s*شد|تمام\s*شد)",
+            re.IGNORECASE,
+        ),
+        "اعلام ابطال قوانین ربات (Rule Nullification Attack)",
     ),
     (
         re.compile(
@@ -217,24 +319,54 @@ _JAILBREAK_ATTACK_PATTERNS = [
     ),
     (
         re.compile(
-            r"\b(?:you\s+are\s+now|act\s+as|enable|enter)\s+(?:in\s+)?(?:dan|unrestricted|jailbreak(?:en)?(?:\s+mode)?|godmode|developer\s*mode|unfiltered)\b",
+            r"(?:از\s*(?:الان|حالا|این)\s*به\s*بعد|دیگه|از\s*حالا|تو\s*دیگه)\s*(?:هیچ\s*قانونی\s*نداری|قانونی\s*نداری|بدون\s*قانون\s*باش|محدودیتی\s*نداری)",
             re.IGNORECASE,
         ),
-        "تغییر شخصیت و جیل‌بریک (Jailbreak Mode)",
+        "تلاش برای حذف محدودیت‌های مدل (Rule Removal)",
     ),
     (
         re.compile(
-            r"\b(?:jailbreak\s*mode|dan\s*mode|developer\s*mode)\b",
+            r"(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?(?:previous|prior|earlier|above|system)\s+(?:instructions|rules|prompts|directives|protocols|guidelines)",
             re.IGNORECASE,
         ),
-        "درخواست فعال‌سازی جیل‌بریک (Jailbreak Mode)",
+        "تزریق پرامپت (Prompt Injection)",
     ),
     (
         re.compile(
-            r"(?:حالت|مود)?\s*(?:جیل\s*بریک|جیلبریک|dan|دان|دولوپر\s*مود|بدون\s*فیلتر|شیطانی)\s*(?:را|رو)?\s*(?:فعال|روشن)\s*کن",
+            r"\b(?:all\s+)?(?:previous|prior|system)\s+(?:rules|instructions|directives|prompts)\s+(?:are\s+)?(?:canceled|void|nullified|revoked|deleted|ignored|reset)\b",
             re.IGNORECASE,
         ),
-        "فعال‌سازی حالت غیرمجاز (Jailbreak Mode)",
+        "ابطال دستورات سیستمی (Instruction Voiding)",
+    ),
+    (
+        re.compile(
+            r"\b(?:you\s+have\s+no\s+(?:rules|restrictions|limits|guidelines)|forget\s+all\s+(?:rules|restrictions))\b",
+            re.IGNORECASE,
+        ),
+        "سلب محدودیت‌های رفتاری (Constraint Removal)",
+    ),
+
+    # Category C: Persona Overrides & Unrestricted Mode (DAN, Godmode, etc.)
+    (
+        re.compile(
+            r"\b(?:you\s+are\s+now|act\s+as|enable|enter)\s+(?:in\s+)?(?:dan|unrestricted|godmode|developer\s*mode|unfiltered)\b",
+            re.IGNORECASE,
+        ),
+        "تغییر شخصیت و جیل‌بریک (DAN / Persona Override)",
+    ),
+    (
+        re.compile(
+            r"\b(?:jailbreak\s*mode|dan\s*mode|developer\s*mode)\s*(?:is\s+)?(?:enabled|activated|on|started)\b",
+            re.IGNORECASE,
+        ),
+        "فعال‌سازی حالت غیرمجاز (Jailbreak Mode Activated)",
+    ),
+    (
+        re.compile(
+            r"(?:نقش|شخصیت)\s*(?:یک\s*)?(?:هوش\s*مصنوعی\s*)?(?:بدون\s*(?:اخلاق|فیلتر|سانسور|محدودیت|قانون)|دان|dan|شیطانی)\s*(?:رو|را)?\s*(?:بازی\s*کن|ایفا\s*کن|باش)",
+            re.IGNORECASE,
+        ),
+        "تغییر شخصیت به حالت بدون محدودیت (Unrestricted Persona)",
     ),
     (
         re.compile(
@@ -257,10 +389,11 @@ _JAILBREAK_ATTACK_PATTERNS = [
         ),
         "تلاش برای سلب محدودیت‌های امنیتی (Unrestricted Persona)",
     ),
-    # Category B: Secret Exfiltration & System Prompt Theft
+
+    # Category D: Secret Exfiltration & System Prompt Theft
     (
         re.compile(
-            r"(?:show|print|reveal|leak|repeat|display|output)\s+(?:me\s+)?(?:your|the)\s+(?:system\s+prompt|initial\s+instructions|system\s+instructions|secret\s+key|bot\s+token|env\s+variables)",
+            r"(?:show|print|reveal|leak|repeat|display|output|give|send|tell)\s+(?:me\s+)?(?:your|the)\s+(?:system\s+prompt|initial\s+instructions|system\s+instructions|secret\s+key|bot\s+token|env\s+variables)",
             re.IGNORECASE,
         ),
         "تلاش برای سرقت پرامپت یا کلیدهای سیستمی (Prompt Exfiltration)",
@@ -286,7 +419,8 @@ _JAILBREAK_ATTACK_PATTERNS = [
         ),
         "تلاش برای سرقت توکن یا اطلاعات حساس (Credential Theft)",
     ),
-    # Category C: Destructive system commands
+
+    # Category E: Destructive system commands
     (
         re.compile(r"\brm\s+-(?:r|f|rf|fr)\s+(?:/|\*)", re.IGNORECASE),
         "دستور تخریب فایل‌های سیستمی (Destructive Command)",
@@ -298,13 +432,36 @@ _JAILBREAK_ATTACK_PATTERNS = [
 ]
 
 
+def is_educational_jailbreak_query(text: str) -> bool:
+    """
+    Returns True if the prompt is an educational, historical, or conceptual inquiry
+    about jailbreaking (e.g. 'جیلبریک چیست؟', 'what is jailbreak?'), ensuring harmless
+    curiosity or device jailbreak questions are never penalized.
+    """
+    if not text:
+        return False
+    return any(p.search(text) for p in _EDUCATIONAL_JAILBREAK_PATTERNS)
+
+
 def detect_jailbreak_attempt(text: str) -> Optional[str]:
     """
     Scans incoming text for prompt injection, jailbreak attempts, secret exfiltration,
     or destructive command patterns. Returns violation label if detected, else None.
+    
+    Protects educational / informational inquiries from being falsely classified as attacks,
+    while strictly intercepting active exploitation and imperative override attempts.
     """
-    if not text:
+    if not text or not text.strip():
         return None
+
+    # Protect educational/informational queries about jailbreaking
+    if is_educational_jailbreak_query(text):
+        for pattern in _HIGH_SEVERITY_PATTERNS:
+            if pattern.search(text):
+                logger.warning(f"Malicious exploit disguised inside educational query: {text[:100]}")
+                return "دستور مخرب یا سرقت کلید در قالب سوال (Malicious Exploit in Query)"
+        return None
+
     for pattern, label in _JAILBREAK_ATTACK_PATTERNS:
         if pattern.search(text):
             logger.warning(f"Jailbreak attempt detected: {label} (pattern: {pattern.pattern})")
@@ -476,50 +633,96 @@ def clean_agent_output(text: str) -> str:
 # =========================================================================
 
 async def ensure_session_history(chat_id: int) -> List[Dict[str, Any]]:
-    """Loads session history from Cloudflare D1 into RAM if cold."""
-    if chat_id not in _SESSIONS:
-        try:
-            d1_history = await database.load_session_history_from_d1(chat_id, limit=settings.MAX_SESSION_HISTORY)
-            _SESSIONS[chat_id] = d1_history
-        except Exception:
-            _SESSIONS[chat_id] = []
-    return _SESSIONS[chat_id]
+    """Loads session history from database into isolated RAM buffer if cold."""
+    with _SESSIONS_LOCK:
+        if chat_id in _SESSIONS:
+            _SESSIONS.move_to_end(chat_id)
+            return _SESSIONS[chat_id]
+
+    try:
+        d1_history = await database.load_session_history_from_d1(chat_id, limit=settings.MAX_SESSION_HISTORY)
+    except Exception:
+        d1_history = []
+
+    with _SESSIONS_LOCK:
+        # Evict least recently active chats if RAM limit is reached
+        while len(_SESSIONS) >= _MAX_CHATS_IN_RAM:
+            try:
+                _SESSIONS.popitem(last=False)
+            except KeyError:
+                break
+        _SESSIONS[chat_id] = d1_history[-_CHAT_RAM_QUOTA_MESSAGES:]
+        _SESSIONS.move_to_end(chat_id)
+        return _SESSIONS[chat_id]
 
 
 def get_session_history(chat_id: int) -> List[Dict[str, Any]]:
-    """Retrieves session history from RAM."""
-    if chat_id not in _SESSIONS:
-        _SESSIONS[chat_id] = []
-    return _SESSIONS[chat_id]
+    """Retrieves isolated session history from RAM."""
+    with _SESSIONS_LOCK:
+        if chat_id not in _SESSIONS:
+            _SESSIONS[chat_id] = []
+        _SESSIONS.move_to_end(chat_id)
+        return _SESSIONS[chat_id]
 
 
-def append_to_session(chat_id: int, role: str, content: Any, user_id: int = 0, username: str = ""):
-    """Appends a message to RAM session history and queues async persist to Cloudflare D1."""
-    history = get_session_history(chat_id)
-    if content is not None:
+def append_to_session(
+    chat_id: int,
+    role: str,
+    content: Any,
+    user_id: int = 0,
+    username: str = "",
+    full_name: str = "",
+    message_id: int = 0,
+    reply_to_message_id: int = 0,
+    media_type: str = "text",
+    is_bot: int = 0
+):
+    """
+    Appends a message to the isolated RAM buffer, enforces per-chat memory quota,
+    and queues non-blocking async persistence to the database.
+    """
+    if content is None:
+        return
+
+    with _SESSIONS_LOCK:
+        history = get_session_history(chat_id)
         history.append({"role": role, "content": content})
-        # Asynchronously persist to Cloudflare D1
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(
-                database.persist_message_to_d1(chat_id, user_id, role, str(content), username)
-            )
-        except RuntimeError:
-            pass
+        if len(history) > _CHAT_RAM_QUOTA_MESSAGES:
+            history = history[-_CHAT_RAM_QUOTA_MESSAGES:]
+            _SESSIONS[chat_id] = history
+        _SESSIONS.move_to_end(chat_id)
 
-    max_len = settings.MAX_SESSION_HISTORY * 2
-    if len(history) > max_len:
-        _SESSIONS[chat_id] = history[-max_len:]
+    # Asynchronously persist to database with rich metadata (non-blocking)
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(
+            database.persist_message(
+                chat_id=chat_id,
+                user_id=user_id,
+                role=role,
+                content=str(content),
+                username=username,
+                full_name=full_name,
+                message_id=message_id,
+                reply_to_message_id=reply_to_message_id,
+                media_type=media_type,
+                is_bot=is_bot
+            )
+        )
+    except RuntimeError:
+        pass
 
 
 def clear_session(chat_id: int):
-    """Clears session memory in RAM and deletes history from Cloudflare D1."""
-    _SESSIONS.pop(chat_id, None)
+    """Clears isolated session memory in RAM and deletes history from database."""
+    with _SESSIONS_LOCK:
+        _SESSIONS.pop(chat_id, None)
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(database.clear_session_in_d1(chat_id))
     except RuntimeError:
         pass
+
 
 
 # =========================================================================
