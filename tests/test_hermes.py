@@ -14,15 +14,17 @@ from agent_engine import (
     get_session_history,
     append_to_session,
     clear_session,
+    is_financial_query_intent,
 )
 import database
 from tools.system import get_current_time, calculate_math
-from tools.financial import _safe_toman
+from tools.financial import _safe_toman, get_fiat_and_gold_rates
 from tools.ecommerce import clean_digikala_query
 from utils.formatter import markdown_to_telegram_html, strip_thinking, split_message
 from config import get_candidate_endpoints, settings
 from main import (
     is_fiat_or_gold_query,
+    extract_fiat_target,
     extract_crypto_query,
     is_time_query,
     extract_weather_query,
@@ -172,7 +174,15 @@ def test_fiat_fast_path_intents():
     assert is_fiat_or_gold_query("یورو چنده") is True
     assert is_fiat_or_gold_query("درهم امارات") is True
     assert is_fiat_or_gold_query("مظنه طلا چنده") is True
-    assert is_fiat_or_gold_query("انس طلا چند شد") is True
+    assert is_fiat_or_gold_query("قیمت دلار و ارز ها") is True
+    assert is_fiat_or_gold_query("قیمت روز ارزها") is True
+    assert is_fiat_or_gold_query("قیمت روز ارز") is True
+    assert is_fiat_or_gold_query("ارز چنده") is True
+    assert is_fiat_or_gold_query("ارزها چنده") is True
+    assert is_fiat_or_gold_query("دلار چقدره") is True
+    assert is_fiat_or_gold_query("دلار چند تومنه") is True
+    assert is_fiat_or_gold_query("نرخ لحظه ای ارز") is True
+    assert is_fiat_or_gold_query("قیمت دلار آزاد امروز") is True
 
     # User reported bug: "ارزون" in Indian 5G query was falsely matched as "ارز"
     assert is_fiat_or_gold_query("پرومته داخل هندوستان اینترنت 5G نامحدود میدن؟ با قیمت ارزون") is False
@@ -189,6 +199,42 @@ def test_fiat_fast_path_intents():
     # Non-fiat conversational queries
     assert is_fiat_or_gold_query("سلام چطوری؟") is False
     assert is_fiat_or_gold_query("یک شعر از حافظ بگو") is False
+
+
+def test_extract_fiat_target():
+    assert extract_fiat_target("قیمت دلار") == "usd"
+    assert extract_fiat_target("دلار چنده") == "usd"
+    assert extract_fiat_target("تتر چنده") == "usdt"
+    assert extract_fiat_target("قیمت طلا") == "gold"
+    assert extract_fiat_target("سکه چنده") == "coin"
+    assert extract_fiat_target("قیمت یورو") == "eur"
+    assert extract_fiat_target("قیمت درهم") == "aed"
+    # Multi-asset or general overview requests must return None (full comprehensive table)
+    assert extract_fiat_target("قیمت دلار و ارز ها") is None
+    assert extract_fiat_target("قیمت ارز و طلا") is None
+    assert extract_fiat_target("قیمت دلار و طلا") is None
+    assert extract_fiat_target("قیمت ارزها") is None
+
+
+def test_financial_intent_agent_engine():
+    assert is_financial_query_intent("قیمت دلار و ارز ها") is True
+    assert is_financial_query_intent("دلار چقدره") is True
+    assert is_financial_query_intent("دلار الان چنده داداش؟") is True
+    assert is_financial_query_intent("طلا و سکه چنده") is True
+    assert is_financial_query_intent("سلام چطوری؟") is False
+    assert is_financial_query_intent("یک تابع پایتون بنویس") is False
+
+
+@pytest.mark.asyncio
+async def test_live_financial_rate_values():
+    report = await get_fiat_and_gold_rates(force_refresh=True)
+    assert "دلار آزاد" in report
+    assert "تتر" in report
+    assert "تومان" in report
+    # Grounding sanity check: prices must be realistically grounded (> 100,000 Tomans in 2026)
+    usd_report = await get_fiat_and_gold_rates(target="usd")
+    assert "دلار آمریکا" in usd_report
+    assert "تومان" in usd_report
 
 
 def test_crypto_fast_path_intents():

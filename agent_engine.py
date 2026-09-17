@@ -108,6 +108,9 @@ Operating Directives:
 - You are equipped with autonomous tools: real-time web search, browser automation, data extraction, calculations, and analysis.
 - When webpage content is provided, analyze, summarize, or extract the requested details thoroughly and accurately.
 - Deliver concrete, factual, and verified data.
+- Real-Time Financial Market Grounding (استعلام زنده ارز، طلا و رمزارز):
+  * When answering queries regarding prices of USD (دلار آزاد، نقدی یا حواله)، USDT (تتر)، EUR (یورو)، AED (درهم)، Gold (طلا ۱۸ عیار، مظنه)، Coins (سکه امامی، بهار آزادی، نیم و ربع)، or Cryptocurrencies, ALWAYS base your figures strictly and exclusively on the real-time injected financial market context.
+  * NEVER quote outdated historical training cutoff figures (such as 50,000, 60,000, or 70,000 Tomans for USD). Free-market USD in Iran is currently traded in the ~220,000+ Tomans range. Always provide precise and current live market figures in Tomans.
 
 5. Telegram Platform Awareness & Native Chat Formatting (محیط بستر تلگرام و اصول نگارش):
 - CRITICAL: YOU ARE CHATTING INSIDE TELEGRAM. Telegram is a messaging client, NOT a web browser, HTML document, or GitHub repository.
@@ -459,6 +462,24 @@ def is_detailed_requested(prompt: str) -> bool:
     return any(kw in p for kw in _DETAILED_KEYWORDS)
 
 
+_FINANCIAL_ASSETS_RE = re.compile(
+    r"(?<!\w)(?:دلار|dollar|usd|تتر|usdt|طلا|طلای|سکه|مظنه|یورو|eur|درهم|aed|ارز|ارزها|ارزهای)(?!\w)",
+    re.IGNORECASE
+)
+_FINANCIAL_INTENT_RE = re.compile(
+    r"(?<!\w)(?:قیمت|نرخ|چند|چنده|چقدر|چقدره|امروز|روز|لحظه|لحظه‌ای|لحظه ای|بازار|وضعیت|استعلام|معامله|خرید|فروش|گرون|ارزون|بالا|پایین|ریزش|صعود|تومان|تومنه|چند شد|چند است)(?!\w)",
+    re.IGNORECASE
+)
+
+
+def is_financial_query_intent(prompt: str) -> bool:
+    """Determines whether a user prompt asks about dollar, gold, crypto, or currency rates."""
+    if not prompt:
+        return False
+    p = prompt.lower()
+    return bool(_FINANCIAL_ASSETS_RE.search(p)) and bool(_FINANCIAL_INTENT_RE.search(p))
+
+
 # =========================================================================
 # Main Autonomous Agent Execution
 # =========================================================================
@@ -494,6 +515,19 @@ async def execute_hermes_agent(
                 logger.info(f"Auto-fetched webpage {target_url} for user query ({len(page_text)} chars)")
         except Exception as err:
             logger.warning(f"Failed to auto-fetch webpage {target_url}: {err}")
+    elif is_financial_query_intent(user_prompt):
+        try:
+            from tools.financial import get_fiat_and_gold_rates
+            rates_text = await get_fiat_and_gold_rates()
+            if rates_text:
+                augmented_prompt = (
+                    f"{user_prompt}\n\n"
+                    f"[اطلاعات زنده و موثق نرخ لحظه‌ای ارز و طلای بازار ایران]:\n"
+                    f"{rates_text}"
+                )
+                logger.info("Auto-injected live financial rates into agent prompt")
+        except Exception as err:
+            logger.warning(f"Failed to auto-inject live financial rates: {err}")
     elif should_search_web(user_prompt):
         try:
             search_query = extract_search_query(user_prompt)
@@ -513,7 +547,7 @@ async def execute_hermes_agent(
     history = get_session_history(chat_id)
     cache_key = f"CACHE_PROMPT_{user_prompt.strip().lower()}"
 
-    if len(history) <= 1:
+    if len(history) <= 1 and not is_financial_query_intent(user_prompt):
         cached_res = await database.kv_get(cache_key)
         if cached_res:
             append_to_session(chat_id, "user", user_prompt, user_id=user_id, username=username)
@@ -694,6 +728,7 @@ async def execute_hermes_agent(
 
     # 7. Persist to session & cache
     append_to_session(chat_id, "assistant", final_answer, user_id=user_id, username=username)
-    await database.kv_set(cache_key, final_answer, ttl_sec=60)
+    if not is_financial_query_intent(user_prompt):
+        await database.kv_set(cache_key, final_answer, ttl_sec=60)
 
     return final_answer

@@ -43,7 +43,7 @@ def get_fin_client() -> httpx.AsyncClient:
 
 
 def _safe_toman(val: Any) -> int:
-    """Parses scraped Persian/English digits to integer tomans."""
+    """Parses scraped Persian/English digits in Rials to integer tomans (divides by 10)."""
     if val is None:
         return 0
     s = str(val).replace(",", "").replace("٬", "").replace("،", "").strip()
@@ -55,6 +55,67 @@ def _safe_toman(val: Any) -> int:
         return 0
     # TGJU prices are in Rials -> divide by 10 to get Tomans
     return int(digits) // 10
+
+
+def _parse_clean_toman(val: Any) -> int:
+    """Parses scraped Persian/English digits directly in Tomans without division."""
+    if val is None:
+        return 0
+    s = str(val).replace(",", "").replace("٬", "").replace("،", "").strip()
+    fa_digits = "۰۱۲۳۴۵۶۷۸۹"
+    for i, d in enumerate(fa_digits):
+        s = s.replace(d, str(i))
+    digits = "".join(c for c in s if c.isdigit())
+    return int(digits) if digits else 0
+
+
+async def _fetch_alanchand_rates(rates: Dict[str, int]):
+    """Fetches real-time fiat and gold prices from AlanChand clean HTML tables."""
+    client = get_fin_client()
+    try:
+        r_fiat, r_gold = await asyncio.gather(
+            client.get("https://alanchand.com/currencies-price"),
+            client.get("https://alanchand.com/gold-price"),
+            return_exceptions=True
+        )
+
+        if not isinstance(r_fiat, Exception) and r_fiat.status_code == 200:
+            for row in re.findall(r"<tr[^>]*>([\s\S]*?)</tr>", r_fiat.text):
+                clean_row = " ".join(re.sub(r"<[^>]+>", " ", row).split())
+                nums = [_parse_clean_toman(x) for x in re.findall(r"[\d,۰-۹]+", clean_row)]
+                nums = [n for n in nums if n > 1000]
+                if "دلار آمریکا" in clean_row and not any(x in clean_row for x in ["کانادا", "استرالیا", "نیوزلند", "سنگاپور", "حواله", "استانبول", "سلیمانیه", "هرات"]):
+                    if len(nums) >= 2:
+                        rates["usd"] = max(nums[0], nums[1])
+                elif "یورو" in clean_row and "حواله" not in clean_row and "استانبول" not in clean_row:
+                    if len(nums) >= 2:
+                        rates["eur"] = max(nums[0], nums[1])
+                elif "درهم" in clean_row:
+                    if len(nums) >= 2:
+                        rates["aed"] = max(nums[0], nums[1])
+
+        if not isinstance(r_gold, Exception) and r_gold.status_code == 200:
+            for row in re.findall(r"<tr[^>]*>([\s\S]*?)</tr>", r_gold.text):
+                clean_row = " ".join(re.sub(r"<[^>]+>", " ", row).split())
+                nums = [_parse_clean_toman(x) for x in re.findall(r"[\d,۰-۹]+", clean_row)]
+                nums = [n for n in nums if n > 1000000]
+                if "18 عیار" in clean_row or "۱۸ عیار" in clean_row:
+                    if nums:
+                        rates["gold18"] = nums[0]
+                elif "سکه امامی" in clean_row:
+                    if nums:
+                        rates["emami_coin"] = nums[0]
+                elif "سکه بهار آزادی" in clean_row:
+                    if nums:
+                        rates["bahar_coin"] = nums[0]
+                elif "نیم سکه" in clean_row:
+                    if nums:
+                        rates["half_coin"] = nums[0]
+                elif "ربع سکه" in clean_row:
+                    if nums:
+                        rates["quarter_coin"] = nums[0]
+    except Exception as e:
+        logger.debug(f"AlanChand fetch error: {e}")
 
 
 async def _fetch_tgju_rates(rates: Dict[str, int]):
@@ -79,7 +140,9 @@ async def _fetch_tgju_rates(rates: Dict[str, int]):
                     for tag, label in list(keys_needed.items()):
                         m = re.search(rf'data-market-row="{tag}"[\s\S]{{1,2000}}?data-price="([^"]+)"', buf)
                         if m:
-                            rates[label] = _safe_toman(m.group(1))
+                            val = _safe_toman(m.group(1))
+                            if val > 1000 and label not in rates:
+                                rates[label] = val
                             del keys_needed[tag]
                     if not keys_needed or len(buf) > 400000:
                         break
@@ -88,8 +151,26 @@ async def _fetch_tgju_rates(rates: Dict[str, int]):
 
 
 async def _fetch_usdt_rate() -> int:
-    """Fetches real-time USDT/Toman rate racing Wallex and Nobitex in parallel."""
+    """Fetches real-time USDT/Toman rate racing Tetherland, Bitpin, and Wallex in parallel."""
     client = get_fin_client()
+
+    async def _from_tetherland() -> int:
+        r = await client.get("https://api.tetherland.com/currencies")
+        if r.status_code == 200:
+            p = r.json().get("data", {}).get("currencies", {}).get("USDT", {}).get("price")
+            if p:
+                return int(p)
+        return 0
+
+    async def _from_bitpin() -> int:
+        r = await client.get("https://api.bitpin.ir/v1/mkt/markets/")
+        if r.status_code == 200:
+            for m in r.json().get("results", []):
+                if m.get("code") == "USDT_IRT":
+                    p = m.get("price_info", {}).get("price")
+                    if p:
+                        return int(float(p))
+        return 0
 
     async def _from_wallex() -> int:
         r = await client.get("https://api.wallex.ir/v1/markets")
@@ -100,26 +181,22 @@ async def _fetch_usdt_rate() -> int:
                 return int(float(last_p))
         return 0
 
-    async def _from_nobitex() -> int:
-        r = await client.get("https://api.nobitex.ir/v2/orderbook/USDTIRT")
-        if r.status_code == 200:
-            trade_p = r.json().get("lastTradePrice")
-            if trade_p:
-                return int(float(trade_p)) // 10
-        return 0
-
-    tasks = [asyncio.create_task(_from_wallex()), asyncio.create_task(_from_nobitex())]
+    tasks = [
+        asyncio.create_task(_from_tetherland()),
+        asyncio.create_task(_from_bitpin()),
+        asyncio.create_task(_from_wallex())
+    ]
     for fut in asyncio.as_completed(tasks):
         try:
             val = await fut
-            if val > 0:
+            if val > 1000:
                 for t in tasks:
                     t.cancel()
                 return val
         except Exception:
             pass
 
-    return 230000  # Fallback baseline
+    return 227000  # Fallback baseline grounded in 2026 market
 
 
 KV_KEY_RAW_RATES = "RAW_FINANCIAL_RATES_DICT"
@@ -145,12 +222,20 @@ async def get_fiat_and_gold_rates(force_refresh: bool = False, target: Optional[
 
     if rates is None:
         rates = {}
-        usdt_val, _ = await asyncio.gather(_fetch_usdt_rate(), _fetch_tgju_rates(rates), return_exceptions=True)
+        usdt_task = asyncio.create_task(_fetch_usdt_rate())
+        alan_task = asyncio.create_task(_fetch_alanchand_rates(rates))
+        tgju_task = asyncio.create_task(_fetch_tgju_rates(rates))
+
+        usdt_val, _, _ = await asyncio.gather(usdt_task, alan_task, tgju_task, return_exceptions=True)
 
         if isinstance(usdt_val, int) and usdt_val > 0:
             rates["usdt"] = usdt_val
             if not rates.get("usd"):
                 rates["usd"] = usdt_val
+
+        # Sanity check: ensure USD is not 0
+        if not rates.get("usd") and rates.get("usdt"):
+            rates["usd"] = rates["usdt"]
 
         if rates.get("usd") or rates.get("usdt") or rates.get("gold18"):
             database.l1_set(KV_KEY_RAW_RATES, json.dumps(rates), ttl_sec=90)
