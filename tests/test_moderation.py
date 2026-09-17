@@ -295,3 +295,81 @@ async def test_gatekeeper_guard():
     # But admin issuing admin command in unapproved group is allowed
     up_admin_cmd = make_mock_update(admin_uid, "admin_user", chat_id=unapproved_group_id, chat_type="supergroup")
     assert await _check_moderation_guard(up_admin_cmd, context, is_admin_cmd=True) is True
+
+
+@pytest.mark.asyncio
+async def test_persian_admin_text_commands():
+    from main import handle_admin_text_command
+    admin_id = 8814471014
+    bad_uid = 444333222
+    bad_uname = "persian_test_bad"
+
+    context = MagicMock()
+    context.bot.username = "AMZprometheusopenbot"
+    context.bot.ban_chat_member = AsyncMock()
+    context.bot.unban_chat_member = AsyncMock()
+    context.bot.restrict_chat_member = AsyncMock()
+
+    def make_reply_update(sender_id, text, reply_target_id, reply_target_uname):
+        up = MagicMock()
+        up.effective_user.id = sender_id
+        up.effective_user.username = "admin" if sender_id == admin_id else "normie"
+        up.effective_user.full_name = "Admin User"
+        up.effective_chat.id = -100999888
+        up.effective_chat.type = "supergroup"
+        up.effective_chat.title = "Test Group"
+
+        msg = MagicMock()
+        msg.text = text
+        msg.reply_text = AsyncMock()
+
+        rep = MagicMock()
+        rep.from_user.id = reply_target_id
+        rep.from_user.username = reply_target_uname
+        rep.from_user.full_name = "Bad Actor"
+        msg.reply_to_message = rep
+
+        up.effective_message = msg
+        return up
+
+    # 1. Non-admin typing "بن" should NOT be handled by admin interceptor
+    up_nonadmin = make_reply_update(111222, "بن", bad_uid, bad_uname)
+    assert await handle_admin_text_command(up_nonadmin, context, "بن") is False
+
+    # 2. Admin typing "بن" on bad user's reply -> handled and user is banned!
+    up_admin_ban = make_reply_update(admin_id, "بن", bad_uid, bad_uname)
+    handled = await handle_admin_text_command(up_admin_ban, context, "بن")
+    assert handled is True
+    assert is_user_banned(bad_uid) is True
+    up_admin_ban.effective_message.reply_text.assert_called_once()
+    assert "مسدود (Ban) شد" in up_admin_ban.effective_message.reply_text.call_args[0][0]
+
+    # 3. Admin typing "آنبن" on bad user's reply -> handled and user is unbanned!
+    up_admin_unban = make_reply_update(admin_id, "آنبن", bad_uid, bad_uname)
+    handled_unban = await handle_admin_text_command(up_admin_unban, context, "آنبن")
+    assert handled_unban is True
+    assert is_user_banned(bad_uid) is False
+
+    # 4. Admin typing "میوت ۱۵ دقیقه اسپم" on bad user's reply -> handled and user is muted!
+    up_admin_mute = make_reply_update(admin_id, "میوت ۱۵ دقیقه اسپم", bad_uid, bad_uname)
+    handled_mute = await handle_admin_text_command(up_admin_mute, context, "میوت ۱۵ دقیقه اسپم")
+    assert handled_mute is True
+    muted, rem = is_user_muted(bad_uid)
+    assert muted is True
+    assert 800 < rem <= 900
+
+    # 5. Admin typing "آنمیوت" -> handled and user is unmuted!
+    up_admin_unmute = make_reply_update(admin_id, "آنمیوت", bad_uid, bad_uname)
+    handled_unmute = await handle_admin_text_command(up_admin_unmute, context, "آنمیوت")
+    assert handled_unmute is True
+    assert is_user_muted(bad_uid)[0] is False
+
+    # 6. Admin typing "لیست بن" -> handled
+    up_banlist = make_reply_update(admin_id, "لیست بن", 0, "")
+    up_banlist.effective_message.reply_to_message = None
+    assert await handle_admin_text_command(up_banlist, context, "لیست بن") is True
+
+    # 7. Admin typing a normal question like "سلام پایتون چیه" -> NOT intercepted (returns False)
+    up_normal = make_reply_update(admin_id, "سلام پایتون چیه", 0, "")
+    up_normal.effective_message.reply_to_message = None
+    assert await handle_admin_text_command(up_normal, context, "سلام پایتون چیه") is False
