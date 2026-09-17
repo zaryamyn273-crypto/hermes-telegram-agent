@@ -183,6 +183,12 @@ def test_fiat_fast_path_intents():
     assert is_fiat_or_gold_query("دلار چند تومنه") is True
     assert is_fiat_or_gold_query("نرخ لحظه ای ارز") is True
     assert is_fiat_or_gold_query("قیمت دلار آزاد امروز") is True
+    assert is_fiat_or_gold_query("دلار رو بگو") is True
+    assert is_fiat_or_gold_query("قیمت دلار رو بگو") is True
+    assert is_fiat_or_gold_query("استعلام دلار") is True
+    assert is_fiat_or_gold_query("ارز و دلار") is True
+    assert is_fiat_or_gold_query("دلار و ارز") is True
+    assert is_fiat_or_gold_query("ارزش دلار چقدره") is True
 
     # User reported bug: "ارزون" in Indian 5G query was falsely matched as "ارز"
     assert is_fiat_or_gold_query("پرومته داخل هندوستان اینترنت 5G نامحدود میدن؟ با قیمت ارزون") is False
@@ -235,6 +241,15 @@ async def test_live_financial_rate_values():
     usd_report = await get_fiat_and_gold_rates(target="usd")
     assert "دلار آمریکا" in usd_report
     assert "تومان" in usd_report
+
+
+@pytest.mark.asyncio
+async def test_fiat_instant_cache_latency():
+    t0 = time.perf_counter()
+    report = await get_fiat_and_gold_rates()
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    assert "دلار آزاد" in report
+    assert elapsed_ms < 50.0  # Instant sub-millisecond RAM response (<50ms)
 
 
 def test_crypto_fast_path_intents():
