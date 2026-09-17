@@ -109,7 +109,12 @@ from tools.vision import (
     is_reconstruction_query,
     build_reconstruction_image_url,
 )
-from tools.media_group import record_media_group_photo, get_media_group_photos
+from tools.media_group import (
+    record_media_group_photo,
+    get_media_group_photos,
+    resolve_media_group_id,
+    debounce_incoming_album,
+)
 from tools.twitter import (
     fetch_tweet_data,
     format_tweet_report,
@@ -1933,6 +1938,81 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(limit_msg or "⚠️ لطفاً کمی شکیبا باشید.")
         return
 
+    # Check if this photo is part of an incoming album (Media Group)
+    if msg.media_group_id:
+        async def _on_album_ready(mg_id: str, fids: List[str], album_caption: str):
+            typing_task = asyncio.create_task(_send_typing_loop(context.bot, chat.id))
+            t0 = time.perf_counter()
+            try:
+                cleaned_c = album_caption or ""
+                if bot_username:
+                    cleaned_c = re.sub(rf"@{re.escape(bot_username)}", "", cleaned_c, flags=re.IGNORECASE)
+                for name in ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس"]:
+                    cleaned_c = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "", cleaned_c, flags=re.IGNORECASE)
+                cleaned_c = cleaned_c.strip()
+
+                async def _dl_album_photo(fid):
+                    try:
+                        f = await context.bot.get_file(fid)
+                        return bytes(await f.download_as_bytearray())
+                    except Exception as de:
+                        logger.warning(f"Error downloading album photo {fid}: {de}")
+                        return None
+
+                downloaded_bytes = await asyncio.gather(*[_dl_album_photo(fid) for fid in fids])
+                photos_bytes_list = [b for b in downloaded_bytes if b]
+                if not photos_bytes_list:
+                    largest_photo = msg.photo[-1]
+                    photo_file = await largest_photo.get_file()
+                    photos_bytes_list = [bytes(await photo_file.download_as_bytearray())]
+
+                analysis = await analyze_image_with_vision(
+                    images=photos_bytes_list,
+                    prompt=cleaned_c if cleaned_c else None,
+                    chat_id=chat.id,
+                )
+
+                if is_reconstruction_query(album_caption):
+                    reconstruct_prompt = cleaned_c or "photorealistic detailed visual recreation"
+                    preview_url = build_reconstruction_image_url(reconstruct_prompt)
+                    analysis += f"\n\n🎨 <b>پیش‌نمایش شبیه‌سازی مجدد تصویر:</b>\n<a href=\"{preview_url}\">مشاهده پیش‌نمایش تصویر بازسازی‌شده</a>"
+
+                elapsed = time.perf_counter() - t0
+                engine_label = f"موتور بینایی چندوجهی پرومته ({len(photos_bytes_list)} تصویر آلبوم)"
+                record_chat_latency(chat.id, elapsed, engine_label)
+                header = f"📸 <b>تحلیل چندوجهی آلبوم تصاویر ({len(photos_bytes_list)} تصویر):</b>\n\n" if len(photos_bytes_list) > 1 else ""
+                await _deliver_reply(msg, header + analysis)
+            except Exception as e:
+                logger.error(f"Error processing album vision: {e}")
+                await msg.reply_text(f"❌ متأسفانه خطایی در پردازش آلبوم تصاویر رخ داد: {str(e)}")
+            finally:
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
+
+        # Check if this photo or album was addressed to the bot
+        is_trig = is_private
+        if not is_trig:
+            if msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == bot_id:
+                is_trig = True
+            elif bot_username and f"@{bot_username}" in caption.lower():
+                is_trig = True
+            elif any(name in caption.lower() for name in ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس"]):
+                is_trig = True
+
+        await debounce_incoming_album(
+            chat_id=chat.id,
+            media_group_id=str(msg.media_group_id),
+            message_id=msg.message_id,
+            file_id=msg.photo[-1].file_id,
+            caption=caption if is_trig else None,
+            on_ready_callback=_on_album_ready if is_trig else (lambda *args: None),
+            delay=1.0
+        )
+        return
+
     typing_task = asyncio.create_task(_send_typing_loop(context.bot, chat.id))
     t0 = time.perf_counter()
     try:
@@ -1943,27 +2023,9 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cleaned_caption = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "", cleaned_caption, flags=re.IGNORECASE)
         cleaned_caption = cleaned_caption.strip()
 
-        # Collect all photos in album if part of a media group
-        photos_fids = [msg.photo[-1].file_id]
-        if msg.media_group_id:
-            all_fids = await get_media_group_photos(chat.id, str(msg.media_group_id), wait_for_incoming=True)
-            if all_fids:
-                photos_fids = all_fids
-
-        async def _dl_photo(fid):
-            try:
-                f = await context.bot.get_file(fid)
-                return bytes(await f.download_as_bytearray())
-            except Exception as de:
-                logger.warning(f"Error downloading photo {fid}: {de}")
-                return None
-
-        downloaded_bytes = await asyncio.gather(*[_dl_photo(fid) for fid in photos_fids])
-        photos_bytes_list = [b for b in downloaded_bytes if b]
-        if not photos_bytes_list:
-            largest_photo = msg.photo[-1]
-            photo_file = await largest_photo.get_file()
-            photos_bytes_list = [bytes(await photo_file.download_as_bytearray())]
+        largest_photo = msg.photo[-1]
+        photo_file = await largest_photo.get_file()
+        photos_bytes_list = [bytes(await photo_file.download_as_bytearray())]
 
         analysis = await analyze_image_with_vision(
             images=photos_bytes_list,
@@ -1977,7 +2039,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             analysis += f"\n\n🎨 <b>پیش‌نمایش شبیه‌سازی مجدد تصویر:</b>\n<a href=\"{preview_url}\">مشاهده پیش‌نمایش تصویر بازسازی‌شده</a>"
 
         elapsed = time.perf_counter() - t0
-        engine_label = f"موتور بینایی چندوجهی پرومته ({len(photos_bytes_list)} تصویر)"
+        engine_label = f"موتور بینایی چندوجهی پرومته (1 تصویر)"
         record_chat_latency(chat.id, elapsed, engine_label)
         await _deliver_reply(msg, analysis)
     except Exception as e:
@@ -3495,6 +3557,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Fast-Path 7.8: Multimodal Vision on Replied Photo or Album (Media Group)
     if message.reply_to_message and message.reply_to_message.photo:
         reply_mg = getattr(message.reply_to_message, "media_group_id", None)
+        if not reply_mg:
+            reply_mg = await resolve_media_group_id(
+                chat_id=chat.id,
+                message_id=message.reply_to_message.message_id,
+                file_id=message.reply_to_message.photo[-1].file_id if message.reply_to_message.photo else None
+            )
+
         typing_task = asyncio.create_task(_send_typing_loop(context.bot, chat.id))
         t0 = time.perf_counter()
         try:
@@ -3532,7 +3601,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elapsed = time.perf_counter() - t0
             engine_label = f"موتور بینایی چندوجهی پرومته ({len(photos_bytes_list)} تصویر)"
             record_chat_latency(chat.id, elapsed, engine_label)
-            await _deliver_reply(message, analysis)
+            header = f"📸 <b>تحلیل جامع آلبوم تصاویر ({len(photos_bytes_list)} تصویر):</b>\n\n" if len(photos_bytes_list) > 1 else ""
+            await _deliver_reply(message, header + analysis)
             return
         except Exception as e:
             logger.error(f"Error processing replied photo vision: {e}")

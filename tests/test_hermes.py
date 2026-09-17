@@ -2017,6 +2017,12 @@ async def test_media_group_album_tracking():
     assert len(photos) == 3
     assert photos == ["fid_photo_1", "fid_photo_2", "fid_photo_3"]
 
+    # Resolution by message_id, file_id, and adjacent message_id
+    from tools.media_group import resolve_media_group_id
+    assert await resolve_media_group_id(chat_id, message_id=102) == media_group_id
+    assert await resolve_media_group_id(chat_id, file_id="fid_photo_3") == media_group_id
+    assert await resolve_media_group_id(chat_id, message_id=104) == media_group_id
+
     # Non-existent album returns empty list
     non_existent = await get_media_group_photos(chat_id, "non_existent_album")
     assert non_existent == []
@@ -2030,6 +2036,40 @@ async def test_vision_engine_multi_image_support():
     # Empty images check
     res = await analyze_image_with_vision(image_bytes=None, images=[])
     assert "⚠️" in res
+
+
+@pytest.mark.asyncio
+async def test_debounce_incoming_album():
+    """Verifies that debounce_incoming_album aggregates multiple photos and fires callback once."""
+    from tools.media_group import debounce_incoming_album
+    import asyncio
+
+    callback_results = []
+
+    async def _on_ready(mg_id, fids, caption):
+        callback_results.append((mg_id, fids, caption))
+
+    chat_id = -10011223344
+    mg_id = "album_debounce_test_999"
+
+    # Simulate 4 photos arriving rapidly (every 50ms)
+    await debounce_incoming_album(chat_id, mg_id, 201, "photo_a", "Album caption here", _on_ready, delay=0.2)
+    await asyncio.sleep(0.05)
+    await debounce_incoming_album(chat_id, mg_id, 202, "photo_b", None, _on_ready, delay=0.2)
+    await asyncio.sleep(0.05)
+    await debounce_incoming_album(chat_id, mg_id, 203, "photo_c", None, _on_ready, delay=0.2)
+    await asyncio.sleep(0.05)
+    await debounce_incoming_album(chat_id, mg_id, 204, "photo_d", None, _on_ready, delay=0.2)
+
+    # Wait for debounce delay to expire
+    await asyncio.sleep(0.35)
+
+    assert len(callback_results) == 1
+    mg_res, fids_res, cap_res = callback_results[0]
+    assert mg_res == mg_id
+    assert fids_res == ["photo_a", "photo_b", "photo_c", "photo_d"]
+    assert cap_res == "Album caption here"
+
 
 
 
