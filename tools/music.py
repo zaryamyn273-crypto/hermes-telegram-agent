@@ -181,28 +181,78 @@ async def _search_deezer_fast(client: httpx.AsyncClient, clean_q: str) -> Option
                     }
     except Exception as e:
         logger.debug(f"Deezer search error: {e}")
+async def _extract_mp3_from_page(client: httpx.AsyncClient, page_url: str, page_title: str) -> Optional[Dict[str, Any]]:
+    """Fetches a candidate song webpage and extracts clean MP3 direct links."""
+    try:
+        r = await client.get(page_url, timeout=6.0)
+        if r.status_code == 200:
+            mp3s = re.findall(r'href=[\"\'](https?://[^\"\']+\.mp3)[\"\']', r.text, re.I)
+            valid = [
+                m for m in mp3s
+                if not any(x in m.lower() for x in ['ads', 'advert', 'teaser', 'demo', '64.mp3', 'voice'])
+            ]
+            if valid:
+                mp3_320 = [m for m in valid if '320' in m]
+                chosen = mp3_320[0] if mp3_320 else valid[0]
+                clean_title = re.sub(r'دانلود آهنگ|دانلود اهنگ|دانلود|mp3|320|128|-.*|\|.*|•.*', '', page_title, flags=re.I).strip()
+                return {
+                    'title': clean_title or page_title,
+                    'performer': clean_title.split()[0] if clean_title else "هنرمند",
+                    'url': chosen,
+                    'quality': '320kbps Original' if '320' in chosen else '128kbps HQ'
+                }
+    except Exception:
+        pass
+    return None
+
+
+async def _search_ddg_music(client: httpx.AsyncClient, clean_q: str) -> Optional[Dict[str, Any]]:
+    """Searches music via high-speed DuckDuckGo engine and extracts direct MP3 download pages."""
+    try:
+        search_terms = [f'دانلود آهنگ {clean_q} 320 mp3', f'دانلود آهنگ {clean_q}']
+        candidates: List[Tuple[str, str]] = []
+        for st in search_terms:
+            r = await client.post('https://html.duckduckgo.com/html/', data={'q': st}, timeout=6.0)
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, 'html.parser')
+                for a in soup.find_all('a', class_='result__a'):
+                    h = a.get('href')
+                    t = a.get_text().strip()
+                    if h and h.startswith('http') and not any(x in h for x in ['youtube.com', 'aparat.com', 'spotify.com', 'instagram.com', 'tarafdari.com']):
+                        if not any(c[0] == h for c in candidates):
+                            candidates.append((h, t))
+            if len(candidates) >= 5:
+                break
+
+        if candidates:
+            tasks = [_extract_mp3_from_page(client, h, t) for h, t in candidates[:6]]
+            for fut in asyncio.as_completed(tasks):
+                res = await fut
+                if res and res.get('url'):
+                    return res
+    except Exception as e:
+        logger.debug(f"DDG music search error: {e}")
     return None
 
 
 async def search_music_track(clean_q: str) -> Optional[Dict[str, Any]]:
     """
-    Races multiple music portals concurrently.
-    Returns the first matching candidate with early exit for sub-second performance.
+    Races multiple music engines and portals concurrently.
+    Returns the first matching studio MP3 candidate with early exit for sub-second performance.
     """
     client = get_music_client()
     tasks = [
-        asyncio.create_task(_crawl_portal_fast(client, pat, reg, clean_q))
-        for pat, reg in MUSIC_PORTALS
+        asyncio.create_task(_search_ddg_music(client, clean_q)),
+        asyncio.create_task(_crawl_portal_fast(client, "https://musics-fa.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>', clean_q)),
+        asyncio.create_task(_crawl_portal_fast(client, "https://golsarmusic.ir/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>', clean_q)),
+        asyncio.create_task(_search_deezer_fast(client, clean_q)),
     ]
-    tasks.append(asyncio.create_task(_search_deezer_fast(client, clean_q)))
 
     best_candidate: Optional[Dict[str, Any]] = None
-
     for fut in asyncio.as_completed(tasks):
         try:
             res = await fut
             if res and res.get("url"):
-                # If we find a 320kbps full track, return immediately!
                 if "320" in res.get("quality", ""):
                     for t in tasks:
                         t.cancel()
@@ -215,14 +265,20 @@ async def search_music_track(clean_q: str) -> Optional[Dict[str, Any]]:
     return best_candidate
 
 
-async def download_mp3_stream(url: str, max_bytes: int = _MAX_AUDIO_BYTES) -> Optional[bytes]:
-    """Streams MP3 file into memory buffer with size and timeout guards."""
+async def download_mp3_stream(url: str, max_bytes: int = 45 * 1024 * 1024) -> Optional[bytes]:
+    """Streams MP3 file into memory buffer with URL quoting and size/timeout guards."""
     if not url or not url.startswith("http"):
         return None
     try:
+        # Quote URL path and query if not already safe
+        parsed_url = urllib.parse.urlsplit(url)
+        safe_path = urllib.parse.quote(parsed_url.path, safe="/")
+        safe_query = urllib.parse.quote(parsed_url.query, safe="=&?+")
+        safe_url = urllib.parse.urlunsplit((parsed_url.scheme, parsed_url.netloc, safe_path, safe_query, parsed_url.fragment))
+
         client = get_music_client()
         buf = io.BytesIO()
-        async with client.stream("GET", url, timeout=20.0) as resp:
+        async with client.stream("GET", safe_url, timeout=25.0) as resp:
             if resp.status_code == 200:
                 total = 0
                 async for chunk in resp.aiter_bytes(chunk_size=131072):
@@ -232,7 +288,7 @@ async def download_mp3_stream(url: str, max_bytes: int = _MAX_AUDIO_BYTES) -> Op
                         return None
                     buf.write(chunk)
                 raw = buf.getvalue()
-                if len(raw) >= 200_000:
+                if len(raw) >= 50_000:
                     return raw
     except Exception as e:
         logger.warning(f"Error streaming MP3 from {url}: {e}")
@@ -296,7 +352,7 @@ async def handle_music_request(
             except Exception as e_cid:
                 logger.debug(f"Cached file_id invalid: {e_cid}")
 
-        # 3. Search Portals
+        # 3. Search Engines & Portals
         track = await search_music_track(clean_q)
         if not track:
             await message.reply_text(
@@ -318,9 +374,24 @@ async def handle_music_request(
             f"⚡ <i>دانلود و ارسال اختصاصی توسط پرومته</i>"
         )
 
-        # 4. Attempt Direct Telegram URL Delivery
+        # 4. Stream MP3 bytes directly into in-memory buffer and upload
         sent_msg = None
-        try:
+        raw_bytes = await download_mp3_stream(audio_url)
+        if raw_bytes:
+            audio_io = io.BytesIO(raw_bytes)
+            audio_io.name = f"{title}.mp3"
+            sent_msg = await message.reply_audio(
+                audio=audio_io,
+                title=title,
+                performer=performer,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                write_timeout=90.0,
+                read_timeout=60.0,
+            )
+            logger.info(f"Delivered music via streamed bytes for '{clean_q}'")
+        else:
+            # Fallback to direct URL if streaming failed
             sent_msg = await message.reply_audio(
                 audio=audio_url,
                 title=title,
@@ -330,34 +401,11 @@ async def handle_music_request(
                 write_timeout=60.0,
                 read_timeout=60.0,
             )
-            logger.info(f"Delivered music via direct URL for '{clean_q}'")
-        except Exception as e_url:
-            logger.debug(f"Direct URL send failed ({e_url}), streaming bytes into buffer...")
+            logger.info(f"Delivered music via direct URL fallback for '{clean_q}'")
 
-            # 5. Fallback: Stream bytes directly and upload
-            raw_bytes = await download_mp3_stream(audio_url)
-            if raw_bytes:
-                audio_io = io.BytesIO(raw_bytes)
-                audio_io.name = f"{title}.mp3"
-                sent_msg = await message.reply_audio(
-                    audio=audio_io,
-                    title=title,
-                    performer=performer,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    write_timeout=90.0,
-                    read_timeout=60.0,
-                )
-                logger.info(f"Delivered music via streamed bytes for '{clean_q}'")
-            else:
-                await message.reply_text(
-                    f"⚠️ لینک قطعه صوتی «{title}» استخراج شد اما بارگیری آن مقدور نبود:\n🔗 {audio_url}"
-                )
-                return
-
-        # 6. Cache file_id for sub-second redelivery
+        # 5. Cache file_id in Cloudflare KV for sub-second redelivery
         if sent_msg and sent_msg.audio and sent_msg.audio.file_id:
-            await database.kv_set(cache_key, sent_msg.audio.file_id, ttl_sec=86400 * 14)
+            await database.kv_set(cache_key, sent_msg.audio.file_id, ttl_sec=86400 * 30)
 
     except Exception as err:
         logger.error(f"Error handling music request: {err}", exc_info=True)

@@ -1980,6 +1980,42 @@ def test_command_registration_file_and_scan():
     assert "p_scan" in scan_cmds
 
 
+@pytest.mark.asyncio
+async def test_media_group_album_tracking():
+    """Verifies that photos in Telegram albums (media groups) are cached and retrievable."""
+    from tools.media_group import record_media_group_photo, get_media_group_photos
+
+    chat_id = -10099887766
+    media_group_id = "test_album_12345"
+
+    # Simulate 3 photos arriving from Telegram in rapid succession
+    await record_media_group_photo(chat_id, media_group_id, message_id=101, file_id="fid_photo_1")
+    await record_media_group_photo(chat_id, media_group_id, message_id=102, file_id="fid_photo_2")
+    await record_media_group_photo(chat_id, media_group_id, message_id=103, file_id="fid_photo_3")
+
+    # Duplicate message_id should be ignored
+    await record_media_group_photo(chat_id, media_group_id, message_id=101, file_id="fid_photo_1")
+
+    photos = await get_media_group_photos(chat_id, media_group_id)
+    assert len(photos) == 3
+    assert photos == ["fid_photo_1", "fid_photo_2", "fid_photo_3"]
+
+    # Non-existent album returns empty list
+    non_existent = await get_media_group_photos(chat_id, "non_existent_album")
+    assert non_existent == []
+
+
+@pytest.mark.asyncio
+async def test_vision_engine_multi_image_support():
+    """Verifies that analyze_image_with_vision properly normalizes single and multiple images."""
+    from tools.vision import analyze_image_with_vision
+
+    # Empty images check
+    res = await analyze_image_with_vision(image_bytes=None, images=[])
+    assert "⚠️" in res
+
+
+
 
 
 

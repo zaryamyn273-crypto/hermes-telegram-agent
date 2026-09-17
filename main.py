@@ -109,6 +109,7 @@ from tools.vision import (
     is_reconstruction_query,
     build_reconstruction_image_url,
 )
+from tools.media_group import record_media_group_photo, get_media_group_photos
 from tools.twitter import (
     fetch_tweet_data,
     format_tweet_report,
@@ -1853,12 +1854,21 @@ async def barcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct multimodal vision handler for received photos."""
+    """Direct multimodal vision handler for received photos and albums."""
     msg = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
     if not msg or not msg.photo or not chat or not user:
         return
+
+    # Always record media_group_id so all album photos are permanently tracked
+    if msg.media_group_id and msg.photo:
+        await record_media_group_photo(
+            chat_id=chat.id,
+            media_group_id=str(msg.media_group_id),
+            message_id=msg.message_id,
+            file_id=msg.photo[-1].file_id
+        )
 
     if not await _check_moderation_guard(update, context):
         return
@@ -1926,10 +1936,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     typing_task = asyncio.create_task(_send_typing_loop(context.bot, chat.id))
     t0 = time.perf_counter()
     try:
-        largest_photo = msg.photo[-1]
-        photo_file = await largest_photo.get_file()
-        photo_bytes = await photo_file.download_as_bytearray()
-
         cleaned_caption = caption
         if bot_username:
             cleaned_caption = re.sub(rf"@{re.escape(bot_username)}", "", cleaned_caption, flags=re.IGNORECASE)
@@ -1937,8 +1943,30 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cleaned_caption = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "", cleaned_caption, flags=re.IGNORECASE)
         cleaned_caption = cleaned_caption.strip()
 
+        # Collect all photos in album if part of a media group
+        photos_fids = [msg.photo[-1].file_id]
+        if msg.media_group_id:
+            all_fids = await get_media_group_photos(chat.id, str(msg.media_group_id), wait_for_incoming=True)
+            if all_fids:
+                photos_fids = all_fids
+
+        async def _dl_photo(fid):
+            try:
+                f = await context.bot.get_file(fid)
+                return bytes(await f.download_as_bytearray())
+            except Exception as de:
+                logger.warning(f"Error downloading photo {fid}: {de}")
+                return None
+
+        downloaded_bytes = await asyncio.gather(*[_dl_photo(fid) for fid in photos_fids])
+        photos_bytes_list = [b for b in downloaded_bytes if b]
+        if not photos_bytes_list:
+            largest_photo = msg.photo[-1]
+            photo_file = await largest_photo.get_file()
+            photos_bytes_list = [bytes(await photo_file.download_as_bytearray())]
+
         analysis = await analyze_image_with_vision(
-            image_bytes=bytes(photo_bytes),
+            images=photos_bytes_list,
             prompt=cleaned_caption if cleaned_caption else None,
             chat_id=chat.id,
         )
@@ -1949,7 +1977,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             analysis += f"\n\n🎨 <b>پیش‌نمایش شبیه‌سازی مجدد تصویر:</b>\n<a href=\"{preview_url}\">مشاهده پیش‌نمایش تصویر بازسازی‌شده</a>"
 
         elapsed = time.perf_counter() - t0
-        record_chat_latency(chat.id, elapsed, "موتور بینایی چندوجهی پرومته (Vision)")
+        engine_label = f"موتور بینایی چندوجهی پرومته ({len(photos_bytes_list)} تصویر)"
+        record_chat_latency(chat.id, elapsed, engine_label)
         await _deliver_reply(msg, analysis)
     except Exception as e:
         logger.error(f"Error processing photo vision: {e}")
@@ -3463,16 +3492,36 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_photo(photo=buf, caption=caption, parse_mode=ParseMode.HTML)
         return
 
-    # Fast-Path 7.8: Multimodal Vision on Replied Photo
+    # Fast-Path 7.8: Multimodal Vision on Replied Photo or Album (Media Group)
     if message.reply_to_message and message.reply_to_message.photo:
-        reply_photo = message.reply_to_message.photo[-1]
+        reply_mg = getattr(message.reply_to_message, "media_group_id", None)
         typing_task = asyncio.create_task(_send_typing_loop(context.bot, chat.id))
         t0 = time.perf_counter()
         try:
-            photo_file = await reply_photo.get_file()
-            photo_bytes = await photo_file.download_as_bytearray()
+            fids: List[str] = []
+            if reply_mg:
+                fids = await get_media_group_photos(chat.id, str(reply_mg))
+
+            if not fids:
+                fids = [message.reply_to_message.photo[-1].file_id]
+
+            async def _dl_replied_photo(fid: str):
+                try:
+                    f = await context.bot.get_file(fid)
+                    return bytes(await f.download_as_bytearray())
+                except Exception as de:
+                    logger.warning(f"Error downloading replied album photo {fid}: {de}")
+                    return None
+
+            downloaded = await asyncio.gather(*[_dl_replied_photo(fid) for fid in fids])
+            photos_bytes_list = [b for b in downloaded if b]
+            if not photos_bytes_list:
+                reply_photo = message.reply_to_message.photo[-1]
+                photo_file = await reply_photo.get_file()
+                photos_bytes_list = [bytes(await photo_file.download_as_bytearray())]
+
             analysis = await analyze_image_with_vision(
-                image_bytes=bytes(photo_bytes),
+                images=photos_bytes_list,
                 prompt=cleaned_prompt,
                 chat_id=chat.id,
             )
@@ -3481,7 +3530,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 analysis += f"\n\n🎨 <b>پیش‌نمایش شبیه‌سازی مجدد تصویر:</b>\n<a href=\"{preview_url}\">مشاهده پیش‌نمایش تصویر بازسازی‌شده</a>"
 
             elapsed = time.perf_counter() - t0
-            record_chat_latency(chat.id, elapsed, "موتور بینایی و درک تصویر پرومته (Vision)")
+            engine_label = f"موتور بینایی چندوجهی پرومته ({len(photos_bytes_list)} تصویر)"
+            record_chat_latency(chat.id, elapsed, engine_label)
             await _deliver_reply(message, analysis)
             return
         except Exception as e:

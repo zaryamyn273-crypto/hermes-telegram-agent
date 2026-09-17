@@ -41,35 +41,67 @@ Operating Guidelines:
 """
 
 
+from typing import Optional, Tuple, List, Union, Dict, Any
+
 async def analyze_image_with_vision(
-    image_bytes: bytes,
+    image_bytes: Optional[Union[bytes, List[bytes]]] = None,
     prompt: Optional[str] = None,
     mime_type: str = "image/jpeg",
     chat_id: int = 0,
+    images: Optional[List[bytes]] = None,
 ) -> str:
     """
-    Sends the user's image to the multimodal neural vision engine and returns detailed Persian analysis.
+    Sends one or multiple images (such as a Telegram album) to the multimodal neural vision engine
+    and returns detailed Persian analysis.
     """
-    if not image_bytes:
+    # Normalize images
+    img_list: List[bytes] = []
+    if images:
+        img_list.extend([img for img in images if img])
+    elif image_bytes:
+        if isinstance(image_bytes, list):
+            img_list.extend([img for img in image_bytes if img])
+        elif isinstance(image_bytes, (bytes, bytearray)):
+            img_list.append(bytes(image_bytes))
+
+    if not img_list:
         return "⚠️ هیچ تصویری برای تحلیل دریافت نشد."
 
-    # Base64 encode image
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    data_url = f"data:{mime_type};base64,{b64}"
-
     user_query = (prompt or "").strip()
-    if not user_query:
+    is_album = len(img_list) > 1
+
+    if is_album:
+        if not user_query:
+            user_query = (
+                f"این مجموعه شامل {len(img_list)} تصویر از یک آلبوم تلگرام است. "
+                "لطفاً همه تصاویر را با دقت بررسی، مقایسه و تک‌تک آن‌ها را با ذکر شماره (تصویر ۱، تصویر ۲ و...) "
+                "به زبان فارسی توضیح داده و نکات مشترک یا تفاوت‌های آن‌ها را بیان کن."
+            )
+        else:
+            user_query = (
+                f"این مجموعه شامل {len(img_list)} تصویر از یک آلبوم تلگرام است. "
+                f"با در نظر گرفتن همه تصاویر، به پرسش یا دستور زیر پاسخ بده:\n{user_query}"
+            )
+    elif not user_query:
         user_query = "این تصویر را به دقت بررسی کن و تمام جزئیات، اشیاء، متون احتمالی و مفهوم آن را به زبان فارسی توضیح بده."
 
-    # Format multimodal user message
+    # Build multimodal content payload
+    content_payload: List[Dict[str, Any]] = [
+        {"type": "text", "text": user_query}
+    ]
+
+    for idx, img_b in enumerate(img_list, start=1):
+        b64 = base64.b64encode(img_b).decode("utf-8")
+        content_payload.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime_type};base64,{b64}"}
+        })
+
     messages = [
         {"role": "system", "content": PROMETHEUS_VISION_SYSTEM_PROMPT},
         {
             "role": "user",
-            "content": [
-                {"type": "text", "text": user_query},
-                {"type": "image_url", "image_url": {"url": data_url}}
-            ]
+            "content": content_payload
         }
     ]
 
@@ -102,7 +134,8 @@ async def analyze_image_with_vision(
         }
 
         try:
-            logger.info(f"Dispatching Vision request to {api_url} (model={v_model}, bytes={len(image_bytes)})")
+            total_bytes = sum(len(b) for b in img_list)
+            logger.info(f"Dispatching Vision request to {api_url} (model={v_model}, images={len(img_list)}, total_bytes={total_bytes})")
             resp = await client.post(
                 f"{api_url}/chat/completions",
                 headers=headers,
