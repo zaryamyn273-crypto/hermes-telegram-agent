@@ -373,3 +373,68 @@ async def test_persian_admin_text_commands():
     up_normal = make_reply_update(admin_id, "سلام پایتون چیه", 0, "")
     up_normal.effective_message.reply_to_message = None
     assert await handle_admin_text_command(up_normal, context, "سلام پایتون چیه") is False
+
+
+@pytest.mark.asyncio
+async def test_group_list_commands_and_interception():
+    from main import handle_admin_text_command, is_group_list_request
+    from tools.moderation import get_all_tracked_groups, approve_group
+
+    admin_id = 8814471014
+    context = MagicMock()
+    context.bot.username = "AMZprometheusopenbot"
+
+    # 1. Test get_all_tracked_groups
+    cid_test = -1009988112233
+    await approve_group(cid_test, reviewed_by=admin_id, title="Unit Test Group")
+    all_groups = await get_all_tracked_groups()
+    assert any(g.get("chat_id") == cid_test for g in all_groups)
+
+    # 2. Test is_group_list_request matches Persian phrases and commands
+    test_queries = [
+        "لیست گروه",
+        "لیست گروه‌ها",
+        "لیست گروه ها",
+        "لیست گروهها",
+        "لیست تمام گروه ها",
+        "لیست گروه های ربات",
+        "لیست گروه رو بده",
+        "گروه‌ها",
+        "گروه ها",
+        "/groups",
+        "/grouplist",
+        "groups",
+        "grouplist"
+    ]
+    for q in test_queries:
+        assert is_group_list_request(q) is True, f"Failed for {q}"
+
+    # 3. Test handle_admin_text_command executes for admin
+    up = MagicMock()
+    up.effective_user.id = admin_id
+    up.effective_user.username = "admin"
+    up.effective_chat.id = admin_id
+    up.effective_chat.type = "private"
+    msg = MagicMock()
+    msg.reply_text = AsyncMock()
+    up.effective_message = msg
+
+    # Admin sending "لیست گروه"
+    handled = await handle_admin_text_command(up, context, "لیست گروه")
+    assert handled is True
+    msg.reply_text.assert_called()
+    call_text = msg.reply_text.call_args[0][0]
+    assert "فهرست گروه‌های ثبت‌شده" in call_text
+    assert str(cid_test) in call_text
+
+    # Admin sending "لیست گروه‌ها"
+    msg.reply_text.reset_mock()
+    handled2 = await handle_admin_text_command(up, context, "لیست گروه‌ها")
+    assert handled2 is True
+    msg.reply_text.assert_called()
+
+    # Admin sending "/groups"
+    msg.reply_text.reset_mock()
+    handled3 = await handle_admin_text_command(up, context, "/groups")
+    assert handled3 is True
+    msg.reply_text.assert_called()

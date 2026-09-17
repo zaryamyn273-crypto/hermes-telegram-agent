@@ -59,6 +59,7 @@ from tools.moderation import (
     get_banned_groups_list,
     get_muted_groups_list,
     get_pending_groups_list,
+    get_all_tracked_groups,
     get_unbanned_history,
     get_admin_commands_log,
     set_admin_setting,
@@ -184,8 +185,8 @@ async def _check_moderation_guard(update: Update, context: ContextTypes.DEFAULT_
                 await _notify_admin_group_request(context.bot, chat, user)
 
         if status != "approved":
-            # If authorized admin is issuing an administrative command, permit through
-            if is_admin_cmd and is_admin(uid):
+            # If authorized admin is issuing an administrative command or interacting, permit through
+            if is_admin(uid):
                 return True
             logger.info(f"Gatekeeper: group {chat.id} status is '{status}'; bot remains inactive.")
             return False
@@ -674,6 +675,32 @@ def is_delete_request(text: str) -> bool:
     return any(bool(re.search(p, t, re.IGNORECASE)) for p in _DELETE_PATTERNS)
 
 
+_GROUP_LIST_REGEX = re.compile(
+    r"^(?:/)?(?:groups|grouplist|listgroups|allgroups|all_groups|"
+    r"(?:لیست|فهرست|نمایش|مشاهده)\s+(?:تمام\s+|همه\s+)?گروه(?:[\s\u200c]*(?:ها|های|هایی))?(?:\s+(?:که\s+)?(?:عضوی|توشونی|توشون\s+هستی|هستی|ثبت\s+شده))?(?:\s+(?:من|ربات|ما|شما|تون|ت))?(?:\s+(?:رو|را)?\s*(?:بده|بفرست|بیار|نشون\s+بده))?|"
+    r"گروه(?:[\s\u200c]*(?:ها|های|هایی))?(?:\s+(?:که\s+)?(?:عضوی|توشونی|توشون\s+هستی|هستی|ثبت\s+شده))?(?:\s+(?:من|ربات|ما|شما|تون|ت))?(?:\s+(?:رو|را)?\s*(?:بده|بفرست|بیار|نشون\s+بده))?"
+    r")$",
+    re.IGNORECASE
+)
+
+
+def is_group_list_request(text: str) -> bool:
+    """Matches requests asking for the list of Telegram groups."""
+    if not text:
+        return False
+    t = text.strip()
+    t = re.sub(r"[?!.؟!]+$", "", t).strip()
+    if _GROUP_LIST_REGEX.match(t):
+        return True
+    t_clean = t.replace("\u200c", " ")
+    has_list = any(k in t_clean for k in ["لیست", "فهرست", "نمایش", "مشاهده", "کدوم"])
+    has_group = any(k in t_clean for k in ["گروه", "گروها", "groups"])
+    if has_list and has_group:
+        if not any(k in t_clean for k in ["بن", "بلاک", "میوت", "سکوت", "لاگ", "تنظیم"]):
+            return True
+    return False
+
+
 def extract_replied_message_context(message) -> str:
     """
     Extracts structured sender, text, caption, and media metadata from the replied-to message.
@@ -882,6 +909,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/unmutegroup` - لغو سکوت ربات در گروه\n"
             "• `/banlist` - لیست دائم افراد و گروه‌های بن‌شده با یوزرنیم و آیدی عددی\n"
             "• `/mutelist` - لیست فعال افراد و گروه‌های میوت‌شده با زمان باقیمانده\n"
+            "• `/groups` - فهرست تمامی گروه‌های ثبت‌شده، فعال، مسدود و وضعیت آن‌ها\n"
             "• `/pendinggroups` - لیست گروه‌های جدید در انتظار تایید ادمین\n"
             "• `/approvegroup [شناسه]` - تایید دستی فعال‌سازی ربات در گروه\n"
             "• `/rejectgroup [شناسه]` - رد فعال‌سازی و خروج ربات از گروه\n"
@@ -1933,8 +1961,13 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
         await mutelist_command(update, context)
         return True
 
-    # 3. Pending Groups
-    if re.match(r"^(?:/)?(?:pendinggroups|pending_groups|گروه‌های\s+در\s+انتظار|لیست\s+گروه‌ها)$", t, re.IGNORECASE):
+    # 3. All Groups List
+    if is_group_list_request(t):
+        await grouplist_command(update, context)
+        return True
+
+    # 3.1 Pending Groups Specifically
+    if re.match(r"^(?:/)?(?:pendinggroups|pending_groups|(?:لیست|فهرست)?\s*گروه(?:[\s\u200c]*(?:ها|های))?\s+در\s+انتظار(?:\s+تایید)?)$", t, re.IGNORECASE):
         await pendinggroups_command(update, context)
         return True
 
@@ -2111,6 +2144,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     cleaned_lower = cleaned_prompt.lower()
+
+    # Fast-Path -3: Group List Request Interception (<1ms)
+    if is_group_list_request(cleaned_lower):
+        if is_admin(user.id):
+            await grouplist_command(update, context)
+        else:
+            await message.reply_text(
+                "⛔️ مشاهده فهرست گروه‌های فعال و متصل به پرومته صرفاً در اختیار مدیر (ادمین) ربات می‌باشد.",
+                parse_mode=ParseMode.HTML
+            )
+        return
 
     # Fast-Path -2: Full Telegram Numeric ID & Diagnostics Extraction (<1ms)
     if is_id_request(cleaned_lower):
@@ -2479,6 +2523,92 @@ async def mutelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
 
 
+async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays all tracked groups with their status (approved, pending, banned, muted)."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز. این دستور فقط مخصوص مدیران ربات است.")
+        return
+
+    groups = await get_all_tracked_groups()
+    banned_groups = {int(g["chat_id"]): g for g in await get_banned_groups_list() if g.get("chat_id")}
+    muted_groups = {int(g["chat_id"]): g for g in await get_muted_groups_list() if g.get("chat_id")}
+
+    # Also merge any banned groups that might not be in tracked_groups table
+    known_cids = {int(g["chat_id"]) for g in groups if g.get("chat_id")}
+    for bg_cid, bg_data in banned_groups.items():
+        if bg_cid not in known_cids:
+            groups.append({
+                "chat_id": bg_cid,
+                "title": bg_data.get("title") or "گروه مسدود",
+                "chat_type": "supergroup",
+                "member_count": 0,
+                "status": "banned",
+                "added_at": bg_data.get("banned_at", "")
+            })
+            known_cids.add(bg_cid)
+
+    if not groups:
+        await msg.reply_text(
+            "📋 <b>فهرست گروه‌های پرومته:</b>\n\n"
+            "<i>در حال حاضر هیچ گروهی در دیتابیس ثبت نشده است.</i>\n"
+            "💡 به محض اضافه شدن ربات به گروه یا دریافت پیام، گروه به صورت خودکار شناسایی و ذخیره می‌شود.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    lines = [f"👥 <b>فهرست گروه‌های ثبت‌شده در پرومته ({len(groups)} گروه):</b>\n"]
+
+    for idx, g in enumerate(groups, 1):
+        cid = int(g.get("chat_id") or 0)
+        title = g.get("title") or "گروه بدون نام"
+        uname = f"@{g.get('username')}" if g.get("username") else ""
+        m_count = g.get("member_count") or 0
+        st = g.get("status", "unknown")
+        added_at = g.get("added_at") or ""
+
+        # Moderation badge & management commands
+        if cid in banned_groups or st == "banned":
+            st_text = "🚫 مسدود (Banned)"
+            quick_act = f"دستور رفع بن: <code>/unbangroup {cid}</code>"
+        elif cid in muted_groups:
+            rem = muted_groups[cid].get("remaining_seconds", 0)
+            st_text = f"🔇 میوت ({format_duration_persian(rem)})" if rem > 0 else "🔇 میوت نامحدود"
+            quick_act = f"دستور رفع سکوت: <code>/unmutegroup {cid}</code>"
+        elif st in ("approved", "active"):
+            st_text = "✅ تایید شده و فعال (Active)"
+            quick_act = f"بن: <code>بن گروه {cid}</code> | میوت: <code>میوت گروه {cid} 1h</code>"
+        elif st == "pending":
+            st_text = "⏳ در انتظار تایید ادمین (Pending)"
+            quick_act = f"تایید: <code>/approvegroup {cid}</code> | رد: <code>/rejectgroup {cid}</code>"
+        elif st == "rejected":
+            st_text = "❌ رد شده (Rejected)"
+            quick_act = f"تایید مجدد: <code>/approvegroup {cid}</code>"
+        elif st == "left":
+            st_text = "🚪 خارج شده (Left)"
+            quick_act = f"تایید مجدد: <code>/approvegroup {cid}</code>"
+        else:
+            st_text = f"ℹ️ {st}"
+            quick_act = f"تایید: <code>/approvegroup {cid}</code>"
+
+        members_info = f" | 👥 {m_count} عضو" if m_count > 0 else ""
+        uname_info = f" ({html.escape(uname)})" if uname else ""
+        date_info = f" | 📅 {added_at}" if added_at else ""
+
+        lines.append(
+            f"{idx}. <b>{html.escape(title)}</b>{uname_info}{members_info}\n"
+            f"   🆔 شناسه: <code>{cid}</code>{date_info}\n"
+            f"   📊 وضعیت: {st_text}\n"
+            f"   ⚙️ {quick_act}\n"
+        )
+
+    text = "\n".join(lines)
+    for chunk in split_message(text, max_len=3800):
+        await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+
 async def pendinggroups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists all groups awaiting admin approval."""
     user = update.effective_user
@@ -2521,11 +2651,12 @@ async def approvegroup_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     args = context.args or []
     if not args or not args[0].lstrip("-+").isdigit():
-        await msg.reply_text("⚠️ نحوه استفاده: <code>/approvegroup -100xxxxxxxxxx</code>", parse_mode=ParseMode.HTML)
+        await msg.reply_text("⚠️ نحوه استفاده: <code>/approvegroup -100xxxxxxxxxx [عنوان اختیاری]</code>", parse_mode=ParseMode.HTML)
         return
 
     cid = int(args[0])
-    await approve_group(cid, reviewed_by=user.id)
+    custom_title = " ".join(args[1:]).strip() if len(args) > 1 else ""
+    await approve_group(cid, reviewed_by=user.id, title=custom_title)
     await msg.reply_text(f"✅ گروه <code>{cid}</code> با موفقیت تایید و فعال شد.", parse_mode=ParseMode.HTML)
     try:
         await context.bot.send_message(
@@ -2747,8 +2878,9 @@ def build_application():
     app.add_handler(CommandHandler(["unmutegroup", "unmutebot"], guard(unmutegroup_command, is_admin_cmd=True)))
     app.add_handler(CommandHandler(["banlist", "bans"], guard(banlist_command, is_admin_cmd=True)))
     app.add_handler(CommandHandler(["mutelist", "mutes"], guard(mutelist_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["groups", "grouplist", "listgroups", "allgroups"], guard(grouplist_command, is_admin_cmd=True)))
     app.add_handler(CommandHandler(["pendinggroups", "pending_groups"], guard(pendinggroups_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["approvegroup", "approve_group"], guard(approvegroup_command, is_admin_cmd=True)))
+    app.add_handler(CommandHandler(["approvegroup", "approve_group", "addgroup", "add_group"], guard(approvegroup_command, is_admin_cmd=True)))
     app.add_handler(CommandHandler(["rejectgroup", "reject_group"], guard(rejectgroup_command, is_admin_cmd=True)))
     app.add_handler(CommandHandler(["set", "set_setting"], guard(set_setting_command, is_admin_cmd=True)))
     app.add_handler(CommandHandler(["get", "get_setting"], guard(get_setting_command, is_admin_cmd=True)))

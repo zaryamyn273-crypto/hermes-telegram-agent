@@ -682,11 +682,17 @@ async def register_group_event(
     with _MOD_LOCK:
         existing = _TRACKED_GROUPS.get(cid)
         if existing:
+            if title and title != "گروه":
+                existing["title"] = title
+            if clean_username:
+                existing["username"] = clean_username
+            if member_count > 0:
+                existing["member_count"] = member_count
             if is_admin(added_by_id):
                 existing["status"] = "approved"
                 asyncio.create_task(database.execute_d1_query(
-                    "UPDATE tracked_groups SET status = 'approved', added_by = ? WHERE chat_id = ?",
-                    [added_by_id, cid]
+                    "UPDATE tracked_groups SET status = 'approved', added_by = ?, title = CASE WHEN ? != '' THEN ? ELSE title END WHERE chat_id = ?",
+                    [added_by_id, title or "", title or "", cid]
                 ))
                 return "approved", False
             current_status = existing.get("status", "pending")
@@ -737,23 +743,31 @@ async def register_group_event(
     return new_status, is_new_pending
 
 
-async def approve_group(chat_id: int, reviewed_by: int = 0) -> bool:
-    """Approves a group for bot operation."""
+async def approve_group(chat_id: int, reviewed_by: int = 0, title: str = "") -> bool:
+    """Approves a group for bot operation, persisting to RAM and D1."""
     cid = int(chat_id)
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with _MOD_LOCK:
         if cid in _TRACKED_GROUPS:
             _TRACKED_GROUPS[cid]["status"] = "approved"
+            if title and (not _TRACKED_GROUPS[cid].get("title") or _TRACKED_GROUPS[cid].get("title") == "گروه"):
+                _TRACKED_GROUPS[cid]["title"] = title
         else:
-            _TRACKED_GROUPS[cid] = {"chat_id": cid, "status": "approved"}
+            _TRACKED_GROUPS[cid] = {"chat_id": cid, "title": title or "گروه", "status": "approved", "added_at": now_str}
         _PENDING_NOTIFIED_CHATS.discard(cid)
 
-    await database.execute_d1_query("UPDATE tracked_groups SET status = 'approved' WHERE chat_id = ?", [cid])
+    sql = """
+    INSERT INTO tracked_groups (chat_id, title, status, added_at)
+    VALUES (?, ?, 'approved', ?)
+    ON CONFLICT(chat_id) DO UPDATE SET status = 'approved', title = CASE WHEN ? != '' THEN ? ELSE tracked_groups.title END
+    """
+    await database.execute_d1_query(sql, [cid, title or "گروه", now_str, title or "", title or ""])
 
     await log_admin_command(
         admin_id=reviewed_by,
         command="approve_group",
         target_id=cid,
-        details="Approved group activation"
+        details=f"Approved group activation: {title}" if title else "Approved group activation"
     )
 
     return True
@@ -762,14 +776,20 @@ async def approve_group(chat_id: int, reviewed_by: int = 0) -> bool:
 async def reject_group(chat_id: int, reviewed_by: int = 0) -> bool:
     """Rejects a group and marks as rejected."""
     cid = int(chat_id)
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with _MOD_LOCK:
         if cid in _TRACKED_GROUPS:
             _TRACKED_GROUPS[cid]["status"] = "rejected"
         else:
-            _TRACKED_GROUPS[cid] = {"chat_id": cid, "status": "rejected"}
+            _TRACKED_GROUPS[cid] = {"chat_id": cid, "status": "rejected", "added_at": now_str}
         _PENDING_NOTIFIED_CHATS.discard(cid)
 
-    await database.execute_d1_query("UPDATE tracked_groups SET status = 'rejected' WHERE chat_id = ?", [cid])
+    sql = """
+    INSERT INTO tracked_groups (chat_id, status, added_at)
+    VALUES (?, 'rejected', ?)
+    ON CONFLICT(chat_id) DO UPDATE SET status = 'rejected'
+    """
+    await database.execute_d1_query(sql, [cid, now_str])
 
     await log_admin_command(
         admin_id=reviewed_by,
@@ -847,6 +867,39 @@ async def get_pending_groups_list() -> List[Dict[str, Any]]:
         return res.get("results", [])
     with _MOD_LOCK:
         return [g for g in _TRACKED_GROUPS.values() if g.get("status") == "pending"]
+
+
+async def get_all_tracked_groups(status_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Returns all tracked groups from Cloudflare D1 merged with in-memory cache.
+    Optionally filters by status ('approved', 'active', 'pending', 'banned', 'rejected', etc.).
+    """
+    db_groups: Dict[int, Dict[str, Any]] = {}
+    if status_filter:
+        sql = "SELECT * FROM tracked_groups WHERE status = ? ORDER BY added_at DESC"
+        params = [status_filter]
+    else:
+        sql = "SELECT * FROM tracked_groups ORDER BY added_at DESC"
+        params = []
+
+    res = await database.execute_d1_query(sql, params)
+    if res.get("success"):
+        for r in res.get("results", []):
+            cid = r.get("chat_id")
+            if cid:
+                db_groups[int(cid)] = r
+
+    with _MOD_LOCK:
+        merged = dict(_TRACKED_GROUPS)
+        # Merge D1 data into cached data
+        merged.update(db_groups)
+        groups = list(merged.values())
+
+    if status_filter:
+        groups = [g for g in groups if g.get("status") == status_filter]
+
+    groups.sort(key=lambda x: str(x.get("added_at", "")), reverse=True)
+    return groups
 
 
 async def get_unbanned_history(limit: int = 25) -> List[Dict[str, Any]]:
