@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple, Set, Union
 
 from config import settings, is_admin
+from telegram.constants import ChatMemberStatus
 import database
 
 logger = logging.getLogger("PrometheusModeration")
@@ -1324,3 +1325,144 @@ def format_duration_persian(seconds: float) -> str:
     days = hours // 24
     rem_hours = hours % 24
     return f"{days} روز و {rem_hours} ساعت" if rem_hours else f"{days} روز"
+
+
+def is_informational_question(text: str) -> bool:
+    """Returns True if the text is asking a question rather than issuing an order."""
+    t = text.strip()
+    q_words = [
+        "چیه", "چیست", "یعنی چی", "چگونه", "چطور", "چطوری", "چرا", "آیا",
+        "کدام", "فرق", "تفاوت", "توضیح", "راهنما", "چیست؟", "چیه؟"
+    ]
+    return any(qw in t for qw in q_words)
+
+
+def detect_mute_scope(text: str) -> Tuple[str, str]:
+    """
+    Detects whether the mute request is for:
+    - 'group': Telegram Group Restrict (سلب دسترسی ارسال پیام در گروه)
+    - 'bot': Prometheus Bot Mute (عدم پاسخگویی ربات)
+    - 'both': Both (میوت دوگانه / کامل)
+    - 'auto': Unspecified / Default
+    Returns (scope, cleaned_text).
+    """
+    t = text
+    scope = "auto"
+    group_patterns = [
+        r"(?:در|توی|از)\s+گروه",
+        r"گروهی",
+        r"\bgroup\b",
+        r"چت\s+گروه",
+    ]
+    bot_patterns = [
+        r"(?:از|توی|در)\s+(?:ربات|بات|پرومته)",
+        r"\bbot\b",
+        r"پاسخگویی\s+ربات",
+    ]
+    both_patterns = [
+        r"(?:میوت|سکوت)\s+(?:کامل|دوگانه|هردو|هر\s+دو)",
+        r"\b(?:both|all)\b",
+        r"هم\s+گروه\s+هم\s+ربات",
+        r"کامل",
+    ]
+
+    if any(re.search(p, t, re.IGNORECASE) for p in both_patterns):
+        scope = "both"
+        for p in both_patterns:
+            t = re.sub(p, " ", t, flags=re.IGNORECASE)
+    elif any(re.search(p, t, re.IGNORECASE) for p in group_patterns):
+        scope = "group"
+        for p in group_patterns:
+            t = re.sub(p, " ", t, flags=re.IGNORECASE)
+    elif any(re.search(p, t, re.IGNORECASE) for p in bot_patterns):
+        scope = "bot"
+        for p in bot_patterns:
+            t = re.sub(p, " ", t, flags=re.IGNORECASE)
+
+    return scope, re.sub(r"\s+", " ", t).strip()
+
+
+def match_mute_command(text: str) -> Tuple[Optional[str], str, str]:
+    """
+    Parses natural language and slash commands for mute/unmute.
+    Returns (action, scope, remaining_text):
+    - action: 'mute' | 'unmute' | None
+    - scope: 'group' | 'bot' | 'both' | 'auto'
+    - remaining_text: clean text containing duration, reason, target username/ID
+    """
+    if not text:
+        return None, "auto", ""
+
+    t = text.strip()
+    if is_informational_question(t):
+        return None, "auto", ""
+
+    # 1. Check Unmute
+    unmute_match = re.search(
+        r"(?:(?:این\s+)?(?:کاربر|شخص|پیام|طرف|یارو)?\s*رو?\s*)?"
+        r"(?:(?:در|توی|از)\s+(?:گروه|ربات|پرومته)\s*)?"
+        r"(?:/|!)?(?:unmute|unsilence|آنمیوت|انمیوت|نمیوت|آن\s*میوت|رفع\s*میوت|لغو\s*میوت|رفع\s*سکوت|لغو\s*سکوت|از\s*میوت\s*در\s*بیار|از\s*سکوت\s*در\s*بیار)"
+        r"(?:ش)?(?:\s+(?:کن|ش\s*کن|ش))?"
+        r"(?:\s+(?:در|توی|از)\s+(?:گروه|ربات|پرومته))?",
+        t, re.IGNORECASE
+    )
+    if unmute_match:
+        scope, clean_rem = detect_mute_scope(t)
+        clean_rem = re.sub(unmute_match.re, " ", clean_rem).strip()
+        clean_rem = re.sub(r"^(?:این\s+)?(?:کاربر|شخص|پیام|طرف|یارو)?\s*رو?\s*", "", clean_rem).strip()
+        return "unmute", scope, re.sub(r"\s+", " ", clean_rem).strip()
+
+    # 2. Check Mute
+    mute_match = re.search(
+        r"(?:(?:این\s+)?(?:کاربر|شخص|پیام|طرف|یارو)?\s*رو?\s*)?"
+        r"(?:(?:در|توی|از)\s+(?:گروه|ربات|پرومته)\s*)?"
+        r"(?:/|!)?(?:mute|silence|میوت|سکوت|ساکت|خاموش|ببند|بی\s*صدا|بی‌صدا)"
+        r"(?:ش)?(?:\s+(?:کن|ش\s*کن|ش))?"
+        r"(?:\s+(?:در|توی|از)\s+(?:گروه|ربات|پرومته))?",
+        t, re.IGNORECASE
+    )
+    if mute_match:
+        scope, clean_rem = detect_mute_scope(t)
+        clean_rem = re.sub(mute_match.re, " ", clean_rem).strip()
+        clean_rem = re.sub(r"^(?:این\s+)?(?:کاربر|شخص|پیام|طرف|یارو)?\s*رو?\s*", "", clean_rem).strip()
+        return "mute", scope, re.sub(r"\s+", " ", clean_rem).strip()
+
+    return None, "auto", ""
+
+
+async def is_user_chat_admin(bot, chat_id: int, user_id: int) -> bool:
+    """
+    Returns True if user_id is a chat administrator or creator in chat_id,
+    or is a bot master administrator.
+    """
+    if not user_id:
+        return False
+    if is_admin(user_id):
+        return True
+    if not chat_id or chat_id > 0 or not bot:
+        return False
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
+    except Exception as e:
+        logger.debug(f"is_user_chat_admin error for {user_id} in {chat_id}: {e}")
+        return False
+
+
+async def can_bot_restrict_members(bot, chat_id: int) -> bool:
+    """
+    Returns True if the bot has admin rights to restrict members in chat_id.
+    """
+    if not chat_id or chat_id > 0 or not bot:
+        return False
+    try:
+        bot_member = await bot.get_chat_member(chat_id=chat_id, user_id=bot.id)
+        if bot_member.status == ChatMemberStatus.OWNER:
+            return True
+        if bot_member.status == ChatMemberStatus.ADMINISTRATOR:
+            return getattr(bot_member, "can_restrict_members", False) is True
+        return False
+    except Exception as e:
+        logger.debug(f"can_bot_restrict_members error for {chat_id}: {e}")
+        return False
+

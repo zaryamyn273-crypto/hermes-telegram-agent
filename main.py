@@ -75,6 +75,10 @@ from tools.moderation import (
     get_cached_admin_directives,
     parse_duration_string,
     format_duration_persian,
+    detect_mute_scope,
+    match_mute_command,
+    is_user_chat_admin,
+    can_bot_restrict_members,
     _MOD_LOCK,
     _BANNED_USERNAMES,
     _MUTED_USERNAMES,
@@ -2712,19 +2716,61 @@ async def execute_admin_unban(update: Update, context: ContextTypes.DEFAULT_TYPE
     return True
 
 
-async def execute_admin_mute(update: Update, context: ContextTypes.DEFAULT_TYPE, rem_text: str = "") -> bool:
-    """Executes mute in database and Telegram restrict if in a group."""
+def make_mute_keyboard(target_id: int, duration_sec: int, active_scope: str) -> InlineKeyboardMarkup:
+    """Creates inline keyboard allowing admins to easily switch mute mode or unmute."""
+    chk_grp = "🔘 " if active_scope == "group" else ""
+    chk_bot = "🔘 " if active_scope == "bot" else ""
+    chk_both = "🔘 " if active_scope == "both" else ""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"{chk_grp}🔇 فقط در گروه", callback_data=f"mod:mute:group:{target_id}:{duration_sec}"),
+            InlineKeyboardButton(f"{chk_bot}🤖 فقط از ربات", callback_data=f"mod:mute:bot:{target_id}:{duration_sec}"),
+        ],
+        [
+            InlineKeyboardButton(f"{chk_both}⚡️ میوت کامل (هردو)", callback_data=f"mod:mute:both:{target_id}:{duration_sec}"),
+            InlineKeyboardButton("🔊 لغو سکوت (آنمیوت)", callback_data=f"mod:unmute:all:{target_id}:0"),
+        ]
+    ])
+
+
+async def execute_admin_mute(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    rem_text: str = "",
+    requested_scope: str = "auto"
+) -> bool:
+    """
+    Intelligently executes mute in database (Bot Mute) and/or Telegram group restriction (Group Mute).
+    Understands:
+    - 'group': Telegram group restrict only (cannot chat in group)
+    - 'bot': Prometheus bot mute only (bot ignores user)
+    - 'both': Full mute (both group and bot)
+    - 'auto': Resolves from text or defaults to 'both' in groups and 'bot' in private chats.
+    """
     msg = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
-    if not user or not is_admin(user.id) or not msg:
+    if not user or not msg or not chat:
         return False
+
+    is_bot_adm = is_admin(user.id)
+    is_grp_adm = False
+    if chat.type != ChatType.PRIVATE and context and getattr(context, "bot", None):
+        is_grp_adm = await is_user_chat_admin(context.bot, chat.id, user.id)
+
+    if not is_bot_adm and not is_grp_adm:
+        await msg.reply_text(
+            "⛔️ <b>عدم دسترسی:</b> دستورات مدیریت و میوت کاربران صرفاً در اختیار مدیران این گروه و ادمین‌های پرومته می‌باشد.",
+            parse_mode=ParseMode.HTML
+        )
+        return True
 
     tid = None
     tuname = None
     tname = None
     target_text = rem_text
 
+    # Extract target from replied message
     if msg.reply_to_message:
         ru = msg.reply_to_message.from_user
         if ru:
@@ -2735,52 +2781,96 @@ async def execute_admin_mute(update: Update, context: ContextTypes.DEFAULT_TYPE,
             tid = msg.reply_to_message.sender_chat.id
             tname = msg.reply_to_message.sender_chat.title or ""
             tuname = msg.reply_to_message.sender_chat.username or ""
-    elif rem_text:
-        parts = rem_text.split(maxsplit=1)
+
+    # Extract target from text if not in reply
+    if not tid and not tuname and target_text:
+        parts = target_text.split(maxsplit=1)
         first_token = parts[0].strip()
         if first_token.lstrip("-+").isdigit():
             tid = int(first_token)
             target_text = parts[1] if len(parts) > 1 else ""
-        elif first_token.startswith("@") or not first_token.isalnum():
+        elif first_token.startswith("@"):
             clean_first = first_token.lstrip("@")
             if re.match(r"^[a-zA-Z0-9_]{3,32}$", clean_first):
                 tuname = clean_first
                 target_text = parts[1] if len(parts) > 1 else ""
+        else:
+            m_user = re.search(r"@([a-zA-Z0-9_]{3,32})", target_text)
+            if m_user:
+                tuname = m_user.group(1)
+                target_text = target_text.replace(m_user.group(0), " ").strip()
+            else:
+                m_num = re.search(r"\b(\d{5,15})\b", target_text)
+                if m_num:
+                    tid = int(m_num.group(1))
+                    target_text = target_text.replace(m_num.group(0), " ").strip()
 
     if not tid and not tuname:
+        guide = (
+            "⚠️ <b>سامانه هوشمند مدیریت و بی‌صدا کردن (Mute):</b>\n\n"
+            "پرومته از ۲ حالت کاربردی برای میوت کاربران پشتیبانی می‌کند:\n\n"
+            "۱. 🔇 <b>میوت در گروه (Telegram Group Restrict):</b>\n"
+            "سلب دسترسی ارسال هرگونه پیام، مدیا، استیکر و چت در سوپرگروه تلگرام.\n"
+            "• <i>دستور:</i> ریپلای و ارسال <code>میوت در گروه 30m [علت]</code>\n"
+            "• <i>نیازمندی:</i> ربات باید ادمین گروه با دسترسی Restrict Members باشد.\n\n"
+            "۲. 🤖 <b>میوت از ربات (Prometheus Bot Mute):</b>\n"
+            "عدم پاسخگویی مطلق ربات پرومته به پیام‌ها و پرسش‌های کاربر در همه جا.\n"
+            "• <i>دستور:</i> ریپلای و ارسال <code>میوت از ربات 2h [علت]</code>\n\n"
+            "⚡️ <b>میوت دوگانه / کامل (پیش‌فرض در گروه):</b>\n"
+            "با ریپلای و ارسال <code>میوت 1h [علت]</code> یا <code>/mute 1h</code>، کاربر هم در گروه تلگرام و هم از پاسخگویی ربات بی‌صدا می‌شود.\n\n"
+            "💡 <b>مدت زمان‌ها:</b> <code>10m</code>, <code>2h</code>, <code>1d</code> یا فارسی: <code>۳۰ دقیقه</code>, <code>۲ ساعت</code> (پیش‌فرض: ۶۰ دقیقه)"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return True
+
+    if tid and is_admin(tid):
+        await msg.reply_text("⛔️ امکان میوت کردن ادمین ارشد پرومته وجود ندارد.")
+        return True
+
+    if chat.type != ChatType.PRIVATE and tid and context and getattr(context, "bot", None):
+        if await is_user_chat_admin(context.bot, chat.id, tid):
+            await msg.reply_text("⛔️ امکان میوت کردن مدیران (ادمین‌های) این گروه وجود ندارد.")
+            return True
+
+    if tid and context and getattr(context, "bot", None) and tid == context.bot.id:
         await msg.reply_text(
-            "⚠️ <b>راهنمای بی‌صدا کردن (میوت):</b>\n\n"
-            "• ریپلای روی پیام: <code>میوت 30m [علت]</code> یا <code>سکوت ۲ ساعت</code>\n"
-            "• با آیدی عددی: <code>/mute 123456789 1h [علت]</code>\n"
-            "• با یوزرنیم: <code>/mute @username 1d [علت]</code>\n\n"
-            "💡 زمان‌ها: <code>10m</code>, <code>2h</code>, <code>1d</code> یا فارسی: <code>۳۰ دقیقه</code>, <code>۲ ساعت</code> (پیش‌فرض: ۶۰ دقیقه)",
+            "⛔️ امکان میوت کردن خود ربات با این دستور وجود ندارد. برای بی‌صدا کردن فعالیت ربات در گروه از <code>/mutegroup</code> استفاده فرمایید.",
             parse_mode=ParseMode.HTML
         )
         return True
 
-    if tid and is_admin(tid):
-        await msg.reply_text("⛔️ امکان میوت کردن ادمین ربات وجود ندارد.")
-        return True
+    # Detect scope from text if requested_scope is 'auto'
+    scope_detected, target_text = detect_mute_scope(target_text)
+    effective_scope = requested_scope if requested_scope != "auto" else scope_detected
+    if effective_scope == "auto":
+        effective_scope = "bot" if chat.type == ChatType.PRIVATE else "both"
 
     duration_sec, reason = extract_duration_and_reason(target_text)
     if not reason:
         reason = "دستور مستقیم ادمین"
 
     target_id = tid or 0
+    bot_muted = False
+    tg_restricted = False
+    tg_notice = ""
+    until_ts = time.time() + duration_sec
 
-    ok, until_ts = await mute_user(
-        user_id=target_id,
-        duration_sec=duration_sec,
-        username=tuname or "",
-        first_name=tname or "",
-        reason=reason,
-        muted_by=user.id,
-        chat_id=chat.id if chat else 0,
-        chat_title=chat.title if chat else ""
-    )
+    # 1. Execute Bot Mute (if scope is 'bot' or 'both')
+    if effective_scope in ("bot", "both"):
+        ok, until_ts = await mute_user(
+            user_id=target_id,
+            duration_sec=duration_sec,
+            username=tuname or "",
+            first_name=tname or "",
+            reason=reason,
+            muted_by=user.id,
+            chat_id=chat.id if chat else 0,
+            chat_title=chat.title if chat else ""
+        )
+        bot_muted = True
 
-    tg_status = ""
-    if chat and chat.type != ChatType.PRIVATE and target_id > 0:
+    # 2. Execute Telegram Group Restrict (if scope is 'group' or 'both')
+    if effective_scope in ("group", "both") and chat.type != ChatType.PRIVATE and target_id > 0:
         try:
             until_dt = datetime.fromtimestamp(until_ts, tz=timezone.utc)
             await context.bot.restrict_chat_member(
@@ -2800,16 +2890,17 @@ async def execute_admin_mute(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 ),
                 until_date=until_dt
             )
-            tg_status = "\n⚡️ <i>کاربر در گروه تلگرام نیز تا پایان زمان بی‌صدا شد.</i>"
+            tg_restricted = True
+            tg_notice = "\n⚡️ <i>دسترسی چت کاربر در گروه تلگرام مسدود شد.</i>"
         except BadRequest as e:
             err_msg = str(e).lower()
-            if "not enough rights" in err_msg or "chat_admin_required" in err_msg:
-                tg_status = "\nℹ️ <i>توجه: کاربر از پاسخگویی ربات میوت شد. برای سلب دسترسی چت در گروه، ربات را ادمین کرده و دسترسی Restrict Members بدهید.</i>"
+            if "not enough rights" in err_msg or "chat_admin_required" in err_msg or "can't restrict" in err_msg:
+                tg_notice = "\nℹ️ <i>توجه: پرومته در این گروه دسترسی ادمین برای سلب ارسال پیام (Restrict Members) ندارد. برای میوت در گروه، ربات را ادمین کرده و دسترسی سلب دسترسی کاربران بدهید.</i>"
             else:
-                tg_status = f"\nℹ️ <i>وضعیت در تلگرام: {e}</i>"
+                tg_notice = f"\nℹ️ <i>وضعیت در تلگرام: {html.escape(str(e))}</i>"
         except Exception as e:
             logger.warning(f"Telegram restrict_chat_member failed: {e}")
-            tg_status = f"\nℹ️ <i>وضعیت در تلگرام: {e}</i>"
+            tg_notice = f"\nℹ️ <i>وضعیت در تلگرام: {html.escape(str(e))}</i>"
 
     dur_fa = format_duration_persian(duration_sec)
     disp = f"<code>{target_id}</code>" if target_id else ""
@@ -2818,30 +2909,63 @@ async def execute_admin_mute(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if tname:
         disp += f" ({html.escape(tname)})"
 
+    if effective_scope == "group":
+        title_hdr = "🔇 <b>کاربر در گروه تلگرام بی‌صدا شد:</b>"
+        scope_desc = "فقط در گروه تلگرام (ارسال پیام مسدود شد)"
+    elif effective_scope == "bot":
+        title_hdr = "🤖 <b>کاربر از تعامل با ربات پرومته میوت شد:</b>"
+        scope_desc = "فقط از ربات (عدم پاسخگویی ربات پرومته)"
+    else:
+        title_hdr = "🤐 <b>کاربر با موفقیت بی‌صدا (Mute کامل) شد:</b>"
+        scope_desc = "میوت دوگانه (هم در گروه تلگرام و هم از پاسخگویی ربات)"
+
     confirm = (
-        "🤐 <b>کاربر با موفقیت بی‌صدا (Mute) شد:</b>\n\n"
+        f"{title_hdr}\n\n"
         f"👤 <b>کاربر:</b> {disp}\n"
+        f"🎯 <b>نوع میوت:</b> {scope_desc}\n"
         f"⏱ <b>مدت زمان:</b> {dur_fa}\n"
         f"📝 <b>علت:</b> {html.escape(reason)}\n"
         f"👮‍♂️ <b>ثبت‌کننده:</b> <code>{user.id}</code> ({html.escape(user.full_name)})\n"
-        f"🔒 <b>رفتار ربات:</b> عدم پاسخگویی مطلق به این کاربر تا پایان زمان میوت.\n"
-        f"💾 ذخیره در Cloudflare D1 با لغو خودکار پس از انقضا."
-        f"{tg_status}"
+        f"💾 <i>ذخیره در پایگاه داده با لغو خودکار پس از پایان زمان.</i>"
+        f"{tg_notice}"
     )
-    await msg.reply_text(confirm, parse_mode=ParseMode.HTML)
+
+    reply_markup = None
+    if chat.type != ChatType.PRIVATE and target_id > 0:
+        reply_markup = make_mute_keyboard(target_id, int(duration_sec), effective_scope)
+
+    await msg.reply_text(confirm, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
     return True
 
 
-async def execute_admin_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE, rem_text: str = "") -> bool:
-    """Executes unmute in database and restores Telegram permissions."""
+async def execute_admin_unmute(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    rem_text: str = "",
+    requested_scope: str = "auto"
+) -> bool:
+    """Executes unmute in database (Bot Mute) and restores Telegram permissions."""
     msg = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
-    if not user or not is_admin(user.id) or not msg:
+    if not user or not msg or not chat:
         return False
+
+    is_bot_adm = is_admin(user.id)
+    is_grp_adm = False
+    if chat.type != ChatType.PRIVATE and context and getattr(context, "bot", None):
+        is_grp_adm = await is_user_chat_admin(context.bot, chat.id, user.id)
+
+    if not is_bot_adm and not is_grp_adm:
+        await msg.reply_text(
+            "⛔️ <b>عدم دسترسی:</b> دستورات رفع سکوت (آنمیوت) صرفاً در اختیار مدیران این گروه و ادمین‌های پرومته می‌باشد.",
+            parse_mode=ParseMode.HTML
+        )
+        return True
 
     tid = None
     tuname = None
+    target_text = rem_text
 
     if msg.reply_to_message:
         ru = msg.reply_to_message.from_user
@@ -2851,20 +2975,30 @@ async def execute_admin_unmute(update: Update, context: ContextTypes.DEFAULT_TYP
         elif msg.reply_to_message.sender_chat:
             tid = msg.reply_to_message.sender_chat.id
             tuname = msg.reply_to_message.sender_chat.username or ""
-    elif rem_text:
-        parts = rem_text.split()
+    elif target_text:
+        parts = target_text.split()
         first_token = parts[0].strip()
         if first_token.lstrip("-+").isdigit():
             tid = int(first_token)
-        elif first_token.startswith("@") or not first_token.isalnum():
+        elif first_token.startswith("@"):
             clean_first = first_token.lstrip("@")
             if re.match(r"^[a-zA-Z0-9_]{3,32}$", clean_first):
                 tuname = clean_first
+        else:
+            m_user = re.search(r"@([a-zA-Z0-9_]{3,32})", target_text)
+            if m_user:
+                tuname = m_user.group(1)
+            else:
+                m_num = re.search(r"\b(\d{5,15})\b", target_text)
+                if m_num:
+                    tid = int(m_num.group(1))
 
     if not tid and not tuname:
         await msg.reply_text(
             "⚠️ <b>راهنمای رفع سکوت (آنمیوت):</b>\n\n"
             "• ریپلای روی پیام: <code>آنمیوت</code> یا <code>/unmute</code>\n"
+            "• در گروه: <code>آنمیوت در گروه</code>\n"
+            "• از ربات: <code>آنمیوت از ربات</code>\n"
             "• با آیدی: <code>/unmute 123456789</code>\n"
             "• با یوزرنیم: <code>/unmute @username</code>",
             parse_mode=ParseMode.HTML
@@ -2881,10 +3015,14 @@ async def execute_admin_unmute(update: Update, context: ContextTypes.DEFAULT_TYP
     if target_id is None:
         target_id = 0
 
-    await unmute_user(user_id=target_id, unmuted_by=user.id)
+    scope_detected, _ = detect_mute_scope(target_text)
+    effective_scope = requested_scope if requested_scope != "auto" else scope_detected
+    if effective_scope == "auto":
+        effective_scope = "both"
 
     tg_status = ""
-    if chat and chat.type != ChatType.PRIVATE and target_id > 0:
+    # 1. Unmute in Telegram group (if requested)
+    if effective_scope in ("group", "both") and chat.type != ChatType.PRIVATE and target_id > 0:
         try:
             await context.bot.restrict_chat_member(
                 chat_id=chat.id,
@@ -2902,21 +3040,224 @@ async def execute_admin_unmute(update: Update, context: ContextTypes.DEFAULT_TYP
                     can_add_web_page_previews=True
                 )
             )
-            tg_status = "\n⚡️ <i>محدودیت چت کاربر در گروه تلگرام نیز لغو شد.</i>"
+            tg_status = "\n⚡️ <i>محدودیت ارسال پیام در گروه تلگرام لغو گردید.</i>"
         except Exception as tg_err:
             logger.debug(f"Telegram restrict_chat_member unmute: {tg_err}")
+
+    # 2. Unmute from Bot (if requested)
+    if effective_scope in ("bot", "both"):
+        await unmute_user(user_id=target_id, unmuted_by=user.id)
 
     disp = f"<code>{target_id}</code>" if target_id else ""
     if tuname:
         disp += f" (@{tuname})" if disp else f"@{tuname}"
 
     await msg.reply_text(
-        f"🔊 <b>سکوت کاربر {disp} لغو شد (Unmuted).</b>\n"
-        f"🤖 ربات مجدداً به پیام‌های این کاربر پاسخ خواهد داد."
+        f"🔊 <b>سکوت کاربر {disp} با موفقیت لغو شد (Unmuted).</b>\n"
+        f"🤖 دسترسی و پاسخگویی ربات پرومته مجدداً برقرار گردید."
         f"{tg_status}",
         parse_mode=ParseMode.HTML
     )
     return True
+
+
+async def moderation_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles inline button clicks for adjusting mute scope or unmuting."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    user = query.from_user
+    chat = query.message.chat if query.message else None
+    if not user or not chat:
+        return
+
+    is_auth = is_admin(user.id) or await is_user_chat_admin(context.bot, chat.id, user.id)
+    if not is_auth:
+        await query.answer("⛔️ این تنظیمات صرفاً مخصوص مدیران گروه و ادمین‌های پرومته است.", show_alert=True)
+        return
+
+    parts = query.data.split(":")
+    # mod:mute:scope:target_id:duration_sec OR mod:unmute:scope:target_id:duration_sec
+    if len(parts) < 4:
+        return
+
+    action = parts[1]
+    scope = parts[2]
+    try:
+        target_id = int(parts[3])
+    except ValueError:
+        return
+    duration_sec = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 3600
+
+    if action == "unmute":
+        await unmute_user(user_id=target_id, unmuted_by=user.id)
+        if chat.type != ChatType.PRIVATE and target_id > 0:
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=chat.id,
+                    user_id=target_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=True,
+                        can_send_audios=True,
+                        can_send_documents=True,
+                        can_send_photos=True,
+                        can_send_videos=True,
+                        can_send_video_notes=True,
+                        can_send_voice_notes=True,
+                        can_send_polls=True,
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Unmute callback Telegram restrict error: {e}")
+
+        await query.answer("✅ سکوت کاربر با موفقیت لغو شد.", show_alert=False)
+        try:
+            await query.edit_message_text(
+                f"🔊 <b>سکوت کاربر <code>{target_id}</code> توسط {html.escape(user.full_name)} به طور کامل لغو شد (Unmuted).</b>\n\n"
+                f"✅ هم دسترسی در گروه تلگرام فعال شد و هم پاسخگویی ربات پرومته برقرار گردید.",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+        return
+
+    if action == "mute":
+        until_ts = time.time() + duration_sec
+        until_dt = datetime.fromtimestamp(until_ts, tz=timezone.utc)
+        dur_fa = format_duration_persian(duration_sec)
+
+        if scope == "group":
+            # Lift bot mute, enforce group restrict
+            await unmute_user(user_id=target_id, unmuted_by=user.id)
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=chat.id,
+                    user_id=target_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=False,
+                        can_send_audios=False,
+                        can_send_documents=False,
+                        can_send_photos=False,
+                        can_send_videos=False,
+                        can_send_video_notes=False,
+                        can_send_voice_notes=False,
+                        can_send_polls=False,
+                        can_send_other_messages=False,
+                        can_add_web_page_previews=False
+                    ),
+                    until_date=until_dt
+                )
+            except Exception as e:
+                logger.warning(f"Callback group restrict failed: {e}")
+
+            await query.answer("✅ وضعیت به «فقط میوت در گروه» تغییر یافت.", show_alert=False)
+            new_kb = make_mute_keyboard(target_id, duration_sec, "group")
+            try:
+                msg_text = (
+                    f"🔇 <b>وضعیت میوت کاربر <code>{target_id}</code>:</b>\n\n"
+                    f"🎯 <b>نوع:</b> فقط در گروه تلگرام (ارسال پیام مسدود)\n"
+                    f"🤖 <b>ربات پرومته:</b> آزاد (کاربر می‌تواند با پرومته گفتگو کند)\n"
+                    f"⏱ <b>مدت زمان:</b> {dur_fa}\n"
+                    f"👮‍♂️ <b>تنظیم‌کننده:</b> {html.escape(user.full_name)}"
+                )
+                await query.edit_message_text(msg_text, parse_mode=ParseMode.HTML, reply_markup=new_kb)
+            except Exception:
+                pass
+
+        elif scope == "bot":
+            # Enforce bot mute, restore group chat
+            await mute_user(
+                user_id=target_id,
+                duration_sec=duration_sec,
+                username="",
+                first_name="",
+                reason="تنظیم شده از طریق دکمه‌های شیشه‌ای ادمین",
+                muted_by=user.id,
+                chat_id=chat.id,
+                chat_title=chat.title or ""
+            )
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=chat.id,
+                    user_id=target_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=True,
+                        can_send_audios=True,
+                        can_send_documents=True,
+                        can_send_photos=True,
+                        can_send_videos=True,
+                        can_send_video_notes=True,
+                        can_send_voice_notes=True,
+                        can_send_polls=True,
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True
+                    )
+                )
+            except Exception:
+                pass
+
+            await query.answer("✅ وضعیت به «فقط میوت از ربات» تغییر یافت.", show_alert=False)
+            new_kb = make_mute_keyboard(target_id, duration_sec, "bot")
+            try:
+                msg_text = (
+                    f"🤖 <b>وضعیت میوت کاربر <code>{target_id}</code>:</b>\n\n"
+                    f"🎯 <b>نوع:</b> فقط از ربات پرومته (عدم پاسخگویی ربات)\n"
+                    f"👥 <b>گروه تلگرام:</b> آزاد (کاربر می‌تواند در گروه پیام بدهد)\n"
+                    f"⏱ <b>مدت زمان:</b> {dur_fa}\n"
+                    f"👮‍♂️ <b>تنظیم‌کننده:</b> {html.escape(user.full_name)}"
+                )
+                await query.edit_message_text(msg_text, parse_mode=ParseMode.HTML, reply_markup=new_kb)
+            except Exception:
+                pass
+
+        elif scope == "both":
+            # Enforce both
+            await mute_user(
+                user_id=target_id,
+                duration_sec=duration_sec,
+                username="",
+                first_name="",
+                reason="تنظیم شده از طریق دکمه‌های شیشه‌ای ادمین",
+                muted_by=user.id,
+                chat_id=chat.id,
+                chat_title=chat.title or ""
+            )
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=chat.id,
+                    user_id=target_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=False,
+                        can_send_audios=False,
+                        can_send_documents=False,
+                        can_send_photos=False,
+                        can_send_videos=False,
+                        can_send_video_notes=False,
+                        can_send_voice_notes=False,
+                        can_send_polls=False,
+                        can_send_other_messages=False,
+                        can_add_web_page_previews=False
+                    ),
+                    until_date=until_dt
+                )
+            except Exception:
+                pass
+
+            await query.answer("✅ وضعیت به «میوت کامل (هردو)» تغییر یافت.", show_alert=False)
+            new_kb = make_mute_keyboard(target_id, duration_sec, "both")
+            try:
+                msg_text = (
+                    f"⚡️ <b>وضعیت میوت کاربر <code>{target_id}</code>:</b>\n\n"
+                    f"🎯 <b>نوع:</b> میوت کامل (هم در گروه تلگرام و هم از پاسخگویی ربات)\n"
+                    f"⏱ <b>مدت زمان:</b> {dur_fa}\n"
+                    f"👮‍♂️ <b>تنظیم‌کننده:</b> {html.escape(user.full_name)}"
+                )
+                await query.edit_message_text(msg_text, parse_mode=ParseMode.HTML, reply_markup=new_kb)
+            except Exception:
+                pass
+
 
 
 async def execute_admin_bangroup(update: Update, context: ContextTypes.DEFAULT_TYPE, rem_text: str = "") -> bool:
@@ -3060,7 +3401,15 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
     """
     user = update.effective_user
     chat = update.effective_chat
-    if not user or not is_admin(user.id):
+    if not user:
+        return False
+
+    is_bot_adm = is_admin(user.id)
+    is_grp_adm = False
+    if chat and chat.type != ChatType.PRIVATE and context and getattr(context, "bot", None):
+        is_grp_adm = await is_user_chat_admin(context.bot, chat.id, user.id)
+
+    if not is_bot_adm and not is_grp_adm:
         return False
 
     # In group chats, strictly require that the bot was directly requested
@@ -3149,15 +3498,25 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
     if ban_m:
         return await execute_admin_ban(update, context, ban_m.group(1) or "")
 
-    # 12. User Unmute
+    # 12 & 13. User Mute & Unmute (Universal Natural Language, Slash Commands & Scope Detection)
+    m_act, m_scope, m_rem = match_mute_command(t)
+    if m_act == "unmute":
+        return await execute_admin_unmute(update, context, m_rem, requested_scope=m_scope)
+    elif m_act == "mute":
+        return await execute_admin_mute(update, context, m_rem, requested_scope=m_scope)
+
+    # Legacy regex fallbacks
     unmute_m = re.match(r"^(?:/)?(?:unmute|unsilence|آنمیوت|انمیوت|نمیوت|آن\s+میوت|رفع\s+میوت|لغو\s+میوت|رفع\s+سکوت|لغو\s+سکوت)(?:\s+(?:کن|ش\s+کن|ش))?(?:\s+(.*))?$", t, re.IGNORECASE)
     if unmute_m:
         return await execute_admin_unmute(update, context, unmute_m.group(1) or "")
 
-    # 13. User Mute
     mute_m = re.match(r"^(?:/)?(?:mute|silence|میوت|سکوت|ساکت|خاموش|ببند)(?:\s+(?:کن|ش\s+کن|ش))?(?:\s+(.*))?$", t, re.IGNORECASE)
     if mute_m:
         return await execute_admin_mute(update, context, mute_m.group(1) or "")
+
+    # Commands below (Directives, Custom Rules, Settings, Audit) require Bot Master Admin
+    if not is_bot_adm:
+        return False
 
     # 14. Register Permanent Admin Directive / Rule
     dir_m = re.match(
@@ -3353,9 +3712,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Strictly remain silent in groups for all other messages
         return
 
-    # 2. Direct Interception of Admin Commands (Persian & Slash)
-    if is_admin(user.id):
+    # 2. Direct Interception of Admin & Moderation Commands (Persian & Slash)
+    is_bot_adm = is_admin(user.id)
+    is_grp_adm = False
+    if chat.type != ChatType.PRIVATE and context and getattr(context, "bot", None):
+        is_grp_adm = await is_user_chat_admin(context.bot, chat.id, user.id)
+
+    if is_bot_adm or is_grp_adm:
         if await handle_admin_text_command(update, context, raw_text):
+            return
+    else:
+        # Intercept unauthorized moderation attempts (mute, unmute, ban)
+        m_act, _, _ = match_mute_command(cleaned_prompt)
+        is_ban_cmd = bool(re.search(r"^(?:/)?(?:ban|block|بن|بلاک|اخراج|سیکتیر|دیپورت|مسدود|آنبن|انبن|unban)", cleaned_prompt, re.IGNORECASE))
+        if m_act or is_ban_cmd:
+            await message.reply_text(
+                "⛔️ <b>عدم دسترسی:</b> دستورات مدیریت، مسدودسازی و میوت کاربران صرفاً در اختیار مدیران این گروه و ادمین‌های پرومته می‌باشد.",
+                parse_mode=ParseMode.HTML
+            )
             return
 
     # 3. Check Silence / Stop Triggers
@@ -4334,6 +4708,9 @@ def build_application():
 
     # Callback Query Handlers for Group Approvals
     app.add_handler(CallbackQueryHandler(group_approval_callback, pattern=r"^grp_(app|rej):"))
+
+    # Callback Query Handlers for Moderation Mute/Unmute Scope Toggling
+    app.add_handler(CallbackQueryHandler(moderation_callback_handler, pattern=r"^mod:"))
 
     # Chat Member Updates (Bot added/removed in groups)
     app.add_handler(ChatMemberHandler(chat_member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))

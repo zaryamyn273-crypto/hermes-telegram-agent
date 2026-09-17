@@ -569,3 +569,164 @@ async def test_admin_directives_and_permanent_settings():
     assert handled4 is True
     msg.reply_text.assert_called()
     assert await get_admin_setting("style") is None
+
+
+@pytest.mark.asyncio
+async def test_smart_mute_scope_detection_and_matching():
+    """Verifies that detect_mute_scope and match_mute_command distinguish group vs bot mute."""
+    from tools.moderation import detect_mute_scope, match_mute_command
+
+    # 1. Scope detection
+    scope, rem = detect_mute_scope("این کاربر رو توی گروه میوت کن")
+    assert scope == "group"
+
+    scope, rem = detect_mute_scope("از ربات میوتش کن ۳۰ دقیقه")
+    assert scope == "bot"
+
+    scope, rem = detect_mute_scope("میوت در گروه 2h")
+    assert scope == "group"
+
+    scope, rem = detect_mute_scope("میوت از ربات 1d")
+    assert scope == "bot"
+
+    scope, rem = detect_mute_scope("میوت کامل")
+    assert scope == "both"
+
+    scope, rem = detect_mute_scope("این کاربر رو میوت کن")
+    assert scope == "auto"
+
+    # 2. Command matching
+    act, sc, rem = match_mute_command("این کاربر رو میوت کن")
+    assert act == "mute"
+    assert sc == "auto"
+
+    act, sc, rem = match_mute_command("این کاربر رو توی گروه میوت کن")
+    assert act == "mute"
+    assert sc == "group"
+
+    act, sc, rem = match_mute_command("از ربات میوتش کن")
+    assert act == "mute"
+    assert sc == "bot"
+
+    act, sc, rem = match_mute_command("میوت کامل")
+    assert act == "mute"
+    assert sc == "both"
+
+    # Unmute
+    act, sc, rem = match_mute_command("این کاربر رو آنمیوت کن")
+    assert act == "unmute"
+    assert sc == "auto"
+
+    act, sc, rem = match_mute_command("توی گروه آنمیوتش کن")
+    assert act == "unmute"
+    assert sc == "group"
+
+    act, sc, rem = match_mute_command("از ربات آنمیوتش کن")
+    assert act == "unmute"
+    assert sc == "bot"
+
+    # Informational questions must NOT trigger mute
+    act, sc, rem = match_mute_command("تفاوت میوت در گروه و میوت از ربات چیه؟")
+    assert act is None
+
+
+@pytest.mark.asyncio
+async def test_execute_admin_smart_mute_scopes():
+    """Verifies that execute_admin_mute properly honors group, bot, and both scopes."""
+    from main import execute_admin_mute, execute_admin_unmute
+    from tools.moderation import is_user_muted
+
+    admin_id = 8814471014
+    target_uid = 4455667788
+    target_uname = "mute_scope_target"
+
+    context = MagicMock()
+    context.bot = AsyncMock()
+    context.bot.id = 8939248291
+    context.bot.username = "AMZprometheusopenbot"
+
+    up = MagicMock()
+    up.effective_user.id = admin_id
+    up.effective_user.username = "admin_tester"
+    up.effective_user.full_name = "Admin Tester"
+    up.effective_chat.id = -10099887766
+    up.effective_chat.type = "supergroup"
+    up.effective_chat.title = "Test Moderation Group"
+
+    msg = MagicMock()
+    msg.reply_text = AsyncMock()
+    rep = MagicMock()
+    rep.from_user = MagicMock()
+    rep.from_user.id = target_uid
+    rep.from_user.username = target_uname
+    rep.from_user.full_name = "Mute Target User"
+    msg.reply_to_message = rep
+    up.effective_message = msg
+
+    # 1. Mute with scope='group' -> restricts in telegram, but does NOT add to bot-muted users
+    handled = await execute_admin_mute(up, context, rem_text="30m", requested_scope="group")
+    assert handled is True
+    context.bot.restrict_chat_member.assert_called_once()
+    assert is_user_muted(target_uid)[0] is False  # NOT muted from bot!
+
+    # 2. Unmute
+    context.bot.restrict_chat_member.reset_mock()
+    handled_unmute = await execute_admin_unmute(up, context, requested_scope="group")
+    assert handled_unmute is True
+    context.bot.restrict_chat_member.assert_called_once()
+
+    # 3. Mute with scope='bot' -> adds to bot-muted users, but does NOT restrict in telegram
+    context.bot.restrict_chat_member.reset_mock()
+    handled_bot = await execute_admin_mute(up, context, rem_text="1h", requested_scope="bot")
+    assert handled_bot is True
+    assert context.bot.restrict_chat_member.call_count == 0  # NOT restricted in telegram!
+    assert is_user_muted(target_uid)[0] is True  # Muted from bot!
+
+    # 4. Clean up
+    await execute_admin_unmute(up, context, requested_scope="bot")
+    assert is_user_muted(target_uid)[0] is False
+
+
+@pytest.mark.asyncio
+async def test_moderation_callback_handler():
+    """Verifies that moderation_callback_handler toggles mute scope and unbans via inline buttons."""
+    from main import moderation_callback_handler
+    from tools.moderation import is_user_muted
+
+    admin_id = 8814471014
+    target_uid = 5566778899
+
+    context = MagicMock()
+    context.bot = AsyncMock()
+    context.bot.id = 8939248291
+
+    up = MagicMock()
+    up.effective_user.id = admin_id
+    query = MagicMock()
+    query.from_user.id = admin_id
+    query.from_user.full_name = "Admin Tester"
+    query.message.chat.id = -10099887766
+    query.message.chat.type = "supergroup"
+    query.message.chat.title = "Test Moderation Group"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+
+    # 1. Click "فقط در گروه" -> group mute, unmute from bot
+    query.data = f"mod:mute:group:{target_uid}:1800"
+    up.callback_query = query
+    await moderation_callback_handler(up, context)
+    query.answer.assert_called_with("✅ وضعیت به «فقط میوت در گروه» تغییر یافت.", show_alert=False)
+    assert is_user_muted(target_uid)[0] is False
+
+    # 2. Click "فقط از ربات" -> bot mute
+    query.data = f"mod:mute:bot:{target_uid}:1800"
+    await moderation_callback_handler(up, context)
+    query.answer.assert_called_with("✅ وضعیت به «فقط میوت از ربات» تغییر یافت.", show_alert=False)
+    assert is_user_muted(target_uid)[0] is True
+
+    # 3. Click "لغو سکوت" -> unmute completely
+    query.data = f"mod:unmute:all:{target_uid}:0"
+    await moderation_callback_handler(up, context)
+    query.answer.assert_called_with("✅ سکوت کاربر با موفقیت لغو شد.", show_alert=False)
+    assert is_user_muted(target_uid)[0] is False
+
