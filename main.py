@@ -118,6 +118,18 @@ from tools.twitter import (
     parse_twitter_request,
     extract_tweet_url_and_id,
 )
+from tools.file_tool import (
+    extract_file_content,
+    create_document_file,
+    detect_file_creation_intent,
+)
+from tools.virustotal import (
+    scan_file_hash,
+    upload_and_scan_file,
+    scan_url_or_domain,
+    format_virustotal_report,
+    is_virustotal_request,
+)
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -559,6 +571,37 @@ async def _process_and_reply(
 
     await _deliver_reply(message, final_answer)
 
+    # Check if user explicitly requested a file attachment / download
+    p_lower = prompt.lower()
+    if any(k in p_lower for k in ["فایل بده", "به صورت فایل", "توی فایل", "داخل فایل", "فایل پایتون", "فایل متنی", "فایل اسکریپت", "download file", "as a file"]):
+        code_blocks = re.findall(r"```([a-zA-Z0-9_+\-]+)?\n([\s\S]*?)```", final_answer)
+        if code_blocks:
+            c_lang, c_code = code_blocks[0]
+            ext = (c_lang.lower().strip() if c_lang else "txt")
+            if ext in ("python", "py"):
+                ext = "py"
+            elif ext in ("javascript", "js"):
+                ext = "js"
+            elif ext in ("html", "htm"):
+                ext = "html"
+            elif ext in ("json",):
+                ext = "json"
+            elif ext in ("shell", "bash", "sh"):
+                ext = "sh"
+            else:
+                ext = "py" if "پایتون" in p_lower else (ext or "txt")
+
+            try:
+                buf, final_fn = create_document_file(f"script.{ext}", c_code)
+                await message.reply_document(
+                    document=buf,
+                    filename=final_fn,
+                    caption=f"📁 <b>فایل کد استخراج‌شده:</b> <code>{final_fn}</code>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as fe:
+                logger.warning(f"Could not deliver code block as file: {fe}")
+
 
 # =========================================================================
 # Fast-Path Intent Detectors
@@ -840,6 +883,8 @@ PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "ping", "status",
     "summarize", "recap", "summary", "kholase",
     "search", "find", "searchdb", "jostojoo",
+    "file", "createfile", "makefile",
+    "scan", "vt", "virustotal", "antivirus",
     # Admin commands
     "ban", "block",
     "unban", "unblock",
@@ -1319,6 +1364,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🌦 **پیش‌بینی آب و هوای زنده:** `/weather` یا `/pweather نام شهر`\n"
         "• 🕒 **ساعت رسمی و تقویم شمسی:** `/time` یا `/ptime`\n"
         "• 🧮 **ماشین حساب و ریاضی:** `/calc` یا `/pcalc [عبارت]`\n"
+        "• 📁 **تولید و خواندن انواع فایل:** `/file` یا ارسال فایل‌های PDF، اکسل، ورد، پایتون، کد و متن\n"
+        "• 🛡️ **پویشگر امنیتی و آنتی‌ویروس:** `/scan` یا `/pvt` (اسکن فایل، لینک و هش با ۷۰ آنتی‌ویروس VirusTotal)\n"
         "• 🗑 **حذف پیام‌های ارسالی ربات:** `/del` یا `/pdel` با ریپلای روی پیام ربات\n"
         "• 📌 **درک هوشمند ریپلای:** روی هر پیامی ریپلای بزنید و سوال یا دستور خود را مطرح کنید تا ربات آن را تحلیل کند.\n\n"
         "💡 *در گروه‌ها جهت جلوگیری از تداخل با سایر ربات‌ها، کلیه دستورات با پیشوند اختصاصی p یا p_ (مانند /pinfo، /pid، /phelp، /pfast، /prates) یا با منشن نام کاربری (@AMZprometheusopenbot) فعال می‌شوند.*"
@@ -1347,6 +1394,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/mode` یا `/pmode` - مشاهده و تغییر حالت کاری (هوشمند خودکار / غول ایجنت / فوق‌سریع)\n\n"
         "🛠 **ابزارهای اختصاصی و بلادرنگ:**\n"
         "• `/id` یا `/pid` یا `/pinfo` - استخراج کامل آیدی عددی کاربر، چت، پیام، فرستنده فوروارد و مشخصات با کپی یک‌لمسی\n"
+        "• `/file [نام فایل] [محتوا]` یا `/pfile` - ساخت و دانلود انواع اسناد (پایتون، اکسل، ورد، PDF، کد و متن)\n"
+        "• `/scan [فایل/لینک/هش]` یا `/pscan` یا `/pvt` - اسکن فایل و لینک با ۷۰ موتور آنتی‌ویروس مطرح جهان (VirusTotal)\n"
+        "• 📁 **خواندن و تحلیل اسناد:** ارسال هر فایل (PDF، Word، Excel، CSV، کد یا متن) جهت خلاصه، ترجمه و تحلیل محتوا\n"
         "• `/qr` یا `/pqr [متن/لینک]` - ساخت کیوآر کد اختصاصی با کیفیت فوق‌العاده بالا\n"
         "• `/barcode [کد]` یا `/pbarcode` - ساخت بارکد میله‌ای استاندارد تجاری (Code128)\n"
         "• 📷 **بینایی ماشین (Vision):** ارسال هر تصویر یا ریپلای روی تصویر با سوال، استخراج متن (OCR)، تحلیل اشیاء یا درخواست «بازسازی تصویر»\n"
@@ -1976,6 +2026,383 @@ async def twitter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.reply_text(f"🔍 نتیجه‌ای برای جستجوی «{query}» در شبکه X یافت نشد.")
             return
+
+
+# =========================================================================
+# File Management & VirusTotal Threat Intelligence Engine
+# =========================================================================
+
+async def file_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles /file, /createfile, /makefile commands.
+    Generates and sends downloadable files (.py, .txt, .json, .csv, .docx, .xlsx, .pdf, etc.).
+    Usage:
+      - /file script.py print("Hello World")
+      - Or reply to any code/text message with: /file bot.py
+      - Or /file report.pdf [text...]
+    """
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    args = context.args or []
+    target_filename = args[0] if args else ""
+    content = " ".join(args[1:]).strip() if len(args) > 1 else ""
+
+    # If replied to a message, extract content from replied message if not supplied in args
+    if not content and msg.reply_to_message:
+        reply_raw = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+        code_blocks = re.findall(r"```(?:[a-zA-Z0-9_+\-]+)?\n([\s\S]*?)```", reply_raw)
+        if code_blocks:
+            content = code_blocks[0].strip()
+        else:
+            content = reply_raw.strip()
+
+    if not target_filename and not content:
+        guide = (
+            "📁 <b>راهنمای تولید و ساخت انواع فایل در پرومته:</b>\n\n"
+            "پرومته توانایی ساخت و ارسال انواع فایل‌ها با فرمت‌های مختلف را دارد:\n"
+            "• 🐍 <b>اسکریپت و کد:</b> <code>.py</code>, <code>.js</code>, <code>.html</code>, <code>.sh</code>, <code>.json</code>, <code>.sql</code>\n"
+            "• 📊 <b>جداول و داده:</b> اکسل (<code>.xlsx</code>), <code>.csv</code>\n"
+            "• 📝 <b>اسناد اداری:</b> ورد (<code>.docx</code>), پی‌دی‌اف (<code>.pdf</code>), متن (<code>.txt</code>, <code>.md</code>)\n\n"
+            "<b>روش‌های استفاده:</b>\n"
+            "۱. ارسال دستور مستقیم:\n"
+            "<code>/file script.py print('Hello World')</code>\n\n"
+            "۲. ریپلای روی کد یا متن در چت:\n"
+            "<code>/file main.py</code>\n\n"
+            "۳. درخواست مستقیم به زبان محاوره‌ای:\n"
+            "<i>«یک فایل پایتون به نام bot.py بساز با کد...»</i>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    if not target_filename:
+        target_filename = "document.txt"
+
+    if not content:
+        await msg.reply_text(
+            "⚠️ محتوایی برای قرارگیری در فایل مشخص نشده است.\n"
+            "لطفاً روی یک پیام حاوی متن ریپلای کنید یا محتوا را پس از نام فایل وارد نمایید:\n"
+            f"<code>/file {target_filename} [محتوای مورد نظر]</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    await chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+    t0 = time.perf_counter()
+    try:
+        buf, final_name = create_document_file(target_filename, content)
+        elapsed = time.perf_counter() - t0
+        record_chat_latency(chat.id, elapsed, f"تولید فایل ({final_name})")
+        size_kb = len(buf.getvalue()) / 1024
+        caption = (
+            f"📄 <b>فایل تولید شده توسط پرومته:</b> <code>{html.escape(final_name)}</code>\n"
+            f"💾 حجم: <code>{size_kb:.1f} KB</code>\n"
+            f"⏱ زمان تولید: <code>{elapsed*1000:.1f}ms</code>"
+        )
+        await msg.reply_document(
+            document=buf,
+            filename=final_name,
+            caption=caption,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Error creating file {target_filename}: {e}")
+        await msg.reply_text(f"❌ متأسفانه در ایجاد فایل خطایی رخ داد: {e}")
+
+
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles /scan, /vt, /virustotal, /antivirus commands.
+    Scans files, hashes, URLs, and domains against 70+ antivirus engines via VirusTotal.
+    """
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    args = context.args or []
+    target = " ".join(args).strip() if args else ""
+
+    # Case 1: Replied to a document
+    if msg.reply_to_message and msg.reply_to_message.document:
+        doc = msg.reply_to_message.document
+        if doc.file_size and doc.file_size > 32 * 1024 * 1024:
+            await msg.reply_text("⚠️ حجم فایل بیش از ۳۲ مگابایت است و امکان ارسال به VirusTotal برای اسکن لایو وجود ندارد.")
+            return
+
+        status_msg = await msg.reply_text("🔍 در حال دریافت فایل و ارسال به VirusTotal جهت اسکن امنیتی...")
+        await chat.send_action(ChatAction.TYPING)
+        t0 = time.perf_counter()
+        try:
+            tg_file = await doc.get_file()
+            f_bytes = await tg_file.download_as_bytearray()
+            res = await upload_and_scan_file(bytes(f_bytes), doc.file_name or "file.bin")
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, "اسکن امنیتی فایل با VirusTotal")
+            report = format_virustotal_report(res)
+            await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            return
+        except Exception as e:
+            logger.error(f"Error scanning replied document: {e}")
+            await status_msg.edit_text(f"❌ خطا در اسکن فایل با VirusTotal: {e}")
+            return
+
+    # Case 2: Replied to a text message containing URL / Hash
+    if not target and msg.reply_to_message:
+        reply_raw = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+        is_req, extracted = is_virustotal_request(reply_raw)
+        if extracted:
+            target = extracted
+        else:
+            hash_or_url = re.search(r"([a-fA-F0-9]{64}|[a-fA-F0-9]{32}|https?://\S+|[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/\S*)?)", reply_raw)
+            if hash_or_url:
+                target = hash_or_url.group(1)
+
+    # Case 3: Target supplied directly (URL, Domain, Hash)
+    if target:
+        await chat.send_action(ChatAction.TYPING)
+        t0 = time.perf_counter()
+        clean_target = target.strip()
+        if re.match(r"^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$", clean_target):
+            res = await scan_file_hash(clean_target)
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, f"استعلام هش VirusTotal ({clean_target[:8]})")
+            report = format_virustotal_report(res)
+            await _deliver_reply(msg, report)
+            return
+        else:
+            res = await scan_url_or_domain(clean_target)
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, f"اسکن آدرس در VirusTotal ({clean_target[:20]})")
+            report = format_virustotal_report(res)
+            await _deliver_reply(msg, report)
+            return
+
+    # Case 4: No argument and no reply - Show guide
+    guide = (
+        "🛡️ <b>راهنمای پویشگر و آنتی‌ویروس جامع VirusTotal پرومته:</b>\n\n"
+        "این سیستم امنیتی به بیش از <b>۷۰ موتور آنتی‌ویروس مطرح جهان</b> (کسپرسکی، مایکروسافت، بیت‌دیفندر، نود۳۲ و...) متصل است.\n\n"
+        "<b>قابلیت‌ها و نحوه استفاده:</b>\n"
+        "• <b>اسکن فایل:</b> روی هر فایل ارسال‌شده در چت ریپلای کنید و دستور <code>/scan</code> یا <code>/vt</code> را بفرستید.\n"
+        "• <b>بررسی امنیت لینک/سایت:</b>\n"
+        "<code>/scan https://suspicious-site.com</code>\n"
+        "• <b>استعلام هش فایل (SHA-256 یا MD5):</b>\n"
+        "<code>/scan 275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f</code>\n"
+        "• <b>درخواست محاوره‌ای:</b> <i>«این لینک رو اسکن کن...»</i> یا <i>«آیا این سایت ویروسیه؟»</i>"
+    )
+    await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+
+
+async def virustotal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles inline button clicks for VirusTotal scanning on documents."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    await query.answer("🔍 در حال اتصال به VirusTotal و آغاز تحلیل امنیتی...")
+
+    file_id = query.data.split(":", 1)[1] if ":" in query.data else ""
+    if not file_id:
+        await query.edit_message_text("❌ شناسه فایل نامعتبر است.")
+        return
+
+    try:
+        tg_file = await context.bot.get_file(file_id)
+        if tg_file.file_size and tg_file.file_size > 32 * 1024 * 1024:
+            await query.edit_message_text("⚠️ حجم این فایل بیش از ۳۲ مگابایت است و امکان ارسال به VirusTotal برای اسکن لایو وجود ندارد.")
+            return
+
+        f_bytes = await tg_file.download_as_bytearray()
+        res = await upload_and_scan_file(bytes(f_bytes), "file.bin")
+        report = format_virustotal_report(res)
+        await query.edit_message_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Error in virustotal_callback: {e}")
+        await query.edit_message_text(f"❌ خطا در انجام اسکن امنیتی: {e}")
+
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles all incoming document files (PDF, Word, Excel, CSV, Code, Text, Archives, etc.).
+    Extracts text/data, offers smart actions, and supports 1-tap VirusTotal scanning.
+    """
+    msg = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+    if not msg or not user or not chat or not msg.document:
+        return
+
+    doc = msg.document
+    caption = (msg.caption or "").strip()
+
+    # 1. Moderation / Banned check
+    if not await _check_moderation_guard(update, context):
+        return
+
+    # Ingest document message into database
+    asyncio.create_task(
+        database.persist_message(
+            chat_id=chat.id,
+            user_id=user.id,
+            role="user",
+            content=f"[Document: {doc.file_name or 'file'}] {caption}".strip(),
+            username=user.username or "",
+            full_name=user.full_name or "",
+            message_id=msg.message_id,
+            reply_to_message_id=msg.reply_to_message.message_id if msg.reply_to_message else 0,
+            media_type="document",
+            is_bot=1 if user.is_bot else 0
+        )
+    )
+
+    # 2. Check caption for jailbreak attempt
+    if caption:
+        attack_name = detect_jailbreak_attempt(caption)
+        if attack_name:
+            if is_admin(user.id):
+                logger.warning(f"Admin {user.id} triggered jailbreak in document caption; skipping auto-ban.")
+            else:
+                logger.warning(f"Security Alert: Auto-banning user {user.id} for document jailbreak attack: {attack_name}")
+                await ban_user(
+                    user_id=user.id,
+                    username=user.username or "",
+                    name=user.full_name or "",
+                    reason=f"تلاش خودکار برای نفوذ/جیل‌بریک در کپشن فایل: {attack_name}",
+                    banned_by=0,
+                    chat_id=chat.id,
+                    chat_title=chat.title or "",
+                )
+                if chat.type != ChatType.PRIVATE:
+                    try:
+                        await context.bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
+                    except Exception as be:
+                        logger.debug(f"Could not ban member from Telegram chat: {be}")
+
+                user_mention = f"@{user.username}" if user.username else (user.full_name or f"کاربر {user.id}")
+                ban_notice = (
+                    f"⛔️ <b>کاربر {html.escape(user_mention)} به دلیل تلاش برای نفوذ یا جیل‌بریک مسدود (Ban) شد.</b>\n\n"
+                    f"⚠️ <b>نوع اقدام:</b> {html.escape(attack_name)}\n"
+                    f"🚫 <i>دسترسی این کاربر به کلیه خدمات پرومته به صورت دائمی مسدود گردید.</i>"
+                )
+                await msg.reply_text(ban_notice, parse_mode=ParseMode.HTML)
+                return
+
+    # In groups: Enforce direct address policy (caption mentions bot, or replies to bot)
+    is_private = (chat.type == ChatType.PRIVATE)
+    if not is_private:
+        is_direct, _ = is_direct_bot_request(update, context, caption)
+        if not is_direct and not any(caption.startswith(f"/{c}") for c in ["scan", "vt", "file", "createfile", "makefile", "pscan", "pfile"]):
+            return
+
+    # Rate limit check
+    allowed, limit_msg = check_user_rate_limit(user.id)
+    if not allowed:
+        await msg.reply_text(limit_msg or "⚠️ لطفاً کمی شکیبا باشید.")
+        return
+
+    # File size check (Telegram Bot API downloads limited to 20MB)
+    if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+        await msg.reply_text(
+            f"⚠️ <b>محدودیت حجم دانلود تلگرام:</b>\n"
+            f"حجم فایل ارسالی ({doc.file_size / (1024*1024):.1f} MB) بیش از سقف مجاز دانلود برای ربات‌های تلگرام (۲۰ مگابایت) است.\n"
+            f"💡 برای اسکن امنیتی یا بررسی، می‌توانید هش فایل را استعلام نمایید:\n"
+            f"<code>/scan [هش SHA-256 یا MD5]</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    # Check if user explicitly asked for VirusTotal scan in caption
+    is_scan_req, _ = is_virustotal_request(caption)
+
+    typing_task = asyncio.create_task(_send_typing_loop(context.bot, chat.id))
+    t0 = time.perf_counter()
+    try:
+        tg_file = await doc.get_file()
+        file_bytes = await tg_file.download_as_bytearray()
+        f_name = doc.file_name or "document.bin"
+        f_mime = doc.mime_type or ""
+
+        if is_scan_req:
+            vt_res = await upload_and_scan_file(bytes(file_bytes), f_name)
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, f"اسکن VirusTotal فایل ({f_name})")
+            report = format_virustotal_report(vt_res)
+            await _deliver_reply(msg, report)
+            return
+
+        # Read & parse the file content
+        parsed = extract_file_content(bytes(file_bytes), f_name, mime_type=f_mime)
+        elapsed = time.perf_counter() - t0
+        record_chat_latency(chat.id, elapsed, f"استخراج و تحلیل محتوای فایل ({f_name})")
+
+        # Clean caption of bot mentions
+        cleaned_caption = caption
+        bot_user = context.bot if (context and getattr(context, "bot", None)) else None
+        bot_username = (bot_user.username or "").lower() if bot_user else ""
+        if bot_username:
+            cleaned_caption = re.sub(rf"@{re.escape(bot_username)}", "", cleaned_caption, flags=re.IGNORECASE)
+        for name in ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس"]:
+            cleaned_caption = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "", cleaned_caption, flags=re.IGNORECASE)
+        cleaned_caption = cleaned_caption.strip()
+
+        # If user asked a specific instruction/question about this file
+        if cleaned_caption and len(cleaned_caption) > 2:
+            agent_prompt = (
+                f"فایلی با نام «{f_name}» (فرمت: {parsed['file_type']}) توسط کاربر ارسال شده است.\n"
+                f"محتوای استخراج شده از فایل:\n"
+                f"\"\"\"\n{parsed['content']}\n\"\"\"\n\n"
+                f"دستور و خواسته کاربر درباره این فایل:\n{cleaned_caption}"
+            )
+            await _process_and_reply(update, context, agent_prompt)
+            return
+
+        # Otherwise deliver rich extracted summary with 1-tap VirusTotal scan button
+        size_kb = (doc.file_size or len(file_bytes)) / 1024
+        header = (
+            f"📄 <b>اطلاعات و محتوای فایل دریافت شده:</b>\n"
+            f"• نام فایل: <code>{html.escape(f_name)}</code>\n"
+            f"• نوع: <code>{html.escape(parsed['file_type'])}</code>\n"
+            f"• حجم: <code>{size_kb:.1f} KB</code>\n"
+        )
+        if parsed.get("page_count"):
+            header += f"• تعداد صفحات: <code>{parsed['page_count']}</code>\n"
+        if parsed.get("line_count"):
+            header += f"• تعداد خطوط: <code>{parsed['line_count']}</code>\n"
+
+        preview_text = parsed.get("preview") or parsed.get("content") or ""
+        if preview_text:
+            body = (
+                f"\n👁 <b>پیش‌نمایش محتوا:</b>\n"
+                f"<blockquote>{html.escape(preview_text[:1200])}</blockquote>\n"
+            )
+        else:
+            body = "\n⚠️ محتوای متنی قابل پیش‌نمایش در این فایل یافت نشد.\n"
+
+        footer = "\n💡 <i>می‌توانید روی این پیام ریپلای کنید و بپرسید: «این فایل رو خلاصه کن»، «به پایتون تبدیل کن»، «اشکالات کد رو بگو» و...</i>"
+
+        full_rep = header + body + footer
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛡️ اسکن امنیتی با VirusTotal", callback_data=f"vt_scan:{doc.file_id}")]
+        ])
+
+        chunks = split_message(full_rep, max_len=3900)
+        for i, ch in enumerate(chunks):
+            if i == len(chunks) - 1:
+                await msg.reply_text(ch, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            else:
+                await msg.reply_text(ch, parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        logger.error(f"Error handling document {doc.file_name}: {e}")
+        await msg.reply_text(f"❌ متأسفانه خطایی در پردازش فایل ارسالی رخ داد: {e}")
+    finally:
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
 
 
 # =========================================================================
@@ -3066,6 +3493,71 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except asyncio.CancelledError:
                 pass
 
+    # Fast-Path 7.85: VirusTotal Threat Scan Query (<500ms)
+    is_vt, vt_target = is_virustotal_request(cleaned_prompt)
+    if is_vt:
+        t0 = time.perf_counter()
+        if message.reply_to_message and message.reply_to_message.document:
+            r_doc = message.reply_to_message.document
+            status_m = await message.reply_text("🔍 در حال دریافت فایل و ارسال به VirusTotal...")
+            try:
+                tg_f = await r_doc.get_file()
+                b = await tg_f.download_as_bytearray()
+                vt_res = await upload_and_scan_file(bytes(b), r_doc.file_name or "file.bin")
+                record_chat_latency(chat.id, time.perf_counter() - t0, "اسکن فایل در VirusTotal")
+                rep = format_virustotal_report(vt_res)
+                await status_m.edit_text(rep, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                return
+            except Exception as e:
+                await status_m.edit_text(f"❌ خطا در اسکن فایل: {e}")
+                return
+
+        if not vt_target and message.reply_to_message:
+            r_txt = message.reply_to_message.text or message.reply_to_message.caption or ""
+            h_or_u = re.search(r"([a-fA-F0-9]{64}|[a-fA-F0-9]{32}|https?://\S+|[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/\S*)?)", r_txt)
+            if h_or_u:
+                vt_target = h_or_u.group(1)
+
+        if vt_target:
+            clean_tgt = vt_target.strip()
+            if re.match(r"^[a-fA-F0-9]{32}$|^[a-fA-F0-9]{40}$|^[a-fA-F0-9]{64}$", clean_tgt):
+                res = await scan_file_hash(clean_tgt)
+                record_chat_latency(chat.id, time.perf_counter() - t0, f"استعلام هش VirusTotal ({clean_tgt[:8]})")
+            else:
+                res = await scan_url_or_domain(clean_tgt)
+                record_chat_latency(chat.id, time.perf_counter() - t0, f"اسکن آدرس در VirusTotal ({clean_tgt[:20]})")
+            rep = format_virustotal_report(res)
+            await _deliver_reply(message, rep)
+            return
+
+    # Fast-Path 7.86: Direct File Generation Request (<100ms)
+    reply_text_for_file = (
+        (message.reply_to_message.text or message.reply_to_message.caption or "")
+        if message.reply_to_message else None
+    )
+    file_intent = detect_file_creation_intent(cleaned_prompt, reply_text=reply_text_for_file)
+    if file_intent:
+        fname, fcontent = file_intent
+        t0 = time.perf_counter()
+        try:
+            buf, final_name = create_document_file(fname, fcontent)
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, f"تولید فایل درخواستی ({final_name})")
+            size_kb = len(buf.getvalue()) / 1024
+            caption = (
+                f"📄 <b>فایل تولید شده توسط پرومته:</b> <code>{html.escape(final_name)}</code>\n"
+                f"💾 حجم: <code>{size_kb:.1f} KB</code>"
+            )
+            await message.reply_document(
+                document=buf,
+                filename=final_name,
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+            return
+        except Exception as e:
+            logger.error(f"Error in file creation fast-path: {e}")
+
     # Fast-Path 7.9: Twitter / X Explorer & Tweet Reader (<500ms)
     is_tw, tw_act, tw_target = parse_twitter_request(cleaned_prompt)
     if is_tw and tw_target:
@@ -3694,6 +4186,9 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["ping", "status"]), guard(ping_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["summarize", "recap", "summary", "kholase"]), guard(summarize_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["search", "find", "searchdb", "jostojoo"]), guard(search_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["file", "createfile", "makefile"]), guard(file_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["scan", "vt", "virustotal", "antivirus"]), guard(scan_command, is_cmd=True)))
+    app.add_handler(CallbackQueryHandler(virustotal_callback, pattern=r"^vt_scan:"))
 
 
     # Admin Governance & Moderation Commands (Personalized with p / p_ / pro / pro_ prefixes)
@@ -3725,6 +4220,9 @@ def build_application():
 
     # Multimodal photo handler
     app.add_handler(MessageHandler(filters.PHOTO, guard(photo_handler, is_cmd=False)))
+
+    # Incoming document / file handler (PDF, Word, Excel, CSV, Code, Text, Archives)
+    app.add_handler(MessageHandler(filters.Document.ALL, guard(document_handler, is_cmd=False)))
 
     # All text messages (with silence-by-default logic)
     app.add_handler(

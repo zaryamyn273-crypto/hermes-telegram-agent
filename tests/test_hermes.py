@@ -1823,6 +1823,164 @@ def test_personalized_bot_commands_and_collision_guard():
     assert is_dir is True
 
 
+def test_file_tool_extract_and_create():
+    """Tests file content extraction across formats and document generation."""
+    import io
+    import zipfile
+    from tools.file_tool import (
+        extract_file_content,
+        create_document_file,
+        detect_file_creation_intent,
+    )
+
+    # 1. Text extraction
+    txt_res = extract_file_content(b"First line\nSecond line\nThird line", "test.txt")
+    assert txt_res["success"] is True
+    assert txt_res["file_type"] == "TXT"
+    assert txt_res["line_count"] == 3
+    assert "First line" in txt_res["content"]
+
+    # 2. CSV extraction
+    csv_res = extract_file_content(b"name,age,role\nAlice,30,Engineer\nBob,25,Designer", "team.csv")
+    assert csv_res["success"] is True
+    assert csv_res["file_type"] == "CSV"
+    assert csv_res["line_count"] == 3
+    assert "Alice,30,Engineer" in csv_res["content"]
+
+    # 3. ZIP extraction
+    z_buf = io.BytesIO()
+    with zipfile.ZipFile(z_buf, "w") as z:
+        z.writestr("app.py", "print('hello world')")
+        z.writestr("README.md", "# Documentation")
+    zip_res = extract_file_content(z_buf.getvalue(), "archive.zip")
+    assert zip_res["success"] is True
+    assert zip_res["file_type"] == "ZIP"
+    assert "app.py" in zip_res["content"]
+    assert "README.md" in zip_res["content"]
+
+    # 4. Create Python script file
+    py_buf, py_fn = create_document_file("main.py", "import sys\nprint('Hello from Prometheus')")
+    assert py_fn == "main.py"
+    assert b"Hello from Prometheus" in py_buf.getvalue()
+
+    # 5. Create PDF document
+    pdf_buf, pdf_fn = create_document_file("report.pdf", "Prometheus Automated Security Report\nLine 2")
+    assert pdf_fn == "report.pdf"
+    assert pdf_buf.getvalue().startswith(b"%PDF")
+
+    # 6. Create DOCX document
+    docx_buf, docx_fn = create_document_file("notes.docx", "Title of Document\n\nContent paragraph 1\n\nContent paragraph 2")
+    assert docx_fn == "notes.docx"
+    assert len(docx_buf.getvalue()) > 500
+
+    # 7. Create XLSX document
+    xlsx_buf, xlsx_fn = create_document_file("data.xlsx", "Name | Score | Status\nAlice | 98 | Pass\nBob | 85 | Pass")
+    assert xlsx_fn == "data.xlsx"
+    assert len(xlsx_buf.getvalue()) > 500
+
+    # 8. File creation intent detection
+    fn, cnt = detect_file_creation_intent("/file bot.py print('ok')")
+    assert fn == "bot.py"
+    assert cnt == "print('ok')"
+
+    fn, cnt = detect_file_creation_intent("/pfile table.xlsx A | B\n1 | 2")
+    assert fn == "table.xlsx"
+    assert "A | B" in cnt
+
+    # Reply conversion intent
+    fn, cnt = detect_file_creation_intent("فایل پایتونش کن", reply_text="```python\nprint('from reply')\n```")
+    assert fn.endswith(".py")
+    assert cnt == "print('from reply')"
+
+
+def test_virustotal_threat_intelligence_scanner():
+    """Tests VirusTotal request detection, SHA-256 calculation, and report formatting."""
+    from tools.virustotal import (
+        is_virustotal_request,
+        compute_sha256,
+        format_virustotal_report,
+    )
+
+    # 1. Request detection
+    assert is_virustotal_request("/scan")[0] is True
+    assert is_virustotal_request("/pscan")[0] is True
+    assert is_virustotal_request("/vt")[0] is True
+    assert is_virustotal_request("/pvt")[0] is True
+    assert is_virustotal_request("/virustotal")[0] is True
+    assert is_virustotal_request("/antivirus")[0] is True
+    assert is_virustotal_request("/scan https://malware.test")[1] == "https://malware.test"
+
+    # Conversational scan requests
+    is_req, target = is_virustotal_request("این لینک رو توی ویروس توتال اسکن کن https://safe-site.com")
+    assert is_req is True
+    assert target == "https://safe-site.com"
+
+    is_req, _ = is_virustotal_request("آیا این سایت ویروسیه؟ http://example.org/test")
+    assert is_req is True
+
+    assert is_virustotal_request("سلام عزیزم")[0] is False
+    assert is_virustotal_request("قیمت دلار چنده")[0] is False
+
+    # 2. SHA-256 calculation
+    sha = compute_sha256(b"Prometheus AI")
+    assert len(sha) == 64
+    assert isinstance(sha, str)
+
+    # 3. Report formatting for clean file
+    clean_data = {
+        "found": True,
+        "is_safe": True,
+        "target": "safe_tool.exe",
+        "file_type": "Win32 EXE",
+        "file_size": 1048576,
+        "sha256": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+        "threat_class": "clean",
+        "stats": {"malicious": 0, "suspicious": 0, "harmless": 70, "undetected": 2},
+        "results": {"Microsoft": {"category": "harmless", "result": None}, "Kaspersky": {"category": "harmless", "result": None}},
+        "detections": [],
+        "permalink": "https://www.virustotal.com/gui/file/abcdef"
+    }
+    clean_rep = format_virustotal_report(clean_data)
+    assert "کاملاً پاک و بدون تهدید" in clean_rep
+    assert "safe_tool.exe" in clean_rep
+    assert "Kaspersky" in clean_rep
+
+    # 4. Report formatting for malicious file
+    mal_data = {
+        "found": True,
+        "is_safe": False,
+        "target": "trojan.bat",
+        "sha256": "1111222233334444555566667777888811112222333344445555666677778888",
+        "stats": {"malicious": 45, "suspicious": 3, "harmless": 20, "undetected": 2},
+        "results": {"Microsoft": {"category": "malicious", "result": "Trojan:BAT/Starter"}, "Kaspersky": {"category": "malicious", "result": "HEUR:Trojan.Script"}},
+        "detections": [{"engine": "Microsoft", "result": "Trojan:BAT/Starter"}],
+        "permalink": "https://www.virustotal.com/gui/file/1111"
+    }
+    mal_rep = format_virustotal_report(mal_data)
+    assert "بدافزار و خطرناک" in mal_rep
+    assert "45" in mal_rep
+    assert "Trojan:BAT/Starter" in mal_rep
+
+
+def test_command_registration_file_and_scan():
+    """Verifies that /file and /scan bases and prefixed aliases are properly registered."""
+    from main import PROMETHEUS_BASE_COMMANDS, make_bot_commands
+
+    for cmd in ["file", "createfile", "makefile", "scan", "vt", "virustotal", "antivirus"]:
+        assert cmd in PROMETHEUS_BASE_COMMANDS
+
+    file_cmds = set(make_bot_commands(["file"]))
+    assert "file" in file_cmds
+    assert "pfile" in file_cmds
+    assert "p_file" in file_cmds
+
+    scan_cmds = set(make_bot_commands(["scan"]))
+    assert "scan" in scan_cmds
+    assert "pscan" in scan_cmds
+    assert "p_scan" in scan_cmds
+
+
+
 
 
 

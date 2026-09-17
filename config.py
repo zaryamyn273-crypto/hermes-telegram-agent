@@ -28,6 +28,10 @@ try:
         HERMES_PUBLIC_URL: str = Field(default="", env="HERMES_PUBLIC_URL")
 
         TAVILY_API_KEYS: str = Field(default="", env="TAVILY_API_KEYS")
+        VIRUSTOTAL_API_KEY: str = Field(
+            default="8c715c84eef42a06fcc42d407e547c63cb77ababf962877bfcea30834d1ff084",
+            env="VIRUSTOTAL_API_KEY"
+        )
         CLOUDFLARE_ACCOUNT_ID: str = Field(default="", env="CLOUDFLARE_ACCOUNT_ID")
         CLOUDFLARE_API_TOKEN: str = Field(default="", env="CLOUDFLARE_API_TOKEN")
         CLOUDFLARE_D1_ID: str = Field(default="", env="CLOUDFLARE_D1_ID")
@@ -68,6 +72,10 @@ except ImportError:
         HERMES_PUBLIC_URL: str = os.getenv("HERMES_PUBLIC_URL", "")
 
         TAVILY_API_KEYS: str = os.getenv("TAVILY_API_KEYS", "")
+        VIRUSTOTAL_API_KEY: str = os.getenv(
+            "VIRUSTOTAL_API_KEY",
+            "8c715c84eef42a06fcc42d407e547c63cb77ababf962877bfcea30834d1ff084"
+        )
         CLOUDFLARE_ACCOUNT_ID: str = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
         CLOUDFLARE_API_TOKEN: str = os.getenv("CLOUDFLARE_API_TOKEN", "")
         CLOUDFLARE_D1_ID: str = os.getenv("CLOUDFLARE_D1_ID", "")
