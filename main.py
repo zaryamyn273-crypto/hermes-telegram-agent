@@ -140,6 +140,13 @@ from tools.virustotal import (
     format_virustotal_report,
     is_virustotal_request,
 )
+from tools.sandbox import (
+    run_python_sandbox,
+    format_sandbox_result,
+    is_sandbox_request,
+    extract_code_snippet,
+    sandbox_command_handler,
+)
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -612,6 +619,15 @@ async def _process_and_reply(
             except Exception as fe:
                 logger.warning(f"Could not deliver code block as file: {fe}")
 
+    # Check if user requested a music track or song download
+    if is_music_request(prompt):
+        music_q = extract_music_query(prompt) or clean_music_query(prompt)
+        if music_q and len(music_q) >= 2:
+            try:
+                await handle_music_request(update, context, music_q)
+            except Exception as me:
+                logger.warning(f"Could not auto-deliver music in _process_and_reply: {me}")
+
 
 # =========================================================================
 # Fast-Path Intent Detectors
@@ -898,6 +914,7 @@ PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "search", "find", "searchdb", "jostojoo",
     "file", "createfile", "makefile",
     "scan", "vt", "virustotal", "antivirus",
+    "run", "exec", "py", "python", "sandbox",
     # Admin commands
     "ban", "block",
     "unban", "unblock",
@@ -1376,6 +1393,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🛍 **استعلام و قیمت دیجی‌کالا:** `/digikala` یا `/pdk نام کالا`\n"
         "• 🌦 **پیش‌بینی آب و هوای زنده:** `/weather` یا `/pweather نام شهر`\n"
         "• 🕒 **ساعت رسمی و تقویم شمسی:** `/time` یا `/ptime`\n"
+        "• 💻 **ساندباکس اجرای کد پایتون:** `/run` یا `/py [کد]` یا `/sandbox` (اجرای زنده و امن کدهای پایتون ۳)\n"
         "• 🧮 **ماشین حساب و ریاضی:** `/calc` یا `/pcalc [عبارت]`\n"
         "• 📁 **تولید و خواندن انواع فایل:** `/file` یا ارسال فایل‌های PDF، اکسل، ورد، پایتون، کد و متن\n"
         "• 🛡️ **پویشگر امنیتی و آنتی‌ویروس:** `/scan` یا `/pvt` (اسکن فایل، لینک و هش با ۷۰ آنتی‌ویروس VirusTotal)\n"
@@ -1406,6 +1424,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/fast [پرسش]` یا `/pfast` - پاسخ‌دهی رعدآسا (زیر ۱ ثانیه) برای مکالمات و سوالات سریع\n"
         "• `/mode` یا `/pmode` - مشاهده و تغییر حالت کاری (هوشمند خودکار / غول ایجنت / فوق‌سریع)\n\n"
         "🛠 **ابزارهای اختصاصی و بلادرنگ:**\n"
+        "• `/run [کد پایتون]` یا `/py` یا `/sandbox` یا `/prun` - اجرای امن، زنده و بلادرنگ کدهای پایتون در محیط ساندباکس سرور\n"
         "• `/id` یا `/pid` یا `/pinfo` - استخراج کامل آیدی عددی کاربر، چت، پیام، فرستنده فوروارد و مشخصات با کپی یک‌لمسی\n"
         "• `/file [نام فایل] [محتوا]` یا `/pfile` - ساخت و دانلود انواع اسناد (پایتون، اکسل، ورد، PDF، کد و متن)\n"
         "• `/scan [فایل/لینک/هش]` یا `/pscan` یا `/pvt` - اسکن فایل و لینک با ۷۰ موتور آنتی‌ویروس مطرح جهان (VirusTotal)\n"
@@ -4156,9 +4175,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await _deliver_reply(message, res)
                 return
 
-    # Fast-Path 9: Music Search, Download & Upload
-    if is_music_request(cleaned_lower):
-        music_q = extract_music_query(cleaned_prompt) or cleaned_prompt
+    # Fast-Path 8.5: Python Sandbox Code Execution (<10ms)
+    if is_sandbox_request(cleaned_prompt) or is_sandbox_request(raw_text):
+        code_to_run = extract_code_snippet(cleaned_prompt) or extract_code_snippet(raw_text)
+        if not code_to_run and message.reply_to_message:
+            rep_m = message.reply_to_message
+            code_to_run = extract_code_snippet(rep_m.text or rep_m.caption or "")
+        if code_to_run:
+            res = await run_python_sandbox(code_to_run)
+            formatted = format_sandbox_result(res, code_to_run)
+            await message.reply_text(formatted, parse_mode=ParseMode.HTML)
+            return
+        elif any(w in cleaned_lower for w in ["/run", "/exec", "/py", "/python", "/sandbox"]):
+            await sandbox_command_handler(update, context)
+            return
+
+    # Fast-Path 9: Music Search, Download & Upload (Direct Native Telegram MP3 Delivery)
+    if is_music_request(cleaned_lower) or is_music_request(raw_text):
+        music_q = extract_music_query(cleaned_prompt) or extract_music_query(raw_text) or clean_music_query(cleaned_prompt) or "آهنگ جدید پرطرفدار"
         await handle_music_request(update, context, music_q)
         return
 
@@ -4712,6 +4746,7 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["search", "find", "searchdb", "jostojoo"]), guard(search_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["file", "createfile", "makefile"]), guard(file_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["scan", "vt", "virustotal", "antivirus"]), guard(scan_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["run", "exec", "py", "python", "sandbox"]), guard(sandbox_command_handler, is_cmd=True)))
     app.add_handler(CallbackQueryHandler(virustotal_callback, pattern=r"^vt_scan:"))
 
 

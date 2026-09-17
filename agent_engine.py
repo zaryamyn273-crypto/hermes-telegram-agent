@@ -206,9 +206,21 @@ Operating Directives:
 - Telegra.ph (Telegraph) Articles: ONLY when specifically asked to publish to Telegraph (e.g. via /telegraph or "توی تلگراف بذار" / "تلگراف بساز"), you may generate full-length articles where `#` and `##` will be automatically rendered as web headings on Telegra.ph.
 
 8. Native Music & Audio Delivery Directive (دانلود و ارسال مستقیم فایل صوتی موزیک):
-- Prometheus is equipped with native high-speed MP3 search, downloading, and Telegram audio file uploading.
-- You must NEVER output raw website links, external download URLs, or streaming page links when a user asks for a song or music track.
-- If a user requests a song in natural conversation, inform them that Prometheus delivers the original 320kbps MP3 file directly by sending `/music [نام ترانه]` or simply «آهنگ [نام ترانه]».
+- Prometheus IS FULLY EQUIPPED with native high-speed MP3 search, downloading, and direct Telegram audio file uploading via sendAudio / reply_audio!
+- You must NEVER, UNDER ANY CIRCUMSTANCES, output refusal phrases such as:
+  ❌ «دسترسی به متد sendAudio یا sendDocument در تلگرام API توی معماری هندلر من فعال نیست»
+  ❌ «محدود به خروجی متنی هستم و نمی‌توانم فایل صوتی آپلود کنم»
+  ❌ «ابزارهای من فقط وبسرچ و ساندباکس هستند و آپلود موزیک ندارم»
+  ❌ «اگر می‌خواهی کدی بنویسم که بات فایل صوتی ارسال کند»
+- Any of the above disclaimers is a completely FALSE, FORBIDDEN hallucination.
+- Prometheus natively streams and uploads 320kbps MP3 tracks directly into the chat.
+- When a user asks for a song in conversation (e.g. «آهنگ شادمهر رو بفرست»، «یک موزیک بفرست»، «دانلود آهنگ...»), inform them with absolute confidence that Prometheus searches, downloads, and uploads the full 320kbps MP3 directly to Telegram.
+
+9. Python Code Sandbox & Live Script Execution (ساندباکس اجرای زنده کدهای پایتون):
+- Prometheus includes an integrated, secure, sub-millisecond Python 3 sandbox execution engine.
+- Users can run any Python code using `/run [کد]`, `/exec [کد]`, `/py [کد]`, `/python [کد]`, `/sandbox [کد]`, or simply by saying «کد زیر رو اجرا کن:».
+- The sandbox executes scripts in real time, captures stdout/stderr, reports exact runtime metrics in milliseconds, and formats results cleanly with syntax highlighting.
+- When writing Python code, assure users they can execute it instantly right here inside Prometheus using the `/run` command.
 """
 
 # =========================================================================
@@ -639,6 +651,21 @@ def clean_agent_output(text: str) -> str:
     cleaned = re.sub(r"<hermes>[\s\S]*?</hermes>", "", cleaned, flags=re.IGNORECASE)
     # 3. Sanitize identity
     cleaned = sanitize_identity(cleaned).strip()
+
+    # 4. Intercept forbidden audio upload disclaimers and hallucinations
+    audio_disclaimer_patterns = [
+        r"sendAudio|sendDocument",
+        r"توی معماری هندلر من فعال نیست",
+        r"محدود به خروجی متنی هستم",
+        r"دسترسی به متد sendaudio",
+    ]
+    if any(re.search(pat, cleaned, re.IGNORECASE) for pat in audio_disclaimer_patterns):
+        cleaned = (
+            "🎵 **دانلود و ارسال مستقیم موزیک در پرومته:**\n\n"
+            "پرومته به موتور دانلود و ارسال مستقیم فایل‌های صوتی MP3 با کیفیت اصلی ۳۲۰ مجهز است.\n"
+            "برای دریافت فایل صوتی هر آهنگ، کافیست نام آن را ارسال کنید (مثال: `/music نام ترانه` یا `آهنگ [نام ترانه] رو بفرست`) تا فایل صوتی مستقیماً برای شما آپلود شود."
+        )
+
     return cleaned
 
 

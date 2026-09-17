@@ -439,9 +439,20 @@ def test_music_query_cleaner_and_intent():
     assert is_music_request("آموزش آهنگسازی با کیوبیس") is False
     assert is_music_request("بیوگرافی خواننده هایده") is False
 
+    assert is_music_request("میشه موزیک شادمهر رو بفرستی") is True
+    assert is_music_request("لطفا آهنگ شادمهر رو برام بفرستید") is True
+    assert is_music_request("میتونی این آهنگ رو آپلود کنی") is True
+    assert is_music_request("فایل صوتی آهنگ مرغ سحر شجریان رو بفرست") is True
+    assert is_music_request("موزیک شادمهر رو آپلود کن") is True
+    assert is_music_request("آهنگ شادمهر رو آپلود کن تلگرام") is True
+
     # Cleaner & extractor
     assert clean_music_query("دانلود آهنگ سوغاتی هایده رو برام بفرست 320") == "سوغاتی هایده"
     assert clean_music_query("/pmusic سوغاتی هایده") == "سوغاتی هایده"
+    assert clean_music_query("میشه موزیک شادمهر تماشا رو بفرستی") == "شادمهر تماشا"
+    assert clean_music_query("لطفا آهنگ شادمهر رو توی تلگرام برام آپلود کن") == "شادمهر"
+    assert clean_music_query("فایل صوتی آهنگ مرغ سحر شجریان رو بفرست") == "مرغ سحر شجریان"
+    assert clean_music_query("یک آهنگ از هایده بفرست") == "هایده"
     assert extract_music_query("آهنگ مرغ سحر از شجریان رو بذار") is not None
     assert extract_music_query("موزیک شادمهر تماشا") is not None
 
@@ -450,6 +461,42 @@ def test_music_query_cleaner_and_intent():
     assert u1 == "https://dl.example.com/music/Song%20Name.mp3"
     u2 = clean_url("https://dl.example.com/music/Song Name.mp3")
     assert u2 == "https://dl.example.com/music/Song%20Name.mp3"
+
+
+@pytest.mark.asyncio
+async def test_python_sandbox_tool():
+    from tools.sandbox import run_python_sandbox, format_sandbox_result, is_sandbox_request, extract_code_snippet
+
+    assert is_sandbox_request("/run print(1)") is True
+    assert is_sandbox_request("/prun x = 5") is True
+    assert is_sandbox_request("/py 2+2") is True
+    assert is_sandbox_request("/exec print('test')") is True
+    assert is_sandbox_request("کد پایتون زیر رو اجرا کن:\nprint(100)") is True
+    assert is_sandbox_request("سلام چطوری") is False
+
+    snippet = extract_code_snippet("/run print('hello')")
+    assert snippet == "print('hello')"
+
+    snippet2 = extract_code_snippet("کد زیر رو اجرا کن:\n```python\nprint(42)\n```")
+    assert snippet2 == "print(42)"
+
+    res = await run_python_sandbox("print(10 + 20)")
+    assert res["success"] is True
+    assert res["stdout"] == "30"
+    assert res["exit_code"] == 0
+
+    fmt = format_sandbox_result(res, "print(10 + 20)")
+    assert "ساندباکس" in fmt
+    assert "30" in fmt
+
+
+def test_anti_hallucination_audio_filter():
+    from agent_engine import clean_agent_output
+
+    sample_bad_output = "ابزارهایی که من بهشون دسترسی دارم وبسرچ هستن اما دسترسی به متد sendAudio یا sendDocument در تلگرام API ندارم."
+    cleaned = clean_agent_output(sample_bad_output)
+    assert "sendAudio" not in cleaned
+    assert "دانلود و ارسال مستقیم موزیک" in cleaned
 
 
 def test_should_use_hermes_agent():
