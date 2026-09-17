@@ -2446,6 +2446,447 @@ def test_summary_aliases_and_kholase():
     assert cnt3 == 100
 
 
+@pytest.mark.asyncio
+async def test_permissions_normalization_and_evaluation():
+    """Tests canonical alias resolution, permission evaluator, and grant/revoke mutators."""
+    from tools.permissions import (
+        normalize_tool_name,
+        has_tool_permission,
+        grant_user_tool,
+        revoke_user_tool,
+        get_user_granted_tools,
+        format_user_permissions_report,
+        format_all_permissions_report,
+    )
+    from config import settings
+
+    # 1. Alias normalization
+    assert normalize_tool_name("apt") == "apt"
+    assert normalize_tool_name("pkg") == "apt"
+    assert normalize_tool_name("dpkg") == "apt"
+    assert normalize_tool_name("پکیج") == "apt"
+    assert normalize_tool_name("sh") == "shell"
+    assert normalize_tool_name("bash") == "shell"
+    assert normalize_tool_name("ترمینال") == "shell"
+    assert normalize_tool_name("py") == "sandbox"
+    assert normalize_tool_name("e2b") == "sandbox"
+    assert normalize_tool_name("all") == "*"
+    assert normalize_tool_name("همه") == "*"
+
+    test_uid = 99887766
+    admin_uid = settings.ADMIN_ID
+
+    # 2. Initial state: Admin has access to all tools
+    assert has_tool_permission(admin_uid, "apt") is True
+    assert has_tool_permission(admin_uid, "shell") is True
+    assert has_tool_permission(admin_uid, "sandbox") is True
+
+    # 3. Regular user: Restricted tools denied, public tools allowed
+    assert has_tool_permission(test_uid, "apt") is False
+    assert has_tool_permission(test_uid, "shell") is False
+    assert has_tool_permission(test_uid, "music") is True
+    assert has_tool_permission(test_uid, "weather") is True
+
+    # 4. Grant apt to regular user
+    ok, norm = await grant_user_tool(test_uid, "pkg", granted_by=admin_uid)
+    assert ok is True
+    assert norm == "apt"
+    assert has_tool_permission(test_uid, "apt") is True
+    assert "apt" in get_user_granted_tools(test_uid)
+    assert has_tool_permission(test_uid, "shell") is False  # Shell still restricted
+
+    # 5. Report formatting
+    rep = format_user_permissions_report(test_uid, "testuser")
+    assert "مدیریت پکیج لینوکس" in rep
+    assert str(test_uid) in rep
+
+    # 6. Revoke apt
+    rev_ok, rev_norm = await revoke_user_tool(test_uid, "apt")
+    assert rev_ok is True
+    assert rev_norm == "apt"
+    assert has_tool_permission(test_uid, "apt") is False
+
+    # 7. Wildcard grant all tools
+    await grant_user_tool(test_uid, "*", granted_by=admin_uid)
+    assert has_tool_permission(test_uid, "apt") is True
+    assert has_tool_permission(test_uid, "shell") is True
+    assert has_tool_permission(test_uid, "sandbox") is True
+
+    # Audit report
+    audit_rep = format_all_permissions_report()
+    assert str(test_uid) in audit_rep
+
+    # Clean up
+    await revoke_user_tool(test_uid, "*")
+    assert has_tool_permission(test_uid, "apt") is False
+
+
+@pytest.mark.asyncio
+async def test_permissions_telegram_command_handlers():
+    """Tests Telegram admin commands for selective tool access."""
+    from unittest.mock import AsyncMock, MagicMock
+    from tools.permissions import (
+        grant_tool_command,
+        revoke_tool_command,
+        user_tools_command,
+        granted_tools_command,
+        has_tool_permission,
+        revoke_user_tool,
+    )
+    from config import settings
+
+    admin_user = MagicMock()
+    admin_user.id = settings.ADMIN_ID
+    admin_user.username = "admin"
+
+    reg_user = MagicMock()
+    reg_user.id = 55443322
+    reg_user.username = "ordinary_user"
+
+    target_uid = 55443322
+
+    # 1. Non-admin attempts to grant -> Denied
+    unauth_msg = MagicMock()
+    unauth_msg.reply_text = AsyncMock()
+    unauth_update = MagicMock()
+    unauth_update.effective_user = reg_user
+    unauth_update.effective_message = unauth_msg
+    unauth_ctx = MagicMock()
+    unauth_ctx.args = [str(target_uid), "apt"]
+
+    await grant_tool_command(unauth_update, unauth_ctx)
+    assert unauth_msg.reply_text.called
+    assert "ویژه ادمین" in unauth_msg.reply_text.call_args[0][0]
+
+    # 2. Admin grants tool via args: /grant_tool 55443322 apt
+    auth_msg = MagicMock()
+    auth_msg.reply_text = AsyncMock()
+    auth_msg.reply_to_message = None
+    auth_update = MagicMock()
+    auth_update.effective_user = admin_user
+    auth_update.effective_message = auth_msg
+    auth_ctx = MagicMock()
+    auth_ctx.args = [str(target_uid), "apt"]
+
+    await grant_tool_command(auth_update, auth_ctx)
+    assert auth_msg.reply_text.called
+    assert "با موفقیت آزادسازی شد" in auth_msg.reply_text.call_args[0][0]
+    assert has_tool_permission(target_uid, "apt") is True
+
+    # 3. User checks own tools via /user_tools
+    mytools_msg = MagicMock()
+    mytools_msg.reply_text = AsyncMock()
+    mytools_msg.reply_to_message = None
+    mytools_update = MagicMock()
+    mytools_update.effective_user = reg_user
+    mytools_update.effective_message = mytools_msg
+    mytools_ctx = MagicMock()
+    mytools_ctx.args = []
+
+    await user_tools_command(mytools_update, mytools_ctx)
+    assert mytools_msg.reply_text.called
+    assert "مدیریت پکیج لینوکس" in mytools_msg.reply_text.call_args[0][0]
+
+    # 4. Admin inspects all granted tools via /granted_tools
+    all_msg = MagicMock()
+    all_msg.reply_text = AsyncMock()
+    all_update = MagicMock()
+    all_update.effective_user = admin_user
+    all_update.effective_message = all_msg
+    all_ctx = MagicMock()
+
+    await granted_tools_command(all_update, all_ctx)
+    assert all_msg.reply_text.called
+    assert str(target_uid) in all_msg.reply_text.call_args[0][0]
+
+    # 5. Admin revokes tool by reply
+    reply_target_msg = MagicMock()
+    reply_target_msg.from_user = reg_user
+    revoke_msg = MagicMock()
+    revoke_msg.reply_to_message = reply_target_msg
+    revoke_msg.reply_text = AsyncMock()
+    revoke_update = MagicMock()
+    revoke_update.effective_user = admin_user
+    revoke_update.effective_message = revoke_msg
+    revoke_ctx = MagicMock()
+    revoke_ctx.args = ["apt"]
+
+    await revoke_tool_command(revoke_update, revoke_ctx)
+    assert revoke_msg.reply_text.called
+    assert "دسترسی ابزار لغو شد" in revoke_msg.reply_text.call_args[0][0]
+    assert has_tool_permission(target_uid, "apt") is False
+
+    # Cleanup
+    await revoke_user_tool(target_uid, "*")
+
+
+@pytest.mark.asyncio
+async def test_apt_tool_classification_and_execution():
+    """Tests classification, intent extraction, and live execution of APT commands."""
+    from tools.apt_tool import (
+        classify_apt_command,
+        is_apt_request,
+        extract_apt_command,
+        execute_apt_command,
+        format_apt_result,
+    )
+
+    # 1. Classification
+    is_safe1, sub1, desc1 = classify_apt_command("search python3")
+    assert is_safe1 is True
+    assert sub1 == "search"
+
+    is_safe2, sub2, desc2 = classify_apt_command("show curl")
+    assert is_safe2 is True
+    assert sub2 == "show"
+
+    is_safe3, sub3, desc3 = classify_apt_command("list --installed")
+    assert is_safe3 is True
+    assert sub3 == "list"
+
+    is_safe4, sub4, desc4 = classify_apt_command("install htop")
+    assert is_safe4 is False
+    assert sub4 == "install"
+
+    is_safe5, sub5, desc5 = classify_apt_command("remove nginx")
+    assert is_safe5 is False
+    assert sub5 == "remove"
+
+    is_safe6, sub6, desc6 = classify_apt_command("update")
+    assert is_safe6 is False
+    assert sub6 == "update"
+
+    is_safe7, sub7, desc7 = classify_apt_command("upgrade")
+    assert is_safe7 is False
+    assert sub7 == "upgrade"
+
+    # 2. Intent detection
+    assert is_apt_request("/apt search python3") is True
+    assert is_apt_request("/pkg install htop") is True
+    assert is_apt_request("/papt update") is True
+    assert is_apt_request("پکیج curl رو با apt نصب کن") is True
+    assert is_apt_request("سلام چطوری") is False
+
+    # 3. Argument extraction
+    assert extract_apt_command("/apt install htop") == "install htop"
+    assert extract_apt_command("/pkg update") == "update"
+    assert extract_apt_command("پکیج git رو با apt نصب کن") == "install git"
+    assert extract_apt_command("پکیج nginx رو با apt حذف کن") == "remove nginx"
+
+    # 4. Live execution: check apt version on the local machine
+    res = await execute_apt_command("--version")
+    assert res["success"] is True
+    assert res["exit_code"] == 0
+    assert "apt" in res["stdout"].lower()
+
+    # Format result
+    formatted = format_apt_result(res, "--version")
+    assert "📦" in formatted
+    assert "موفقیت‌آمیز" in formatted
+    assert "apt --version" in formatted
+
+
+@pytest.mark.asyncio
+async def test_apt_command_handler_and_confirmation():
+    """Tests Telegram handler for APT, permission rejection, and admin confirmation flow."""
+    from unittest.mock import AsyncMock, MagicMock
+    from tools.apt_tool import (
+        apt_command_handler,
+        apt_callback_handler,
+        _PENDING_APT_COMMANDS,
+    )
+    from tools.permissions import grant_user_tool, revoke_user_tool
+    from config import settings
+
+    admin_user = MagicMock()
+    admin_user.id = settings.ADMIN_ID
+
+    reg_user = MagicMock()
+    reg_user.id = 77665544  # Regular user
+
+    # 1. Regular unpermitted user tries to run /apt -> Access Denied
+    reg_msg = MagicMock()
+    reg_msg.text = "/apt search python3"
+    reg_msg.caption = None
+    reg_msg.reply_to_message = None
+    reg_msg.reply_text = AsyncMock()
+
+    reg_update = MagicMock()
+    reg_update.effective_user = reg_user
+    reg_update.effective_message = reg_msg
+    reg_update.effective_chat.id = 77665544
+
+    reg_ctx = MagicMock()
+    reg_ctx.args = ["search", "python3"]
+
+    await apt_command_handler(reg_update, reg_ctx)
+    assert reg_msg.reply_text.called
+    assert "دسترسی غیرمجاز" in reg_msg.reply_text.call_args[0][0]
+    assert "/grant_tool" in reg_msg.reply_text.call_args[0][0]
+
+    # 2. Admin runs safe command: /apt --version -> Executes immediately
+    admin_msg = MagicMock()
+    admin_msg.text = "/apt --version"
+    admin_msg.caption = None
+    admin_msg.reply_to_message = None
+    admin_msg.reply_text = AsyncMock()
+
+    admin_update = MagicMock()
+    admin_update.effective_user = admin_user
+    admin_update.effective_message = admin_msg
+    admin_update.effective_chat.id = settings.ADMIN_ID
+
+    admin_ctx = MagicMock()
+    admin_ctx.args = ["--version"]
+
+    await apt_command_handler(admin_update, admin_ctx)
+    assert admin_msg.reply_text.called
+    assert "موفقیت‌آمیز" in admin_msg.reply_text.call_args[0][0]
+
+    # 3. Admin runs modifying command: /apt install htop -> Prompts confirmation
+    install_msg = MagicMock()
+    install_msg.text = "/apt install htop"
+    install_msg.caption = None
+    install_msg.reply_to_message = None
+    install_msg.reply_text = AsyncMock()
+
+    install_update = MagicMock()
+    install_update.effective_user = admin_user
+    install_update.effective_message = install_msg
+    install_update.effective_chat.id = settings.ADMIN_ID
+
+    install_ctx = MagicMock()
+    install_ctx.args = ["install", "htop"]
+
+    await apt_command_handler(install_update, install_ctx)
+    assert install_msg.reply_text.called
+    prompt_text = install_msg.reply_text.call_args[0][0]
+    assert "هشدار امنیتی: تایید اجرای دستور مدیریت پکیج" in prompt_text
+    kb = install_msg.reply_text.call_args[1].get("reply_markup")
+    assert kb is not None
+    buttons = kb.inline_keyboard[0]
+    assert "apt_exec:" in buttons[0].callback_data
+    assert "apt_cancel:" in buttons[1].callback_data
+    token = buttons[0].callback_data.split(":")[1]
+    assert token in _PENDING_APT_COMMANDS
+
+    # 4. Unauthorized user clicks confirmation -> Refused
+    unauth_query = MagicMock()
+    unauth_query.data = f"apt_exec:{token}"
+    unauth_query.from_user = reg_user
+    unauth_query.answer = AsyncMock()
+    unauth_cb_update = MagicMock()
+    unauth_cb_update.callback_query = unauth_query
+
+    await apt_callback_handler(unauth_cb_update, reg_ctx)
+    assert unauth_query.answer.called
+    assert "مجوز اجرای دستورات APT را ندارید" in unauth_query.answer.call_args[0][0]
+
+    # 5. Admin clicks cancel -> Command canceled
+    cancel_query = MagicMock()
+    cancel_query.data = f"apt_cancel:{token}"
+    cancel_query.from_user = admin_user
+    cancel_query.answer = AsyncMock()
+    cancel_query.edit_message_text = AsyncMock()
+    cancel_cb_update = MagicMock()
+    cancel_cb_update.callback_query = cancel_query
+
+    await apt_callback_handler(cancel_cb_update, admin_ctx)
+    assert cancel_query.answer.called
+    assert cancel_query.edit_message_text.called
+    assert "لغو شد" in cancel_query.edit_message_text.call_args[0][0]
+    assert token not in _PENDING_APT_COMMANDS
+
+    # 6. Granular permissions test: grant apt to regular user
+    await grant_user_tool(reg_user.id, "apt", granted_by=admin_user.id)
+    reg_granted_msg = MagicMock()
+    reg_granted_msg.text = "/apt --version"
+    reg_granted_msg.caption = None
+    reg_granted_msg.reply_to_message = None
+    reg_granted_msg.reply_text = AsyncMock()
+
+    reg_granted_update = MagicMock()
+    reg_granted_update.effective_user = reg_user
+    reg_granted_update.effective_message = reg_granted_msg
+    reg_granted_update.effective_chat.id = reg_user.id
+
+    await apt_command_handler(reg_granted_update, admin_ctx)
+    assert reg_granted_msg.reply_text.called
+    assert "موفقیت‌آمیز" in reg_granted_msg.reply_text.call_args[0][0]
+
+    # Cleanup
+    await revoke_user_tool(reg_user.id, "*")
+
+
+@pytest.mark.asyncio
+async def test_shell_selective_grant_workflow():
+    """Tests that granting 'shell' allows regular user to execute shell commands with confirmation."""
+    from unittest.mock import AsyncMock, MagicMock
+    from tools.shell_tool import (
+        shell_command_handler,
+        shell_callback_handler,
+        _PENDING_SHELL_COMMANDS,
+    )
+    from tools.permissions import grant_user_tool, revoke_user_tool
+    from config import settings
+
+    test_uid = 44556677
+    user = MagicMock()
+    user.id = test_uid
+
+    msg = MagicMock()
+    msg.text = "/sh rm -rf /tmp/my_test_dir"
+    msg.caption = None
+    msg.reply_to_message = None
+    msg.reply_text = AsyncMock()
+
+    update = MagicMock()
+    update.effective_user = user
+    update.effective_message = msg
+    update.effective_chat.id = test_uid
+
+    ctx = MagicMock()
+    ctx.args = ["rm", "-rf", "/tmp/my_test_dir"]
+
+    # 1. Before grant: Denied
+    await shell_command_handler(update, ctx)
+    assert msg.reply_text.called
+    assert "دسترسی غیرمجاز" in msg.reply_text.call_args[0][0]
+
+    # 2. Grant shell to user
+    await grant_user_tool(test_uid, "shell", granted_by=settings.ADMIN_ID)
+
+    # 3. After grant: User gets confirmation prompt
+    msg.reply_text.reset_mock()
+    await shell_command_handler(update, ctx)
+    assert msg.reply_text.called
+    prompt_text = msg.reply_text.call_args[0][0]
+    assert "هشدار امنیتی: تایید اجرای دستور حساس ترمینال" in prompt_text
+    assert "کاربر مجاز" in prompt_text
+    kb = msg.reply_text.call_args[1].get("reply_markup")
+    assert kb is not None
+    token = kb.inline_keyboard[0][0].callback_data.split(":")[1]
+
+    # 4. User can cancel
+    cancel_query = MagicMock()
+    cancel_query.data = f"sh_cancel:{token}"
+    cancel_query.from_user = user
+    cancel_query.answer = AsyncMock()
+    cancel_query.edit_message_text = AsyncMock()
+    cb_cancel_update = MagicMock()
+    cb_cancel_update.callback_query = cancel_query
+
+    await shell_callback_handler(cb_cancel_update, ctx)
+    assert cancel_query.answer.called
+    assert cancel_query.edit_message_text.called
+    assert "لغو شد" in cancel_query.edit_message_text.call_args[0][0]
+
+    # Cleanup
+    await revoke_user_tool(test_uid, "*")
+
+
+
+
 
 
 

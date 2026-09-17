@@ -155,6 +155,20 @@ from tools.shell_tool import (
     is_shell_request,
     extract_shell_command,
 )
+from tools.permissions import (
+    init_permissions_engine,
+    has_tool_permission,
+    grant_tool_command,
+    revoke_tool_command,
+    user_tools_command,
+    granted_tools_command,
+)
+from tools.apt_tool import (
+    apt_command_handler,
+    apt_callback_handler,
+    is_apt_request,
+    extract_apt_command,
+)
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -924,6 +938,11 @@ PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "scan", "vt", "virustotal", "antivirus",
     "run", "exec", "py", "python", "sandbox", "e2b",
     "sh", "shell", "bash", "terminal", "cmd",
+    "apt", "pkg", "dpkg", "package",
+    "granttool", "grant_tool", "grant",
+    "revoketool", "revoke_tool", "revoke",
+    "usertools", "user_tools", "mytools", "my_tools",
+    "grantedtools", "granted_tools", "toolsaccess", "tools_access",
     # Admin commands
     "ban", "block",
     "unban", "unblock",
@@ -1434,6 +1453,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/mode` یا `/pmode` - مشاهده و تغییر حالت کاری (هوشمند خودکار / غول ایجنت / فوق‌سریع)\n\n"
         "🛠 **ابزارهای اختصاصی و بلادرنگ:**\n"
         "• `/run [کد پایتون]` یا `/py` یا `/sandbox` یا `/prun` - اجرای امن، زنده و بلادرنگ کدهای پایتون در محیط ساندباکس سرور\n"
+        "• `/sh [دستور]` یا `/psh` یا `/terminal` - شل و ترمینال سرور (دستورات بی‌خطر عمومی، دستورات حساس نیازمند تایید)\n"
+        "• `/apt [دستور]` یا `/papt` یا `/pkg` - مدیریت پکیج‌های لینوکس سرور (جستجو، نصب و به‌روزرسانی بسته‌های دبیان)\n"
+        "• `/usertools` یا `/pusertools` - مشاهده ابزارهای اختصاصی آزادسازی‌شده برای شما\n"
         "• `/id` یا `/pid` یا `/pinfo` - استخراج کامل آیدی عددی کاربر، چت، پیام، فرستنده فوروارد و مشخصات با کپی یک‌لمسی\n"
         "• `/file [نام فایل] [محتوا]` یا `/pfile` - ساخت و دانلود انواع اسناد (پایتون، اکسل، ورد، PDF، کد و متن)\n"
         "• `/scan [فایل/لینک/هش]` یا `/pscan` یا `/pvt` - اسکن فایل و لینک با ۷۰ موتور آنتی‌ویروس مطرح جهان (VirusTotal)\n"
@@ -1479,7 +1501,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/set [کلید] [مقدار]` یا `/pset` - ثبت دائم دستور و تنظیمات در دیتابیس\n"
             "• `/get [کلید]` یا `/pget` - خواندن تنظیمات از دیتابیس\n"
             "• `/adminsettings` یا `/padminsettings` - مشاهده تمامی تنظیمات ذخیره‌شده\n"
-            "• `/adminlogs` یا `/padminlogs` - تاریخچه و لاگ دائم تمامی دستورات ادمین‌ها"
+            "• `/adminlogs` یا `/padminlogs` - تاریخچه و لاگ دائم تمامی دستورات ادمین‌ها\n"
+            "• `/grant_tool [کاربر/ریپلای] [ابزار]` - اعطای دسترسی گزینشی به ابزارهای حساس (apt, shell, sandbox, ...)\n"
+            "• `/revoke_tool [کاربر/ریپلای] [ابزار]` - سلب دسترسی گزینشی ابزارها از کاربر\n"
+            "• `/granted_tools` - مشاهده فهرست و گزارش کاربران مجاز به ابزارهای گزینشی"
         )
 
     formatted = markdown_to_telegram_html(text)
@@ -4214,6 +4239,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await shell_command_handler(update, context)
         return
 
+    # Fast-Path 8.7: APT Package Manager (Debian Linux Packages)
+    if is_apt_request(cleaned_prompt) or is_apt_request(raw_text):
+        await apt_command_handler(update, context)
+        return
+
     # Fast-Path 9: Music Search, Download & Upload (Direct Native Telegram MP3 Delivery)
     if is_music_request(cleaned_lower) or is_music_request(raw_text):
         music_q = extract_music_query(cleaned_prompt) or extract_music_query(raw_text) or clean_music_query(cleaned_prompt) or "آهنگ جدید پرطرفدار"
@@ -4722,6 +4752,8 @@ def build_application():
     async def post_init(application: Application):
         await init_moderation_engine()
         logger.info("Prometheus moderation engine loaded in post_init.")
+        await init_permissions_engine()
+        logger.info("Prometheus granular permissions engine loaded in post_init.")
         start_financial_cache_worker()
         logger.info("Prometheus real-time financial cache worker started in post_init.")
 
@@ -4773,7 +4805,15 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["run", "exec", "py", "python", "sandbox", "e2b"]), guard(sandbox_command_handler, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["sh", "shell", "bash", "terminal", "cmd"]), guard(shell_command_handler, is_cmd=True)))
     app.add_handler(CallbackQueryHandler(shell_callback_handler, pattern=r"^sh_(exec|cancel):"))
+    app.add_handler(CommandHandler(make_bot_commands(["apt", "pkg", "dpkg", "package"]), guard(apt_command_handler, is_cmd=True)))
+    app.add_handler(CallbackQueryHandler(apt_callback_handler, pattern=r"^apt_(exec|cancel):"))
     app.add_handler(CallbackQueryHandler(virustotal_callback, pattern=r"^vt_scan:"))
+
+    # Granular Permissions Governance (Personalized with p / p_ / pro / pro_ prefixes)
+    app.add_handler(CommandHandler(make_bot_commands(["granttool", "grant_tool", "grant"]), guard(grant_tool_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["revoketool", "revoke_tool", "revoke"]), guard(revoke_tool_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["usertools", "user_tools", "mytools", "my_tools"]), guard(user_tools_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["grantedtools", "granted_tools", "toolsaccess", "tools_access"]), guard(granted_tools_command, is_admin_cmd=True, is_cmd=True)))
 
 
     # Admin Governance & Moderation Commands (Personalized with p / p_ / pro / pro_ prefixes)

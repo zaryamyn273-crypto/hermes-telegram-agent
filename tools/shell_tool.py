@@ -25,6 +25,7 @@ from telegram.ext import ContextTypes
 
 from config import is_admin
 from tools.sandbox import _get_sanitized_env
+from tools.permissions import has_tool_permission
 
 logger = logging.getLogger("HermesTelegramAgent.Shell")
 
@@ -392,15 +393,17 @@ async def shell_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     user = update.effective_user
     user_id = user.id if user else 0
     is_adm = is_admin(user_id)
+    is_permitted = is_adm or has_tool_permission(user_id, "shell")
 
     is_safe, risk = classify_shell_command(cmd)
 
-    # Policy 1: Ordinary user requesting a non-safe command -> Refuse
-    if not is_adm and not is_safe:
+    # Policy 1: Non-permitted user requesting a non-safe command -> Refuse
+    if not is_permitted and not is_safe:
         err_text = (
             f"⛔️ <b>دسترسی غیرمجاز به دستور ترمینال:</b>\n\n"
-            f"اجرای دستور «<code>{html.escape(cmd)}</code>» به دلیل حساسیت بالا (<code>{risk}</code>) تنها برای ادمین ربات مجاز است.\n\n"
-            f"💡 <i>کاربران عادی تنها به دستورات مشاهده‌ای و تشخیصی بی‌خطر (مانند <code>ls</code>, <code>uptime</code>, <code>uname</code>, <code>cat</code>, <code>df</code>, <code>free</code>, <code>whoami</code>) دسترسی دارند.</i>"
+            f"اجرای دستور «<code>{html.escape(cmd)}</code>» به دلیل حساسیت بالا (<code>{risk}</code>) تنها برای ادمین یا کاربران مجاز است.\n\n"
+            f"💡 <i>کاربران عادی تنها به دستورات مشاهده‌ای و تشخیصی بی‌خطر (مانند <code>ls</code>, <code>uptime</code>, <code>uname</code>, <code>cat</code>, <code>df</code>, <code>free</code>, <code>whoami</code>) دسترسی دارند.</i>\n\n"
+            f"▫️ <i>ادمین ربات می‌تواند با دستور <code>/grant_tool {user_id} shell</code> این ابزار را برای شما آزاد کند.</i>"
         )
         await msg.reply_text(err_text, parse_mode=ParseMode.HTML)
         return
@@ -412,7 +415,7 @@ async def shell_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
         return
 
-    # Policy 3: Admin requesting a dangerous command -> Prompt for explicit confirmation
+    # Policy 3: Permitted user/admin requesting a dangerous command -> Prompt for explicit confirmation
     _clean_expired_pending_commands()
     token = secrets.token_hex(6)
     _PENDING_SHELL_COMMANDS[token] = {
@@ -430,11 +433,12 @@ async def shell_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         ]
     ])
 
+    user_title = "👑 ادمین" if is_adm else "👤 کاربر مجاز"
     confirm_text = (
         f"⚠️ <b>هشدار امنیتی: تایید اجرای دستور حساس ترمینال</b>\n\n"
         f"• <b>دستور درخواستی:</b> <code>{html.escape(cmd)}</code>\n"
         f"• <b>دسته ریسک:</b> ⚠️ <code>{risk}</code>\n"
-        f"• <b>درخواست‌کننده:</b> ادمین (<code>{user_id}</code>)\n\n"
+        f"• <b>درخواست‌کننده:</b> {user_title} (<code>{user_id}</code>)\n\n"
         f"<i>این دستور دارای پتانسیل تغییر در فایل‌ها، پروسه‌ها یا سرور است. آیا از اجرای مستقیم آن اطمینان کامل دارید؟</i>\n\n"
         f"⏱ <i>مهلت تایید این درخواست ۲ دقیقه می‌باشد.</i>"
     )
@@ -442,7 +446,7 @@ async def shell_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def shell_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles confirmation callbacks for dangerous admin shell commands."""
+    """Handles confirmation callbacks for dangerous shell commands."""
     query = update.callback_query
     if not query:
         return
@@ -452,8 +456,8 @@ async def shell_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     user_id = query.from_user.id if query.from_user else 0
-    if not is_admin(user_id):
-        await query.answer("⛔️ این تاییدیه صرفاً توسط ادمین ربات مجاز است.", show_alert=True)
+    if not (is_admin(user_id) or has_tool_permission(user_id, "shell")):
+        await query.answer("⛔️ این تاییدیه صرفاً توسط ادمین یا کاربران مجاز امکان‌پذیر است.", show_alert=True)
         return
 
     parts = data.split(":", 1)
