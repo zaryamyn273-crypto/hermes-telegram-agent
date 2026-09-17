@@ -1040,7 +1040,8 @@ async def test_delete_message_flow():
     user_msg = MagicMock()
     user_msg.text = "حذف"
     user_msg.caption = None
-    user_msg.from_user.id = 99999
+    user_msg.from_user.id = settings.ADMIN_ID
+    user_msg.from_user.username = "admin_user"
     user_msg.from_user.is_bot = False
     user_msg.reply_to_message = replied_msg
     user_msg.delete = AsyncMock()
@@ -1048,9 +1049,9 @@ async def test_delete_message_flow():
 
     from tools.moderation import approve_group
 
-    # 1. Test in Private Chat
+    # 1. Test in Private Chat (Admin allowed)
     chat_private = MagicMock()
-    chat_private.id = 99999
+    chat_private.id = settings.ADMIN_ID
     chat_private.type = ChatType.PRIVATE
     chat_private.send_action = AsyncMock()
 
@@ -1130,5 +1131,55 @@ async def test_agent_engine_injects_admin_directives():
 
     # Clean up
     await delete_admin_setting("bot_signature", admin_id=admin_id)
+
+
+@pytest.mark.asyncio
+async def test_private_chat_restricted_to_admin():
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram.constants import ChatType
+    from main import _check_moderation_guard
+
+    context_mock = MagicMock()
+    context_mock.bot.id = 123456
+
+    # 1. Non-admin in private chat (PV) must be blocked
+    non_admin_msg = MagicMock()
+    non_admin_msg.text = "سلام پرومته"
+    non_admin_msg.caption = None
+    non_admin_msg.from_user.id = 55555
+    non_admin_msg.from_user.username = "regular_user"
+    non_admin_msg.from_user.is_bot = False
+    non_admin_msg.reply_text = AsyncMock()
+
+    chat_pv = MagicMock()
+    chat_pv.id = 55555
+    chat_pv.type = ChatType.PRIVATE
+
+    update_mock = MagicMock()
+    update_mock.effective_message = non_admin_msg
+    update_mock.effective_user = non_admin_msg.from_user
+    update_mock.effective_chat = chat_pv
+
+    allowed = await _check_moderation_guard(update_mock, context_mock)
+    assert allowed is False
+    non_admin_msg.reply_text.assert_awaited_once()
+    reply_args = non_admin_msg.reply_text.call_args[0][0]
+    assert "دسترسی به گفتگوی خصوصی محدود است" in reply_args
+
+    # 2. Admin in private chat (PV) must be allowed
+    admin_msg = MagicMock()
+    admin_msg.text = "سلام پرومته"
+    admin_msg.caption = None
+    admin_msg.from_user.id = settings.ADMIN_ID
+    admin_msg.from_user.username = "admin_user"
+    admin_msg.from_user.is_bot = False
+
+    update_admin = MagicMock()
+    update_admin.effective_message = admin_msg
+    update_admin.effective_user = admin_msg.from_user
+    update_admin.effective_chat = chat_pv
+
+    admin_allowed = await _check_moderation_guard(update_admin, context_mock)
+    assert admin_allowed is True
 
 

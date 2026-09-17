@@ -293,9 +293,13 @@ async def test_gatekeeper_guard():
     up_muted = make_mock_update(muted_uid, "muted_guy", chat_id=123)
     assert await _check_moderation_guard(up_muted, context) is False
 
-    # 3. Good user in private chat is allowed
+    # 3. Good non-admin user in private chat (PV) is blocked (PV restricted to admin)
     up_good = make_mock_update(good_uid, "good_guy", chat_id=456)
-    assert await _check_moderation_guard(up_good, context) is True
+    assert await _check_moderation_guard(up_good, context) is False
+
+    # Admin in private chat (PV) is allowed
+    up_admin_pv = make_mock_update(admin_uid, "admin_user", chat_id=456)
+    assert await _check_moderation_guard(up_admin_pv, context) is True
 
     # 4. Good user in unapproved group is blocked
     unapproved_group_id = -10044332211

@@ -130,12 +130,17 @@ def check_rate_limit(user_id: int) -> bool:
 # Moderation Gatekeeper & Group Workflow Helpers
 # =========================================================================
 
+# In-memory cooldown cache for PV restriction notices: uid -> float timestamp
+_PV_RESTRICT_WARN_CACHE: Dict[int, float] = {}
+
+
 async def _check_moderation_guard(update: Update, context: ContextTypes.DEFAULT_TYPE, is_admin_cmd: bool = False) -> bool:
     """
     Global Security & Moderation Gatekeeper:
     1. Banned Users: completely blocked and ignored.
     2. Muted Users: ignored until mute period expires.
-    3. Groups:
+    3. Private Chats (PV): Strictly restricted to bot admins only. Non-admins receive an informative restricted notice.
+    4. Groups:
        - If banned: bot is completely silent.
        - If muted: bot is silent.
        - If unapproved: bot remains inactive; if new, notifies admins with inline approval buttons.
@@ -159,7 +164,29 @@ async def _check_moderation_guard(update: Update, context: ContextTypes.DEFAULT_
         logger.info(f"Gatekeeper: blocked muted user {uid} (@{uname}), remaining: {remaining:.1f}s")
         return False
 
-    # 3. Group Chat Moderation
+    # 3. Private Chat (PV / Direct Message) Restriction:
+    # Strictly restricted: nobody except authorized bot administrators can message the bot in private.
+    if chat.type == ChatType.PRIVATE:
+        if not is_admin(uid):
+            logger.info(f"Gatekeeper: blocked non-admin user {uid} (@{uname}) in private chat (PV).")
+            now = time.monotonic()
+            if now - _PV_RESTRICT_WARN_CACHE.get(uid, 0.0) >= 10.0:
+                _PV_RESTRICT_WARN_CACHE[uid] = now
+                msg = update.effective_message
+                if msg:
+                    try:
+                        await msg.reply_text(
+                            "⛔️ <b>دسترسی به گفتگوی خصوصی محدود است.</b>\n\n"
+                            "ارسال پیام در پیوی (گفتگوی خصوصی) با پرومته، صرفاً برای <b>مدیر (ادمین) ربات</b> مجاز می‌باشد.\n"
+                            "جهت استفاده از خدمات پرومته، می‌توانید ربات را به گروه‌های مجاز اضافه فرمایید.",
+                            parse_mode=ParseMode.HTML
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to send PV restriction notice: {e}")
+            return False
+        return True
+
+    # 4. Group Chat Moderation
     if chat.type != ChatType.PRIVATE:
         # Group ban check
         if is_group_banned(chat.id):
