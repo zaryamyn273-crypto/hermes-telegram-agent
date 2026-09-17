@@ -306,8 +306,30 @@ def test_math_fast_path_intents():
 
 def test_digikala_ecommerce_tool():
     assert clean_digikala_query("قیمت خرید گوشی آیفون 16 از دیجیکالا رو چک کن") == "گوشی آیفون 16"
+    assert clean_digikala_query("دیجیکالا سرچ کن گوشی سامسونگ") == "گوشی سامسونگ"
+    assert clean_digikala_query("توی دیجیکالا سرچ کن لپ تاپ ایسوس") == "لپ تاپ ایسوس"
+    assert clean_digikala_query("سرچ دیجیکالا کفش نایک") == "کفش نایک"
+    assert clean_digikala_query("دیجی‌کالا: آیفون 16 پرومکس") == "آیفون 16 پرومکس"
+
     assert extract_digikala_query("قیمت آیفون 16 در دیجیکالا") == "آیفون 16"
+    assert extract_digikala_query("قیمت آیفون 16 در دیجی‌کالا") == "آیفون 16"
     assert extract_digikala_query("دیجیکالا لپ تاپ ایسوس") == "لپ تاپ ایسوس"
+    assert extract_digikala_query("دیجیکالا سرچ کن گوشی سامسونگ") == "گوشی سامسونگ"
+    assert extract_digikala_query("توی دیجیکالا سرچ کن لپ تاپ ایسوس") == "لپ تاپ ایسوس"
+    assert extract_digikala_query("سرچ دیجیکالا کفش نایک") == "کفش نایک"
+    assert extract_digikala_query("از دیجیکالا کفش نایک رو بیار") == "کفش نایک"
+
+    # Corporate / informational questions must NOT trigger product search
+    assert extract_digikala_query("مدیرعامل دیجیکالا کیه؟") is None
+    assert extract_digikala_query("سهام دیجیکالا مال کیست") is None
+    assert extract_digikala_query("سلام چطوری") is None
+
+    # Chat-history search must NOT hijack Digikala search
+    from tools.search_tool import parse_search_request
+    is_chat_search, _ = parse_search_request("سرچ دیجیکالا کفش نایک")
+    assert is_chat_search is False
+    is_chat_search2, _ = parse_search_request("جستجو در دیجی کالا برای لپ تاپ")
+    assert is_chat_search2 is False
 
 
 def test_web_reader_and_provider_error_detection():

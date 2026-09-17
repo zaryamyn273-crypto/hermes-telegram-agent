@@ -21,9 +21,13 @@ def parse_search_request(text: str) -> Tuple[bool, str]:
     Returns (is_search, search_query).
     """
     if not text:
-        return False, 0
+        return False, ""
 
     t = text.strip()
+
+    # Digikala, Google, or general web searches must NOT be hijacked by internal chat history search
+    if re.search(r"(?:دیجی[\s\u200c]*کالا|دیجیکالا|digikala|گوگل|google|اینترنت|وب\b)", t, re.IGNORECASE):
+        return False, ""
 
     # 1. Specific Persian natural search patterns
     patterns = [

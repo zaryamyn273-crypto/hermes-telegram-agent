@@ -94,7 +94,7 @@ from tools.system import (
     run_live_speed_test,
 )
 from tools.weather import get_weather
-from tools.ecommerce import search_digikala
+from tools.ecommerce import search_digikala, clean_digikala_query
 from tools.web_reader import fetch_webpage_text
 from tools.telegraph import create_telegraph_article, extract_telegraph_args
 from tools.music import handle_music_request, is_music_request, extract_music_query
@@ -582,7 +582,7 @@ _FIAT_INTENT_PATTERN = re.compile(
 )
 
 _FIAT_EXCLUDED_TOPICS_PATTERN = re.compile(
-    r"(?<!\w)(?:اینترنت|هند|هندوستان|سیمکارت|شارژ|بسته|لپ\s*تاپ|لپتاپ|موبایل|گوشی|بلیت|بلیط|هواپیما|هتل|تور|ماشین|خودرو|پایتون|برنامه|کد|سهام|بورس|ارزان|ارزون|ارزش\s*افزوده|ارزش\s*غذایی|انسان|آژانس|آرزو)(?!\w)",
+    r"(?<!\w)(?:اینترنت|هند|هندوستان|سیمکارت|شارژ|بسته|لپ\s*تاپ|لپتاپ|موبایل|گوشی|بلیت|بلیط|هواپیما|هتل|تور|ماشین|خودرو|پایتون|برنامه|کد|سهام|بورس|ارزان|ارزون|ارزش\s*افزوده|ارزش\s*غذایی|انسان|آژانس|آرزو|دیجی[\s\u200c]*کالا|دیجیکالا|digikala)(?!\w)",
     re.IGNORECASE
 )
 
@@ -1057,17 +1057,31 @@ def is_math_query(text: str) -> bool:
     return len(cleaned) == 0
 
 
+_DK_BRAND_PATTERN = re.compile(r"(?:دیجی[\s\u200c]*کالا|دیجیکالا|digikala)", re.IGNORECASE)
+
+_DK_COMPANY_QUESTIONS = (
+    "کیست", "کیه", "کجاست", "چگونه", "چرا", "چیست", "تاسیس", "مالک", "صاحب",
+    "مدیرعامل", "سهامدار", "استخدام", "تاریخچه", "دفتر", "پشتیبانی", "تلفن", "شماره"
+)
+
+
 def extract_digikala_query(text: str) -> Optional[str]:
-    """Matches requests to search or buy products from Digikala."""
+    """
+    Matches requests to search or buy products from Digikala across diverse phrasing:
+    e.g. 'قیمت آیفون 16 در دیجی‌کالا', 'توی دیجیکالا سرچ کن گوشی سامسونگ', 'سرچ دیجیکالا کفش نایک'.
+    Excludes informational/knowledge queries about Digikala the company itself.
+    """
     t = text.strip()
-    m = re.search(r"(?:قیمت|خرید|جستجوی|سرچ)\s+(.+?)\s+(?:در|از|توی)\s+(?:دیجیکالا|دیجی کالا)", t, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    m2 = re.search(r"^(?:دیجیکالا|دیجی\s*کالا)\s*[:\s]\s*([آ-یa-zA-Z0-9\s]+)$", t, flags=re.IGNORECASE)
-    if m2:
-        candidate = m2.group(1).strip()
-        if not any(candidate.startswith(w) for w in ("چطور", "چرا", "چیست", "کی", "کجا", "مال")):
-            return candidate
+    if not _DK_BRAND_PATTERN.search(t):
+        return None
+
+    t_lower = t.lower()
+    if any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", t_lower) for w in _DK_COMPANY_QUESTIONS):
+        return None
+
+    candidate = clean_digikala_query(t)
+    if len(candidate) >= 2:
+        return candidate
     return None
 
 

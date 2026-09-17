@@ -39,39 +39,72 @@ def get_digikala_client() -> httpx.AsyncClient:
 
 
 def clean_digikala_query(query: str) -> str:
-    """Removes noise words from product search query."""
+    """Removes conversational noise words, prepositions, and Digikala brand mentions from product search query."""
     cleaned = (query or "").strip()
-    noise_words = [
-        "قیمت", "نرخ", "خرید", "فروش", "دیجیکالا", "دیجی کالا", "digikala",
-        "چنده", "چند است", "مشخصات", "ارزان ترین", "بهترین", "اصل", "اورجینال",
-        "رو چک کن", "چک کن", "استعلام", "ببین", "لطفا", "لطفاً", "از", "در"
+    # Normalize ZWNJ to spaces
+    cleaned = cleaned.replace("\u200c", " ")
+
+    # Remove Digikala brand variations
+    cleaned = re.sub(r"(?i)\b(?:digikala)\b", " ", cleaned)
+    cleaned = re.sub(r"دیجی\s*کالا|دیجیکالا", " ", cleaned)
+
+    # Conversational and action phrases to strip
+    noise_phrases = [
+        r"رو\s+چک\s+کن", r"چک\s+کن", r"سرچ\s+کن", r"جستجو\s+کن", r"پیدا\s+کن",
+        r"رو\s+بیار", r"رو\s+ببین", r"نشون\s+بده", r"استعلام\s+کن", r"قیمت\s+بگیر",
+        r"قیمت\s+در\s*بیار", r"بگرد\s+دنبال", r"بگرد", r"ارزان\s*ترین", r"ارزون\s*ترین",
+        r"بهترین", r"جدیدترین", r"اصل", r"اورجینال", r"مشخصات", r"رو\s+بگو",
+        r"چند\s+تومنه", r"چند\s+تومن", r"چند\s+است", r"چند\s+شد", r"چنده", r"چند",
+        r"قیمت", r"نرخ", r"خرید", r"فروش", r"استعلام", r"سرچ", r"جستجوی", r"جستجو",
+        r"محصولات", r"کالاهای", r"کالای", r"محصول", r"کالا", r"لینک",
+        r"لطفا", r"لطفاً", r"بی\s*زحمت", r"دمت\s*گرم", r"ممنون", r"ببینم", r"ببین",
     ]
-    for w in noise_words:
-        cleaned = re.sub(rf"\b{re.escape(w)}\b", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    for np in noise_phrases:
+        cleaned = re.sub(rf"(?<!\w){np}(?!\w)", " ", cleaned, flags=re.IGNORECASE)
+
+    # Remove leading/trailing prepositions and connector particles
+    connector_pattern = r"^(?:در|از|توی|تویِ|برای|واسه|رو|را|به)\s+|\s+(?:در|از|توی|برای|واسه|رو|را)$"
+    for _ in range(3):
+        cleaned = re.sub(connector_pattern, " ", cleaned.strip(), flags=re.IGNORECASE).strip()
+
+    cleaned = re.sub(r"[^\w\s\u0600-\u06FF\d\.\-\+]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" :،,.-")
     return cleaned if len(cleaned) >= 2 else (query or "").strip()
 
 
 async def search_digikala(query: str, max_results: int = 4) -> str:
     """
     Searches Digikala for products and returns formatted Persian markdown summary.
+    Employs persistent keepalive connection pooling and multi-tier caching (RAM + KV).
     """
     raw_q = (query or "").strip()
     if not raw_q:
-        return "⚠️ لطفاً نام یا مدل کالای مورد نظر برای استعلام در دیجی‌کالا را وارد نمایید."
+        return (
+            "ℹ️ لطفاً نام یا مدل کالای مورد نظر برای استعلام در دیجی‌کالا را وارد نمایید.\n"
+            "مثال: `/digikala آیفون 16` یا `دیجیکالا لپ تاپ ایسوس`"
+        )
 
     clean_q = clean_digikala_query(raw_q)
+    if not clean_q or len(clean_q) < 2:
+        clean_q = raw_q
+
     cache_key = f"{KV_KEY_DIGIKALA_PREFIX}{clean_q.lower().replace(' ', '_')}"
 
-    cached = await database.kv_get(cache_key)
-    if cached:
-        return cached
+    # L1 In-Memory & Cloudflare KV cache check
+    l1_cached = database.l1_get(cache_key)
+    if l1_cached:
+        return l1_cached
+
+    kv_cached = await database.kv_get(cache_key)
+    if kv_cached:
+        database.l1_set(cache_key, kv_cached, ttl_sec=600)
+        return kv_cached
 
     client = get_digikala_client()
     products: List[Dict[str, Any]] = []
+    enc_q = urllib.parse.quote(clean_q)
 
     try:
-        enc_q = urllib.parse.quote(clean_q)
         resp = await client.get(f"https://api.digikala.com/v1/search/?q={enc_q}&page=1")
         if resp.status_code == 200:
             data = resp.json().get("data", {})
@@ -80,7 +113,7 @@ async def search_digikala(query: str, max_results: int = 4) -> str:
         logger.debug(f"Digikala client error for '{clean_q}': {e}")
 
     if not products:
-        return f"🔍 کالایی با عنوان «{clean_q}» در دیجی‌کالا یافت نشد یا در دسترس نیست."
+        return f"🔍 کالایی با عنوان «{clean_q}» در دیجی‌کالا یافت نشد یا در حال حاضر در دسترس نیست."
 
     lines = [f"🛍 **نتایج استعلام زنده دیجی‌کالا برای «{clean_q}»:**\n"]
     count = 0
@@ -95,7 +128,7 @@ async def search_digikala(query: str, max_results: int = 4) -> str:
         url = f"https://www.digikala.com/product/dkp-{pid}"
 
         variant = p.get("default_variant") or {}
-        price_info = variant.get("price") or {}
+        price_info = variant.get("price") or p.get("price") or {}
         rrp_price = price_info.get("rrp_price", 0)  # Rials
         selling_price = price_info.get("selling_price", 0)  # Rials
         discount_pct = price_info.get("discount_percent", 0)
@@ -104,31 +137,59 @@ async def search_digikala(query: str, max_results: int = 4) -> str:
         selling_toman = selling_price // 10 if selling_price else 0
         rrp_toman = rrp_price // 10 if rrp_price else 0
 
+        # Special badge (e.g. فروش ویژه, شگفت‌انگیز)
+        badge_obj = price_info.get("badge")
+        badge_title = badge_obj.get("title") if isinstance(badge_obj, dict) else None
+        if not badge_title and price_info.get("is_incredible"):
+            badge_title = "پیشنهاد شگفت‌انگیز"
+
         rating_info = p.get("rating") or {}
         rate_val = rating_info.get("rate")
         rate_count = rating_info.get("count", 0)
 
         seller_info = variant.get("seller") or {}
         seller_name = seller_info.get("title", "دیجی‌کالا")
+        warranty_info = variant.get("warranty") or {}
+        warranty_name = warranty_info.get("title_fa")
 
         line = f"• [{title}]({url})\n"
         if selling_toman > 0:
-            line += f"  💰 **قیمت:** `{selling_toman:,} تومان`"
+            promo_tag = f" `⚡ {badge_title}`" if badge_title else ""
+            line += f"  💰 **قیمت:** `{selling_toman:,} تومان`{promo_tag}"
             if discount_pct > 0 and rrp_toman > selling_toman:
                 line += f" (🔥 تخفیف: `{discount_pct}%` | قبل: ~`{rrp_toman:,}`~)"
             line += "\n"
         else:
             line += "  💰 **وضعیت:** `ناموجود / در حال تأمین`\n"
 
-        if rate_val:
-            line += f"  ⭐ **امتیاز:** `{rate_val} از ۵` ({rate_count:,} نظر)\n"
-        line += f"  🏪 **فروشنده:** {seller_name}\n"
+        if rate_val is not None and rate_val > 0:
+            if rate_val > 5.0:
+                # Digikala API returns satisfaction on a 0-100 scale
+                score_5 = round(rate_val / 20.0, 1)
+                satisfaction_pct = int(round(rate_val))
+                if rate_count:
+                    line += f"  ⭐ **امتیاز:** `{score_5} از ۵` ({satisfaction_pct}٪ رضایت | {rate_count:,} نظر)\n"
+                else:
+                    line += f"  ⭐ **امتیاز:** `{score_5} از ۵` ({satisfaction_pct}٪ رضایت)\n"
+            else:
+                if rate_count:
+                    line += f"  ⭐ **امتیاز:** `{rate_val} از ۵` ({rate_count:,} نظر)\n"
+                else:
+                    line += f"  ⭐ **امتیاز:** `{rate_val} از ۵`\n"
+
+        line += f"  🏪 **فروشنده:** {seller_name}"
+        if warranty_name:
+            line += f" | 🛡 {warranty_name}"
+        line += "\n"
 
         lines.append(line)
         count += 1
 
-    lines.append("⚡ *استعلام زنده از دیجی‌کالا توسط پرومته*")
+    all_url = f"https://www.digikala.com/search/?q={enc_q}"
+    lines.append(f"🔗 [مشاهده همه نتایج «{clean_q}» در دیجی‌کالا]({all_url})\n")
+    lines.append("⚡ *استعلام لحظه‌ای توسط پرومته*")
     result_text = "\n".join(lines)
 
+    database.l1_set(cache_key, result_text, ttl_sec=600)
     await database.kv_set(cache_key, result_text, ttl_sec=600)
     return result_text

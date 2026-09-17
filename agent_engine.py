@@ -915,6 +915,21 @@ async def execute_hermes_agent(
                 logger.info("Auto-injected live financial rates into agent prompt")
         except Exception as err:
             logger.warning(f"Failed to auto-inject live financial rates: {err}")
+    elif any(dk_w in user_prompt.lower() for dk_w in ["دیجیکالا", "دیجی کالا", "دیجی‌کالا", "digikala"]):
+        try:
+            from tools.ecommerce import clean_digikala_query, search_digikala
+            clean_q = clean_digikala_query(user_prompt)
+            if len(clean_q) >= 2:
+                dk_results = await search_digikala(clean_q, max_results=3)
+                if dk_results and not dk_results.startswith("🔍"):
+                    augmented_prompt = (
+                        f"{user_prompt}\n\n"
+                        f"[اطلاعات زنده و استعلام محصولات دیجی‌کالا]:\n"
+                        f"{dk_results}"
+                    )
+                    logger.info(f"Auto-injected live Digikala results for '{clean_q}'")
+        except Exception as err:
+            logger.warning(f"Live Digikala lookup failed in agent: {err}")
     elif should_search_web(user_prompt):
         try:
             search_query = extract_search_query(user_prompt)
