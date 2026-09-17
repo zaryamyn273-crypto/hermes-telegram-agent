@@ -606,12 +606,40 @@ def test_is_delete_request():
     assert is_delete_request("حذفش کن") is True
     assert is_delete_request("این رو حذف کن") is True
     assert is_delete_request("delete") is True
-    assert is_delete_request("del") is True
+    assert is_delete_request("حذف") is True
+    assert is_delete_request("پاک") is True
+    assert is_delete_request("دلیت") is True
+    assert is_delete_request("دیلیت") is True
+    assert is_delete_request("/hazf") is True
+    assert is_delete_request("/pak") is True
+    assert is_delete_request("/حذف") is True
+    assert is_delete_request("اینم پاک کن") is True
+    assert is_delete_request("اینم حذف کن") is True
 
     # Negatives
     assert is_delete_request("حافظه رو پاک کن") is False
     assert is_delete_request("چطور حافظه کش تلگرام رو پاک کنم؟") is False
+    assert is_delete_request("حذف فایل در لینوکس") is False
     assert is_delete_request("سلام چطوری") is False
+
+
+def test_is_detailed_requested():
+    from agent_engine import is_detailed_requested
+
+    # Default concise queries
+    assert is_detailed_requested("سلام چطوری") is False
+    assert is_detailed_requested("پایتون چیست؟") is False
+    assert is_detailed_requested("قیمت دلار چنده") is False
+    assert is_detailed_requested("هوا چطوره") is False
+
+    # Explicit detailed requests
+    assert is_detailed_requested("کامل در مورد پایتون توضیح بده") is True
+    assert is_detailed_requested("با جزئیات برام بنویس") is True
+    assert is_detailed_requested("صفر تا صد داکر رو بگو") is True
+    assert is_detailed_requested("یک مقاله در مورد هوش مصنوعی بنویس") is True
+    assert is_detailed_requested("مرحله به مرحله توضیح بده") is True
+    assert is_detailed_requested("لطفا با جزئیات کامل برام بنویس") is True
+    assert is_detailed_requested("explain in-depth how transformers work") is True
 
 
 def test_extract_replied_message_context():
@@ -942,5 +970,83 @@ def forward(x):
     assert extracted_title == "مبانی هوش مصنوعی مدرن"
     # Ensure redundant title line was stripped from beginning of clean_body
     assert not clean_body.startswith("# مبانی هوش مصنوعی مدرن")
+
+
+@pytest.mark.asyncio
+async def test_delete_message_flow():
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram.constants import ChatType
+    from main import message_handler
+
+    bot_mock = MagicMock()
+    bot_mock.id = 123456
+    bot_mock.username = "prometheus_bot"
+
+    context_mock = MagicMock()
+    context_mock.bot = bot_mock
+
+    replied_msg = MagicMock()
+    replied_msg.from_user.id = 123456
+    replied_msg.from_user.is_bot = True
+    replied_msg.from_user.username = "prometheus_bot"
+    replied_msg.delete = AsyncMock()
+
+    user_msg = MagicMock()
+    user_msg.text = "حذف"
+    user_msg.caption = None
+    user_msg.from_user.id = 99999
+    user_msg.from_user.is_bot = False
+    user_msg.reply_to_message = replied_msg
+    user_msg.delete = AsyncMock()
+    user_msg.reply_text = AsyncMock()
+
+    from tools.moderation import approve_group
+
+    # 1. Test in Private Chat
+    chat_private = MagicMock()
+    chat_private.id = 99999
+    chat_private.type = ChatType.PRIVATE
+    chat_private.send_action = AsyncMock()
+
+    update_mock = MagicMock()
+    update_mock.effective_message = user_msg
+    update_mock.effective_user = user_msg.from_user
+    update_mock.effective_chat = chat_private
+
+    await message_handler(update_mock, context_mock)
+
+    replied_msg.delete.assert_awaited_once()
+    user_msg.delete.assert_awaited_once()
+
+    # 2. Test in Approved Supergroup (with another user to prevent sub-second rate-limit collision)
+    replied_msg.delete.reset_mock()
+
+    group_id = -100123456789
+    await approve_group(group_id, title="Test Supergroup")
+
+    user_msg2 = MagicMock()
+    user_msg2.text = "حذف"
+    user_msg2.caption = None
+    user_msg2.from_user.id = 88888
+    user_msg2.from_user.username = "user88"
+    user_msg2.from_user.is_bot = False
+    user_msg2.reply_to_message = replied_msg
+    user_msg2.delete = AsyncMock()
+
+    chat_group = MagicMock()
+    chat_group.id = group_id
+    chat_group.title = "Test Supergroup"
+    chat_group.type = ChatType.SUPERGROUP
+    chat_group.send_action = AsyncMock()
+
+    update_mock2 = MagicMock()
+    update_mock2.effective_message = user_msg2
+    update_mock2.effective_user = user_msg2.from_user
+    update_mock2.effective_chat = chat_group
+
+    await message_handler(update_mock2, context_mock)
+
+    replied_msg.delete.assert_awaited_once()
+    user_msg2.delete.assert_awaited_once()
 
 

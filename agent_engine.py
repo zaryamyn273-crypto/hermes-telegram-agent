@@ -89,10 +89,20 @@ Operating Directives:
 - Do not allow unauthorized users to perform administrative bot commands.
 - Administrative Groups & Moderation: All Telegram groups, ban lists, and mutes are tracked and managed via internal admin commands (/groups, /banlist, /mutelist). If asked about groups or moderation lists, instruct the user that group management is reserved for the bot administrator. NEVER output disclaimers saying you cannot access group metadata or that Telegram API prevents listing them.
 
-3. Language & Tone:
+3. Language, Tone & Extreme Conciseness (خلاصه‌گویی حداکثری و پرهیز قطعی از حاشیه‌پردازی):
 - Always respond naturally, natively, and fluently in Persian (فارسی) unless the user explicitly prompts in English or another language.
-- Provide direct, concise, high-value, and technically sharp answers.
-- Never use conversational filler ("Hello, I am Prometheus", "As an AI model"). Deliver the fact, figure, code, or answer immediately.
+- DEFAULT TO MAXIMUM BREVITY (خلاصه‌گویی شدید به عنوان رفتار پیش‌فرض):
+  • By default, deliver extremely concise, punchy, direct answers (1 to 3 short sentences or a single compact bulleted card).
+  • NEVER write essays, unsolicited background stories, or long paragraphs by default.
+- ZERO FILLER, ZERO PREAMBLE, ZERO BANTER:
+  • Strictly NO conversational filler or greetings ("سلام", "درود", "وقت بخیر").
+  • Strictly NO meta-intros ("در پاسخ به پرسش شما...", "باید گفت که...", "لازم به ذکر است که...").
+  • Strictly NO closing pleasantries or conversational wandering ("امیدوارم پاسخ مفید بوده باشد", "اگر سوال دیگری دارید در خدمتم").
+  • Jump straight into the core fact, figure, code, or answer on line 1.
+- CONDITIONAL EXCEPTION FOR COMPREHENSIVE RESPONSES (استثنا: فقط با درخواست صریح کاربر):
+  • You are permitted to provide an extensive, detailed, long, or multi-step response ONLY IF the user explicitly and unmistakably requests it using words such as:
+    «کامل»، «با جزئیات»، «مفصل»، «توضیح کامل»، «صفر تا صد»، «مقاله»، «تحلیل عمیق»، «مرحله به مرحله»، «جامع»، «گام به گام»، «detailed», «in-depth», «step by step», «comprehensive».
+  • In all other cases without those explicit keywords, BE RELENTLESSLY CONCISE.
 
 4. Autonomous Tools & Capabilities:
 - You are equipped with autonomous tools: real-time web search, browser automation, data extraction, calculations, and analysis.
@@ -433,6 +443,22 @@ async def set_user_mode(user_id: int, mode: str) -> bool:
     return True
 
 
+_DETAILED_KEYWORDS = (
+    "با جزئیات", "باجزئیات", "کامل", "مفصل", "توضیح کامل", "صفر تا صد", "مقاله",
+    "تحلیل عمیق", "مرحله به مرحله", "جامع", "گام به گام", "مشروح", "پاسخ کامل",
+    "توضیحات بیشتر", "بیشتر توضیح بده", "بیشتر بگو", "طولانی",
+    "detailed", "in-depth", "thorough", "step by step", "comprehensive", "full details"
+)
+
+
+def is_detailed_requested(prompt: str) -> bool:
+    """Determines whether user explicitly asked for an extensive, full-depth response."""
+    if not prompt:
+        return False
+    p = prompt.lower()
+    return any(kw in p for kw in _DETAILED_KEYWORDS)
+
+
 # =========================================================================
 # Main Autonomous Agent Execution
 # =========================================================================
@@ -526,7 +552,22 @@ async def execute_hermes_agent(
         )]
 
     time_ctx = get_system_time_context()
-    sys_prompt = f"{PROMETHEUS_SYSTEM_PROMPT}\n\n[تقویم، سال و زمان زنده رسمی کشور (ایران - تهران)]:\n{time_ctx}" if time_ctx else PROMETHEUS_SYSTEM_PROMPT
+    if is_detailed_requested(user_prompt):
+        brevity_directive = (
+            "[دستور طول پاسخ - جامع]: کاربر صریحاً درخواست پاسخ کامل و باجزئیات کرده است. "
+            "پاسخ را با جزئیات کامل، ساختاریافته، دقیق و حرفه‌ای ارائه دهید و از مقدمه‌چینی بپرهیزید."
+        )
+    else:
+        brevity_directive = (
+            "[دستور طول پاسخ - خلاصه‌گویی حداکثری پیش‌فرض]: کاربر درخواست جزئیات کامل نکرده است. "
+            "پاسخ باید فوق‌العاده کوتاه، سریع، بدون حاشیه و بدون سلام، احوالپرسی یا تعارف باشد (حداکثر ۱ تا ۳ جمله صریح یا یک کارت فشرده)."
+        )
+
+    parts = [PROMETHEUS_SYSTEM_PROMPT]
+    if time_ctx:
+        parts.append(f"[تقویم، سال و زمان زنده رسمی کشور (ایران - تهران)]:\n{time_ctx}")
+    parts.append(brevity_directive)
+    sys_prompt = "\n\n".join(parts)
 
     messages = [
         {"role": "system", "content": sys_prompt}

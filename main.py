@@ -702,10 +702,10 @@ def is_time_query(text: str) -> bool:
 # =========================================================================
 
 _DELETE_PATTERNS = [
-    r"^(?:/del|/delete|/پاک)(?:@\w+)?$",
-    r"^(?:این\s*(?:رو|پیام\s*رو)?\s*)?پاک\s*(?:کن|ش\s*کن|کنید)[\!؟\.]*$",
-    r"^(?:این\s*(?:رو|پیام\s*رو)?\s*)?حذف\s*(?:کن|ش\s*کن|کنید)[\!؟\.]*$",
-    r"^(?:پاکش\s*کن|حذفش\s*کن|دلیت\s*کن|delete|del)[\!؟\.]*$",
+    r"^/(?:del|delete|pak|hazf|حذف|پاک)(?:@\w+)?$",
+    r"^(?:این\s*(?:رو|پیام\s*رو|پیامو)?\s*)?(?:حذف|پاک|دلیت|دیلیت|del|delete|remove)(?:\s*(?:کن|ش\s*کن|کنید|ش|کردن|پیام))?[!؟\.\s]*$",
+    r"^(?:پاکش\s*کن|حذفش\s*کن|دلیتش\s*کن|دیلیتش\s*کن|اینم\s*پاک\s*کن|اینم\s*حذف\s*کن)[!؟\.\s]*$",
+    r"^(?:حذف|پاک|دلیت|دیلیت|delete|del|remove)[!؟\.\s]*$",
 ]
 
 
@@ -797,7 +797,8 @@ def is_direct_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE, ra
 
     # d) Direct reply to the bot's own message
     if message and message.reply_to_message and message.reply_to_message.from_user:
-        if bot_id and message.reply_to_message.from_user.id == bot_id:
+        rep_u = message.reply_to_message.from_user
+        if (bot_id and rep_u.id == bot_id) or (bot_username and rep_u.username and rep_u.username.lower() == bot_username):
             return True, text
 
     return False, ""
@@ -1310,21 +1311,30 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
         return
-    bot_id = context.bot.id
+    bot_user = context.bot if (context and getattr(context, "bot", None)) else None
+    bot_id = bot_user.id if bot_user else None
+    bot_username = (bot_user.username or "").lower() if bot_user else ""
     reply_to = msg.reply_to_message
-    if reply_to and reply_to.from_user and reply_to.from_user.id == bot_id:
-        try:
-            await reply_to.delete()
-        except Exception as e:
-            logger.warning(f"Failed to delete bot message: {e}")
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-    elif reply_to:
-        await msg.reply_text("⚠️ من فقط می‌توانم پیام‌هایی که خودم ارسال کرده‌ام را حذف کنم.")
+    if reply_to and reply_to.from_user:
+        is_from_bot = (
+            (bot_id and reply_to.from_user.id == bot_id)
+            or (reply_to.from_user.is_bot and bot_username and (reply_to.from_user.username or "").lower() == bot_username)
+        )
+        if is_from_bot:
+            try:
+                await reply_to.delete()
+            except Exception as e:
+                logger.warning(f"Failed to delete bot message: {e}")
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            return
+        else:
+            await msg.reply_text("⚠️ من فقط می‌توانم پیام‌هایی که خودم ارسال کرده‌ام را حذف کنم.")
+            return
     else:
-        await msg.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و /del یا «پاکش کن» را ارسال نمایید.")
+        await msg.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و کلمه «حذف» یا /del را ارسال نمایید.")
 
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2213,6 +2223,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message or not user or not chat:
         return
 
+    bot_user = context.bot if (context and getattr(context, "bot", None)) else None
+    bot_id = bot_user.id if bot_user else None
+    bot_username = (bot_user.username or "").lower() if bot_user else ""
+    is_private = (chat.type == ChatType.PRIVATE)
+
     if not await _check_moderation_guard(update, context):
         return
 
@@ -2279,24 +2294,29 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(report, parse_mode=ParseMode.HTML)
         return
 
-    # Fast-Path -1: Bot Message Deletion (/del, /delete, /پاک, "پاکش کن", "حذف کن")
+    # Fast-Path -1: Bot Message Deletion (/del, /delete, /پاک, "پاکش کن", "حذف کن", "حذف", "پاک")
     if is_delete_request(cleaned_lower):
         reply_to = message.reply_to_message
-        if reply_to and reply_to.from_user and reply_to.from_user.id == bot_id:
-            try:
-                await reply_to.delete()
-            except Exception as e:
-                logger.warning(f"Failed to delete bot message: {e}")
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            return
-        elif reply_to:
-            await message.reply_text("⚠️ من فقط می‌توانم پیام‌هایی که خودم ارسال کرده‌ام را حذف کنم.")
-            return
-        elif is_private:
-            await message.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و /del یا «پاکش کن» را ارسال نمایید.")
+        if reply_to:
+            is_from_bot = (
+                (bot_id and reply_to.from_user and reply_to.from_user.id == bot_id)
+                or (reply_to.from_user and reply_to.from_user.is_bot and bot_username and (reply_to.from_user.username or "").lower() == bot_username)
+            )
+            if is_from_bot:
+                try:
+                    await reply_to.delete()
+                except Exception as e:
+                    logger.warning(f"Failed to delete replied bot message: {e}")
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                return
+            else:
+                await message.reply_text("⚠️ من فقط می‌توانم پیام‌هایی که خودم ارسال کرده‌ام را حذف کنم.")
+                return
+        else:
+            await message.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و کلمه «حذف» یا /del را ارسال نمایید.")
             return
 
     # Fast-Path 0: Response Time Tracking & Live Speed Benchmark
@@ -2984,7 +3004,7 @@ def build_application():
     app.add_handler(CommandHandler(["qr", "qrcode"], guard(barcode_command)))
     app.add_handler(CommandHandler(["barcode", "bar"], guard(barcode_command)))
     app.add_handler(CommandHandler(["twitter", "tweet", "x"], guard(twitter_command)))
-    app.add_handler(CommandHandler(["delete", "del", "pak"], guard(delete_command)))
+    app.add_handler(CommandHandler(["delete", "del", "pak", "hazf", "remove"], guard(delete_command)))
     app.add_handler(CommandHandler(["ping"], guard(ping_command)))
 
     # Admin Governance & Moderation Commands
