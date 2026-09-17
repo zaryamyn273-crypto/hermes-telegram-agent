@@ -829,10 +829,13 @@ def is_time_query(text: str) -> bool:
 # =========================================================================
 
 _DELETE_PATTERNS = [
-    r"^/(?:del|delete|pak|hazf|حذف|پاک)(?:@\w+)?$",
-    r"^(?:این\s*(?:رو|پیام\s*رو|پیامو)?\s*)?(?:حذف|پاک|دلیت|دیلیت|del|delete|remove)(?:\s*(?:کن|ش\s*کن|کنید|ش|کردن|پیام))?[!؟\.\s]*$",
-    r"^(?:پاکش\s*کن|حذفش\s*کن|دلیتش\s*کن|دیلیتش\s*کن|اینم\s*پاک\s*کن|اینم\s*حذف\s*کن)[!؟\.\s]*$",
+    r"^/(?:p|p_|pro|pro_|prom_|prometheus_)?(?:del|delete|pak|hazf|remove|حذف|پاک)(?:@\w+)?$",
     r"^(?:حذف|پاک|دلیت|دیلیت|delete|del|remove)[!؟\.\s]*$",
+    r"^(?:لطف[ااً]|میشه|بی‌زحمت|بی\s*زحمت)?\s*(?:این\s*|اینو\s*|اینم\s*)?(?:پیام(?:ت|تون|ت رو|تو|تون رو|ت رو هم| خودت| خودتو| خودت رو|\s*رو)?|رو|پیامو)?\s*(?:هم\s*)?(?:حذف|پاک|دلیت|دیلیت|del|delete|remove)(?:ش)?(?:\s*(?:کن|کنید|کنی|کنین|کردن))?(?:\s*(?:پیام|لطف[ااً]|بی‌زحمت|بی\s*زحمت))?[!؟\.\s]*$",
+    r"^(?:لطف[ااً]|میشه|بی‌زحمت|بی\s*زحمت)?\s*(?:پاک|حذف|دلیت|دیلیت)(?:ش)?\s*(?:کن|کنید|کنی|کنین)?\s*(?:این\s*)?(?:پیام(?:ت|تون|ت رو|تو|تون رو| خودت| خودتو|\s*رو)?|اینو|این رو|اینم)?[!؟\.\s]*$",
+    r"^(?:حذف|پاک|دلیت|دیلیت)\s*(?:کردن\s*)?(?:این\s*)?پیام[!؟\.\s]*$",
+    r"^(?:del|delete|remove)\s*(?:kon|konid|کن|کنید)[!؟\.\s]*$",
+    r"^(?:اینم|اینو)\s*(?:هم\s*)?(?:پاک|حذف|دلیت|دیلیت)(?:ش)?(?:\s*(?:کن|کنید|کنی))?[!؟\.\s]*$",
 ]
 
 
@@ -1736,34 +1739,44 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Deletes bot messages upon reply."""
+    """Deletes bot messages upon reply silently without sending any follow-up replies."""
     msg = update.effective_message
     if not msg:
         return
+    user = update.effective_user
+    chat = update.effective_chat
     bot_user = context.bot if (context and getattr(context, "bot", None)) else None
     bot_id = bot_user.id if bot_user else None
     bot_username = (bot_user.username or "").lower() if bot_user else ""
     reply_to = msg.reply_to_message
-    if reply_to and reply_to.from_user:
+
+    is_bot_adm = is_admin(user.id) if user else False
+    is_grp_adm = False
+    if chat and chat.type != ChatType.PRIVATE and user and context and getattr(context, "bot", None):
+        is_grp_adm = await is_user_chat_admin(context.bot, chat.id, user.id)
+
+    if reply_to:
         is_from_bot = (
-            (bot_id and reply_to.from_user.id == bot_id)
-            or (reply_to.from_user.is_bot and bot_username and (reply_to.from_user.username or "").lower() == bot_username)
+            (bot_id and reply_to.from_user and reply_to.from_user.id == bot_id)
+            or (reply_to.from_user and reply_to.from_user.is_bot and bot_username and (reply_to.from_user.username or "").lower() == bot_username)
+            or (reply_to.from_user and reply_to.from_user.is_bot and not bot_username)
         )
-        if is_from_bot:
+        if is_from_bot or ((is_bot_adm or is_grp_adm) and chat and chat.type != ChatType.PRIVATE):
             try:
                 await reply_to.delete()
             except Exception as e:
-                logger.warning(f"Failed to delete bot message: {e}")
+                logger.warning(f"Failed to delete message: {e}")
             try:
                 await msg.delete()
             except Exception:
                 pass
             return
         else:
-            await msg.reply_text("⚠️ من فقط می‌توانم پیام‌هایی که خودم ارسال کرده‌ام را حذف کنم.")
             return
     else:
-        await msg.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و کلمه «حذف» یا /del را ارسال نمایید.")
+        if not (is_bot_adm or is_grp_adm) and chat and chat.type == ChatType.PRIVATE:
+            await msg.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و کلمه «حذف» یا /del را ارسال نمایید.")
+        return
 
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3438,6 +3451,21 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
     if not t:
         return False
 
+    # 0. Admin deletion command interception (Silent execution: 0 messages sent)
+    if is_delete_request(t):
+        msg = update.effective_message
+        reply_to = msg.reply_to_message if msg else None
+        if reply_to:
+            try:
+                await reply_to.delete()
+            except Exception as e:
+                logger.warning(f"Failed to delete replied message on admin command: {e}")
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+        return True
+
     # 1. Ban List
     if re.match(r"^(?:/)?(?:banlist|bans|لیست\s+بن(?:‌ها)?|لیست\s+مسدود(?:ها|ین)?)$", t, re.IGNORECASE):
         await banlist_command(update, context)
@@ -3732,6 +3760,33 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+    # Fast-Path -1: Bot Message Deletion (Silent execution, <1ms, before typing animation, rate limit and LLM)
+    raw_clean = (cleaned_prompt or raw_text).strip()
+    if is_delete_request(raw_clean) or is_delete_request(raw_text.strip()):
+        reply_to = message.reply_to_message
+        if reply_to:
+            is_from_bot = (
+                (bot_id and reply_to.from_user and reply_to.from_user.id == bot_id)
+                or (reply_to.from_user and reply_to.from_user.is_bot and bot_username and (reply_to.from_user.username or "").lower() == bot_username)
+                or (reply_to.from_user and reply_to.from_user.is_bot and not bot_username)
+            )
+            if is_from_bot or (is_bot_adm or is_grp_adm):
+                try:
+                    await reply_to.delete()
+                except Exception as e:
+                    logger.warning(f"Failed to delete replied message: {e}")
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                return
+            else:
+                return
+        else:
+            if is_private and not (is_bot_adm or is_grp_adm):
+                await message.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و کلمه «حذف» یا /del را ارسال نمایید.")
+            return
+
     # 3. Check Silence / Stop Triggers
     raw_lower = raw_text.lower().strip()
     silence_triggers = [
@@ -3811,31 +3866,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(summary_rep, parse_mode=ParseMode.HTML)
         return
 
-
-    # Fast-Path -1: Bot Message Deletion (/del, /delete, /پاک, "پاکش کن", "حذف کن", "حذف", "پاک")
-    if is_delete_request(cleaned_lower):
-        reply_to = message.reply_to_message
-        if reply_to:
-            is_from_bot = (
-                (bot_id and reply_to.from_user and reply_to.from_user.id == bot_id)
-                or (reply_to.from_user and reply_to.from_user.is_bot and bot_username and (reply_to.from_user.username or "").lower() == bot_username)
-            )
-            if is_from_bot:
-                try:
-                    await reply_to.delete()
-                except Exception as e:
-                    logger.warning(f"Failed to delete replied bot message: {e}")
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
-                return
-            else:
-                await message.reply_text("⚠️ من فقط می‌توانم پیام‌هایی که خودم ارسال کرده‌ام را حذف کنم.")
-                return
-        else:
-            await message.reply_text("ℹ️ برای حذف پیام پرومته، لطفاً روی پیام مورد نظر ریپلای کرده و کلمه «حذف» یا /del را ارسال نمایید.")
-            return
 
     # Fast-Path 0: Response Time Tracking & Live Speed Benchmark
     latency_type = is_latency_query(cleaned_lower)

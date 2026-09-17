@@ -715,12 +715,42 @@ def test_is_delete_request():
     assert is_delete_request("/حذف") is True
     assert is_delete_request("اینم پاک کن") is True
     assert is_delete_request("اینم حذف کن") is True
+    assert is_delete_request("/pdel") is True
+    assert is_delete_request("/prodel") is True
+    assert is_delete_request("/p_del") is True
+    assert is_delete_request("/prom_del") is True
+    assert is_delete_request("/del@prometheus_bot") is True
+    assert is_delete_request("پیامتو پاک کن") is True
+    assert is_delete_request("پیامت رو پاک کن") is True
+    assert is_delete_request("این پیامت رو پاک کن") is True
+    assert is_delete_request("این پیامتو پاک کن") is True
+    assert is_delete_request("پیام خودت رو پاک کن") is True
+    assert is_delete_request("پیام خودتو پاک کن") is True
+    assert is_delete_request("پیامتو حذف کن") is True
+    assert is_delete_request("لطفا پاکش کن") is True
+    assert is_delete_request("پاک کن لطفا") is True
+    assert is_delete_request("لطفا اینو پاک کن") is True
+    assert is_delete_request("لطفا این پیام رو پاک کن") is True
+    assert is_delete_request("بی‌زحمت پاکش کن") is True
+    assert is_delete_request("بی زحمت پاک کن") is True
+    assert is_delete_request("میشه پاکش کنی") is True
+    assert is_delete_request("میشه این پیامت رو پاک کنی؟") is True
+    assert is_delete_request("اینم پاکش کن") is True
+    assert is_delete_request("پاک کن پیامتو") is True
+    assert is_delete_request("حذف کن پیامت رو") is True
+    assert is_delete_request("پاک کن اینو") is True
+    assert is_delete_request("del kon") is True
+    assert is_delete_request("delete konid") is True
+    assert is_delete_request("حذف پیام") is True
+    assert is_delete_request("پاک کردن این پیام") is True
 
     # Negatives
     assert is_delete_request("حافظه رو پاک کن") is False
     assert is_delete_request("چطور حافظه کش تلگرام رو پاک کنم؟") is False
     assert is_delete_request("حذف فایل در لینوکس") is False
     assert is_delete_request("سلام چطوری") is False
+    assert is_delete_request("پیام من چی بود؟") is False
+    assert is_delete_request("چرا پیام دادی؟") is False
 
 
 def test_is_detailed_requested():
@@ -1300,6 +1330,7 @@ async def test_delete_message_flow():
 
     replied_msg.delete.assert_awaited_once()
     user_msg.delete.assert_awaited_once()
+    user_msg.reply_text.assert_not_called()
 
     # 2. Test in Approved Supergroup (with another user to prevent sub-second rate-limit collision)
     replied_msg.delete.reset_mock()
@@ -1315,6 +1346,7 @@ async def test_delete_message_flow():
     user_msg2.from_user.is_bot = False
     user_msg2.reply_to_message = replied_msg
     user_msg2.delete = AsyncMock()
+    user_msg2.reply_text = AsyncMock()
 
     chat_group = MagicMock()
     chat_group.id = group_id
@@ -1331,6 +1363,31 @@ async def test_delete_message_flow():
 
     replied_msg.delete.assert_awaited_once()
     user_msg2.delete.assert_awaited_once()
+    user_msg2.reply_text.assert_not_called()
+
+    # 3. Test Admin Natural Language Delete ("این پیامت رو پاک کن") - Total Silence
+    replied_msg.delete.reset_mock()
+
+    user_msg3 = MagicMock()
+    user_msg3.text = "این پیامت رو پاک کن"
+    user_msg3.caption = None
+    user_msg3.from_user.id = settings.ADMIN_ID
+    user_msg3.from_user.username = "admin_user"
+    user_msg3.from_user.is_bot = False
+    user_msg3.reply_to_message = replied_msg
+    user_msg3.delete = AsyncMock()
+    user_msg3.reply_text = AsyncMock()
+
+    update_mock3 = MagicMock()
+    update_mock3.effective_message = user_msg3
+    update_mock3.effective_user = user_msg3.from_user
+    update_mock3.effective_chat = chat_group
+
+    await message_handler(update_mock3, context_mock)
+
+    replied_msg.delete.assert_awaited_once()
+    user_msg3.delete.assert_awaited_once()
+    user_msg3.reply_text.assert_not_called()
 
 
 @pytest.mark.asyncio
