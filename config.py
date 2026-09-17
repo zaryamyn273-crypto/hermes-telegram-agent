@@ -28,6 +28,7 @@ try:
         HERMES_PUBLIC_URL: str = Field(default="", env="HERMES_PUBLIC_URL")
 
         TAVILY_API_KEYS: str = Field(default="", env="TAVILY_API_KEYS")
+        TAVILY_API_KEY: str = Field(default="", env="TAVILY_API_KEY")
         VIRUSTOTAL_API_KEY: str = Field(
             default="8c715c84eef42a06fcc42d407e547c63cb77ababf962877bfcea30834d1ff084",
             env="VIRUSTOTAL_API_KEY"
@@ -73,6 +74,7 @@ except ImportError:
         HERMES_PUBLIC_URL: str = os.getenv("HERMES_PUBLIC_URL", "")
 
         TAVILY_API_KEYS: str = os.getenv("TAVILY_API_KEYS", "")
+        TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
         VIRUSTOTAL_API_KEY: str = os.getenv(
             "VIRUSTOTAL_API_KEY",
             "8c715c84eef42a06fcc42d407e547c63cb77ababf962877bfcea30834d1ff084"
@@ -197,3 +199,16 @@ def get_effective_model() -> str:
     if not model or model.lower() == "high":
         return "ag/gemini-3.8-flash-low"
     return model
+
+
+def get_tavily_api_keys() -> List[str]:
+    """Returns parsed list of Tavily API keys from configuration or environment."""
+    raw = (
+        getattr(settings, "TAVILY_API_KEYS", "")
+        or getattr(settings, "TAVILY_API_KEY", "")
+        or os.getenv("TAVILY_API_KEYS", "")
+        or os.getenv("TAVILY_API_KEY", "")
+    )
+    import re
+    return [k.strip() for k in re.split(r"[,;\s\n]+", raw) if k.strip()]
+

@@ -114,7 +114,7 @@ async def _fetch_alanchand_rates(rates: Dict[str, int]):
                 elif "ربع سکه" in clean_row:
                     if nums:
                         rates["quarter_coin"] = nums[0]
-    except Exception as e:
+    except (Exception, asyncio.CancelledError) as e:
         logger.debug(f"AlanChand fetch error: {e}")
 
 
@@ -146,7 +146,7 @@ async def _fetch_tgju_rates(rates: Dict[str, int]):
                             del keys_needed[tag]
                     if not keys_needed or len(buf) > 400000:
                         break
-    except Exception as e:
+    except (Exception, asyncio.CancelledError) as e:
         logger.debug(f"TGJU fetch error: {e}")
 
 
@@ -206,6 +206,9 @@ async def _refresh_rates_internal() -> Dict[str, int]:
                     new_rates["usd"] = usdt_val
         except asyncio.TimeoutError:
             logger.debug("Live rate fetch exceeded timeout, utilizing fast partial results")
+            for t in (usdt_task, alan_task, tgju_task):
+                if not t.done():
+                    t.cancel()
 
         if not new_rates.get("usd") and new_rates.get("usdt"):
             new_rates["usd"] = new_rates["usdt"]

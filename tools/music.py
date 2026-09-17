@@ -267,7 +267,7 @@ async def _extract_mp3_from_page(client: httpx.AsyncClient, page_url: str, page_
 
 
 async def download_mp3_stream(url: str, max_bytes: int = _MAX_AUDIO_BYTES, timeout_sec: float = 12.0) -> Optional[bytes]:
-    """Streams MP3 file into memory buffer with absolute wall-clock timeout and URL quoting."""
+    """Streams MP3 file into memory buffer with absolute wall-clock timeout, URL quoting, and HTML detection."""
     if not url or not url.startswith("http"):
         return None
     safe_url = clean_url(url)
@@ -277,13 +277,17 @@ async def download_mp3_stream(url: str, max_bytes: int = _MAX_AUDIO_BYTES, timeo
         buf = io.BytesIO()
         async with client.stream("GET", safe_url, timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)) as resp:
             if resp.status_code == 200:
-                async for chunk in resp.aiter_bytes(chunk_size=131072):
+                async for chunk in resp.aiter_bytes(chunk_size=262144):
                     buf.write(chunk)
                     if len(buf.getvalue()) > max_bytes:
                         logger.warning(f"MP3 stream exceeded limit: {len(buf.getvalue())} bytes")
                         return None
                 raw = buf.getvalue()
-                if len(raw) >= 100_000:
+                if len(raw) >= 80_000:
+                    # Guard against HTML error pages returned with 200 OK
+                    if raw.startswith(b"<!DOCTYPE") or raw.startswith(b"<html") or b"<head>" in raw[:500]:
+                        logger.warning(f"Disguised HTML document received from {safe_url}, skipping.")
+                        return None
                     return raw
         return None
 
@@ -296,68 +300,78 @@ async def download_mp3_stream(url: str, max_bytes: int = _MAX_AUDIO_BYTES, timeo
 
 async def search_and_stream_music(clean_q: str) -> Optional[Tuple[Dict[str, Any], bytes]]:
     """
-    Finds candidates via DuckDuckGo and portals, then downloads the first working MP3 stream directly.
+    Finds candidates via parallel racing across DuckDuckGo and top music portals,
+    then downloads the first working studio MP3 stream directly with early-exit optimization.
     Guarantees that a returned track actually has complete downloadable audio bytes in memory.
     """
     client = get_music_client()
     candidates: List[Dict[str, Any]] = []
 
-    # 1. Search DuckDuckGo for candidate pages
-    search_terms = [f'دانلود آهنگ {clean_q} 320 mp3', f'دانلود آهنگ {clean_q}']
-    pages: List[Tuple[str, str]] = []
-    for st in search_terms:
+    # 1. Parallel crawler across DuckDuckGo and multiple direct portals
+    async def _search_ddg_candidates() -> List[Dict[str, Any]]:
+        ddg_results: List[Dict[str, Any]] = []
         try:
-            r = await client.post('https://html.duckduckgo.com/html/', data={'q': st}, timeout=5.0)
+            r = await client.post('https://html.duckduckgo.com/html/', data={'q': f'دانلود آهنگ {clean_q} 320 mp3'}, timeout=4.0)
             if r.status_code == 200:
                 soup = BeautifulSoup(r.text, 'html.parser')
-                for a in soup.find_all('a', class_='result__a'):
+                pages = []
+                for a in soup.find_all('a', class_='result__a')[:5]:
                     h = a.get('href', '')
                     t = a.get_text().strip()
                     if 'uddg=' in h:
-                        h = urllib.parse.unquote(re.search(r'uddg=([^&]+)', h).group(1))
-                    if h.startswith('http') and not any(x in h for x in ['youtube.com', 'aparat.com', 'spotify.com', 'instagram.com', 'tarafdari.com']):
-                        if not any(c[0] == h for c in pages):
-                            pages.append((h, t))
-            if len(pages) >= 6:
-                break
+                        try:
+                            h = urllib.parse.unquote(re.search(r'uddg=([^&]+)', h).group(1))
+                        except Exception:
+                            pass
+                    if h.startswith('http') and not any(x in h for x in ['youtube.com', 'aparat.com', 'spotify.com', 'instagram.com']):
+                        pages.append((h, t))
+                if pages:
+                    sub_tasks = [_extract_mp3_from_page(client, h, t) for h, t in pages]
+                    sub_res = await asyncio.gather(*sub_tasks, return_exceptions=True)
+                    for sr in sub_res:
+                        if isinstance(sr, dict) and sr.get('url'):
+                            ddg_results.append(sr)
         except Exception as e:
-            logger.debug(f"DDG search error: {e}")
+            logger.debug(f"DDG music search error: {e}")
+        return ddg_results
 
-    # 2. Concurrently fetch candidate pages
-    async def _fetch_cand(page_url: str, page_title: str) -> Optional[Dict[str, Any]]:
-        return await _extract_mp3_from_page(client, page_url, page_title)
+    # Race DDG and direct portals concurrently for sub-second candidate retrieval
+    racing_tasks = [
+        _search_ddg_candidates(),
+        _crawl_portal_fast(client, "https://musics-fa.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>', clean_q),
+        _crawl_portal_fast(client, "https://golsarmusic.ir/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>', clean_q),
+        _crawl_portal_fast(client, "https://upmusics.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>', clean_q),
+    ]
 
-    if pages:
-        tasks = [_fetch_cand(h, t) for h, t in pages[:6]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, dict) and r.get('url'):
-                candidates.append(r)
+    all_gathered = await asyncio.gather(*racing_tasks, return_exceptions=True)
+    for res in all_gathered:
+        if isinstance(res, list):
+            candidates.extend(res)
+        elif isinstance(res, dict) and res.get('url'):
+            candidates.append(res)
 
-    # 3. If no DDG candidates found, try direct portals
-    if not candidates:
-        portal_tasks = [
-            _crawl_portal_fast(client, "https://musics-fa.com/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>', clean_q),
-            _crawl_portal_fast(client, "https://golsarmusic.ir/?s={q}", r'<h2[^>]*>.*?<a\s+href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>.*?</h2>', clean_q),
-        ]
-        portal_res = await asyncio.gather(*portal_tasks, return_exceptions=True)
-        for pr in portal_res:
-            if isinstance(pr, dict) and pr.get('url'):
-                candidates.append(pr)
+    # 2. De-duplicate candidates by URL
+    seen_urls = set()
+    unique_candidates = []
+    for c in candidates:
+        u = c.get("url")
+        if u and u not in seen_urls:
+            seen_urls.add(u)
+            unique_candidates.append(c)
 
-    # 4. Sort candidates: prioritize 320kbps
-    candidates.sort(key=lambda c: 0 if "320" in c.get("quality", "") else 1)
+    # 3. Sort candidates: prioritize 320kbps
+    unique_candidates.sort(key=lambda c: 0 if "320" in c.get("quality", "") else 1)
 
-    # 5. Try downloading candidate audio streams with early exit upon first success
-    for cand in candidates[:4]:
+    # 4. Stream download candidate audio with early exit upon first working track
+    for cand in unique_candidates[:4]:
         url = cand["url"]
-        logger.info(f"Attempting MP3 download for '{clean_q}' from: {url}")
+        logger.info(f"Attempting MP3 stream for '{clean_q}' from: {url}")
         raw = await download_mp3_stream(url, timeout_sec=12.0)
-        if raw and len(raw) >= 100_000:
+        if raw and len(raw) >= 80_000:
             logger.info(f"Successfully streamed {len(raw)} bytes for '{clean_q}'")
             return cand, raw
 
-    # 6. Fallback to Deezer if available
+    # 5. Fallback to Deezer if available
     deezer_cand = await _search_deezer_fast(client, clean_q)
     if deezer_cand and deezer_cand.get("url"):
         raw = await download_mp3_stream(deezer_cand["url"], timeout_sec=8.0)

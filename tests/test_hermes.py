@@ -2407,6 +2407,46 @@ async def test_shell_permission_and_admin_confirmation():
     assert token not in _PENDING_SHELL_COMMANDS
 
 
+@pytest.mark.asyncio
+async def test_tavily_and_live_web_search():
+    """Tests Tavily key parsing and live web search fallback engine."""
+    from config import get_tavily_api_keys
+    from tools.web_reader import search_web_live
+    import os
+
+    # Test key parsing
+    os.environ["TAVILY_API_KEY"] = "tvly-test-1, tvly-test-2; tvly-test-3"
+    keys = get_tavily_api_keys()
+    assert "tvly-test-1" in keys
+    assert "tvly-test-2" in keys
+    assert "tvly-test-3" in keys
+    os.environ.pop("TAVILY_API_KEY", None)
+
+    # Test live web search (falls back to ultra-fast DuckDuckGo)
+    res = await search_web_live("هوش مصنوعی")
+    assert res is not None
+    assert len(res) > 20
+    assert "🔗" in res
+
+
+def test_summary_aliases_and_kholase():
+    """Tests that summary tool recognizes /summary and /kholase aliases."""
+    from tools.summary_tool import parse_summary_request
+
+    is_s1, cnt1 = parse_summary_request("/summary 30")
+    assert is_s1 is True
+    assert cnt1 == 30
+
+    is_s2, cnt2 = parse_summary_request("/kholase 25")
+    assert is_s2 is True
+    assert cnt2 == 25
+
+    is_s3, cnt3 = parse_summary_request("/summarize")
+    assert is_s3 is True
+    assert cnt3 == 100
+
+
+
 
 
 

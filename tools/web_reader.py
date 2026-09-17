@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 from typing import Optional
 
 import database
-from config import settings
+from config import settings, get_tavily_api_keys
 
 logger = logging.getLogger("WebReader")
 
@@ -139,12 +139,51 @@ async def fetch_webpage_text(url: str, max_chars: int = 5000) -> str:
 
 
 # =========================================================================
-# Live Web Search (Tavily Multi-Key Engine with L1 RAM Cache)
+# Live Web Search (Tavily Multi-Key Engine with DuckDuckGo Fallback & L1 Cache)
 # =========================================================================
+
+async def _search_duckduckgo_fast(clean_q: str, max_results: int = 3) -> Optional[str]:
+    """Fallback search engine using DuckDuckGo HTML scraping when Tavily is unconfigured or unavailable."""
+    client = get_web_client()
+    try:
+        r = await client.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": clean_q},
+            timeout=3.0
+        )
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            snippets = []
+            results = soup.find_all("div", class_=re.compile(r"result\s+results_links", re.I)) or soup.find_all("div", class_="result")
+            for idx, item in enumerate(results[:max_results], 1):
+                title_el = item.find("a", class_="result__a")
+                snippet_el = item.find("a", class_="result__snippet")
+                if not title_el:
+                    continue
+                title = title_el.get_text(strip=True)
+                raw_href = title_el.get("href", "")
+                if "uddg=" in raw_href:
+                    try:
+                        url = urllib.parse.unquote(re.search(r"uddg=([^&]+)", raw_href).group(1))
+                    except Exception:
+                        url = raw_href
+                else:
+                    url = raw_href
+                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                clean_s = re.sub(r"\s+", " ", snippet).strip()[:260]
+                snippets.append(f"[{idx}] {title}\n{clean_s}\n🔗 {url}")
+
+            if snippets:
+                return "\n\n".join(snippets)
+    except Exception as e:
+        logger.debug(f"DuckDuckGo fallback search error: {e}")
+    return None
+
 
 async def search_web_live(query: str, max_results: int = 3) -> Optional[str]:
     """
-    Executes an ultra-fast live web search using Tavily API with key rotation and L1 cache.
+    Executes an ultra-fast live web search using Tavily API with key rotation and L1 cache,
+    with automatic sub-second fallback to DuckDuckGo if Tavily is unconfigured or exhausted.
     Returns clean, structured Persian summary with sources and citations.
     """
     clean_q = query.strip()
@@ -156,42 +195,44 @@ async def search_web_live(query: str, max_results: int = 3) -> Optional[str]:
     if cached:
         return cached
 
-    # Parse Tavily API Keys from config
-    keys_raw = getattr(settings, "TAVILY_API_KEYS", "") or os.getenv("TAVILY_API_KEYS", "")
-    keys = [k.strip() for k in keys_raw.split(",") if k.strip()]
-    if not keys:
-        logger.warning("No TAVILY_API_KEYS configured for live web search.")
-        return None
-
+    keys = get_tavily_api_keys()
     client = get_web_client()
-    for key in keys:
-        try:
-            r = await client.post(
-                "https://api.tavily.com/search",
-                json={
-                    "api_key": key,
-                    "query": clean_q,
-                    "max_results": max_results,
-                    "search_depth": "basic",
-                },
-                timeout=3.5
-            )
-            if r.status_code == 200:
-                data = r.json()
-                results = data.get("results") or []
-                if results:
-                    snippets = []
-                    for idx, res in enumerate(results[:max_results], 1):
-                        title = res.get("title") or "منبع"
-                        content = res.get("content") or ""
-                        url = res.get("url") or ""
-                        clean_c = re.sub(r"\s+", " ", content).strip()[:250]
-                        snippets.append(f"[{idx}] {title}\n{clean_c}\n🔗 {url}")
-                    summary = "\n\n".join(snippets)
-                    database.l1_set(cache_key, summary, ttl_sec=600)
-                    return summary
-        except Exception as e:
-            logger.debug(f"Tavily search attempt failed: {e}")
-            continue
+
+    if keys:
+        for key in keys:
+            try:
+                r = await client.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": key,
+                        "query": clean_q,
+                        "max_results": max_results,
+                        "search_depth": "basic",
+                    },
+                    timeout=2.8
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    results = data.get("results") or []
+                    if results:
+                        snippets = []
+                        for idx, res in enumerate(results[:max_results], 1):
+                            title = res.get("title") or "منبع"
+                            content = res.get("content") or ""
+                            url = res.get("url") or ""
+                            clean_c = re.sub(r"\s+", " ", content).strip()[:260]
+                            snippets.append(f"[{idx}] {title}\n{clean_c}\n🔗 {url}")
+                        summary = "\n\n".join(snippets)
+                        database.l1_set(cache_key, summary, ttl_sec=900)
+                        return summary
+            except Exception as e:
+                logger.debug(f"Tavily search attempt failed: {e}")
+                continue
+
+    # Fallback to ultra-fast DuckDuckGo search if Tavily was unconfigured or failed
+    ddg_summary = await _search_duckduckgo_fast(clean_q, max_results=max_results)
+    if ddg_summary:
+        database.l1_set(cache_key, ddg_summary, ttl_sec=900)
+        return ddg_summary
 
     return None

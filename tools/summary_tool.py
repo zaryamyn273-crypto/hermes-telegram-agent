@@ -41,8 +41,8 @@ def parse_summary_request(text: str) -> Tuple[bool, int]:
 
     t = _normalize_persian_digits(text.strip().lower())
 
-    # 1. Slash commands: /summarize [N], /recap [N], /خلاصه [N]
-    slash_match = re.match(r"^(?:/)?(?:summarize|recap|خلاصه|گزارش)(?:\s+(\d+))?$", t)
+    # 1. Slash commands: /summarize [N], /summary [N], /recap [N], /kholase [N], /خلاصه [N]
+    slash_match = re.match(r"^(?:/)?(?:summarize|summary|recap|kholase|خلاصه|گزارش)(?:\s+(\d+))?$", t)
     if slash_match:
         cnt_str = slash_match.group(1)
         cnt = int(cnt_str) if cnt_str else 100
