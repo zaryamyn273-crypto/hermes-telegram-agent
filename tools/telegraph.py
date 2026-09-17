@@ -211,7 +211,33 @@ def markdown_to_telegraph_nodes(content: str) -> List[Dict[str, Any]]:
             nodes.append({"tag": "ol", "children": li_items_num})
             continue
 
-        # 9. Standard Paragraph
+        # 9. Markdown Tables (| a | b | or a | b \n ---|---)
+        elif "|" in stripped and i + 1 < len(lines) and re.match(r"^[ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*:?-+:?[ \t]*\|?[ \t]*$", lines[i + 1].strip()):
+            from utils.formatter import format_table_as_box, _split_table_row, _detect_alignments
+            table_lines = [stripped]
+            sep_line = lines[i + 1].strip()
+            i += 2
+            while i < len(lines):
+                r_str = lines[i].strip()
+                if not r_str or "|" not in r_str:
+                    break
+                if re.match(r"^[ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*:?-+:?[ \t]*\|?[ \t]*$", r_str):
+                    break
+                table_lines.append(r_str)
+                i += 1
+
+            header_cells = _split_table_row(table_lines[0])
+            alignments = _detect_alignments(sep_line, len(header_cells))
+            rows = [header_cells]
+            for tl in table_lines[1:]:
+                rows.append(_split_table_row(tl))
+
+            box_table = format_table_as_box(rows, alignments)
+            if box_table:
+                nodes.append({"tag": "pre", "children": [box_table]})
+            continue
+
+        # 10. Standard Paragraph
         else:
             nodes.append({"tag": "p", "children": _parse_inline_elements(stripped)})
             i += 1

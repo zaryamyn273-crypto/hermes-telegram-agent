@@ -859,8 +859,15 @@ def test_vision_helpers():
 
 
 def test_markdown_table_converter():
-    from utils.formatter import convert_markdown_tables_to_box, markdown_to_telegram_html
+    from utils.formatter import (
+        convert_markdown_tables_to_box,
+        convert_html_tables_to_box,
+        markdown_to_telegram_html,
+        get_display_width,
+        format_table_as_box,
+    )
 
+    # 1. Standard pipe table
     sample_table = (
         "متن مقدماتی:\n\n"
         "| نام مدل | شرکت | امتیاز |\n"
@@ -884,6 +891,87 @@ def test_markdown_table_converter():
     assert "<pre>" in html_out or "<pre><code>" in html_out
     assert "┌" in html_out
     assert "OpenAI" in html_out
+
+    # 2. Table without outer boundary pipes
+    no_pipes_table = (
+        "نام ارز | قیمت (تومان) | تغییر\n"
+        "---|---|---\n"
+        "تتر | ۹۲,۵۰۰ | ۰.۰٪\n"
+        "بیت‌کوین | ۸,۸۰۰,۰۰۰,۰۰۰ | +۲.۱٪\n"
+    )
+    converted_no_pipes = convert_markdown_tables_to_box(no_pipes_table)
+    assert "┌" in converted_no_pipes
+    assert "بیت‌کوین" in converted_no_pipes
+    assert "تتر" in converted_no_pipes
+
+    html_no_pipes = markdown_to_telegram_html(no_pipes_table)
+    assert "<pre>" in html_no_pipes
+    assert "بیت‌کوین" in html_no_pipes
+
+    # 3. HTML table conversion
+    html_table = (
+        "پیش‌گفتار:\n"
+        "<table border='1'>\n"
+        "  <thead>\n"
+        "    <tr><th>زبان</th><th>نوع سیستم</th></tr>\n"
+        "  </thead>\n"
+        "  <tbody>\n"
+        "    <tr><td>پایتون</td><td>داینامیک</td></tr>\n"
+        "    <tr><td>راست</td><td>استاتیک</td></tr>\n"
+        "  </tbody>\n"
+        "</table>\n"
+        "پایان متن."
+    )
+    converted_html = convert_html_tables_to_box(html_table)
+    assert "┌" in converted_html
+    assert "پایتون" in converted_html
+    assert "راست" in converted_html
+
+    html_full = markdown_to_telegram_html(html_table)
+    assert "<pre>" in html_full
+    assert "پایتون" in html_full
+    assert "&lt;table&gt;" not in html_full
+
+    # 4. Table inside code block should not break tags or nest backticks
+    code_block_table = (
+        "کد جدول:\n"
+        "```markdown\n"
+        "| A | B |\n"
+        "|---|---|\n"
+        "| 1 | 2 |\n"
+        "```\n"
+    )
+    res_code = markdown_to_telegram_html(code_block_table)
+    assert "<pre>" in res_code
+    assert "┌" in res_code
+    assert "```" not in res_code  # No raw backticks leaked
+
+    # 5. Persian Unicode display width alignment verification
+    rows = [
+        ["نام ارز", "قیمت"],
+        ["بیت‌کوین", "۹۵,۰۰۰"],  # Contains ZWNJ (\u200c)
+        ["تتر", "۹۲,۰۰۰"],
+    ]
+    box = format_table_as_box(rows)
+    lines = box.strip().split("\n")
+    widths = [get_display_width(line) for line in lines]
+    # All rows must have the exact same visual display width
+    assert len(set(widths)) == 1, f"Table lines misaligned: {widths}"
+
+    # 6. Telegraph table parser
+    from tools.telegraph import markdown_to_telegraph_nodes
+    tg_md = (
+        "# گزارش تحلیلی\n"
+        "| شاخص | ارزش |\n"
+        "|---|---|\n"
+        "| طلا | ۳,۵۰۰,۰۰۰ |\n"
+        "| نفت | ۷۵$ |\n"
+    )
+    tg_nodes = markdown_to_telegraph_nodes(tg_md)
+    pre_nodes = [n for n in tg_nodes if n.get("tag") == "pre"]
+    assert len(pre_nodes) >= 1
+    assert "┌" in pre_nodes[0]["children"][0]
+    assert "طلا" in pre_nodes[0]["children"][0]
 
 
 def test_twitter_tool():

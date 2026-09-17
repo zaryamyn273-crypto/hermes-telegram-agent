@@ -5,7 +5,8 @@ Engineered specifically for Telegram's native formatting constraints.
 
 import re
 import html
-from typing import List, Set
+import unicodedata
+from typing import List, Set, Optional, Tuple
 
 # Allowed HTML tags by Telegram Bot API
 ALLOWED_TELEGRAM_TAGS: Set[str] = {
@@ -84,18 +85,159 @@ def sanitize_telegram_html(text: str) -> str:
     return balance_html_tags(cleaned)
 
 
+def get_char_width(char: str) -> int:
+    """Returns visual display width of a single character in monospaced terminal/chat."""
+    cat = unicodedata.category(char)
+    # Zero-width: nonspacing marks, enclosing marks, format chars (ZWNJ \u200c, LRM \u200e, etc.)
+    if cat in ("Mn", "Me", "Cf"):
+        return 0
+    ea = unicodedata.east_asian_width(char)
+    if ea in ("W", "F"):
+        return 2
+    return 1
+
+
+def get_display_width(s: str) -> int:
+    """Calculates visual display width considering Unicode categories, ZWNJ, and wide chars/emojis."""
+    if not s:
+        return 0
+    return sum(get_char_width(c) for c in s)
+
+
+def _clean_cell_text(cell: str) -> str:
+    """Strips markdown bold, italic, inline code, strike, and link syntax from table cells."""
+    s = cell.strip()
+    s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)
+    s = re.sub(r"__([^_]+)__", r"\1", s)
+    s = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", s)
+    s = re.sub(r"`([^`]+)`", r"\1", s)
+    s = re.sub(r"~~([^~]+)~~", r"\1", s)
+    s = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", s)
+    return s.strip()
+
+
+def pad_display_cell(text: str, target_width: int, align: str = "center") -> str:
+    """Pads a cell string with spaces to achieve target visual display width."""
+    cur_w = get_display_width(text)
+    pad = max(0, target_width - cur_w)
+    if align == "left":
+        left = 1 if pad >= 2 else 0
+        right = pad - left
+        return (" " * left) + text + (" " * right)
+    elif align == "right":
+        right = 1 if pad >= 2 else 0
+        left = pad - right
+        return (" " * left) + text + (" " * right)
+    else:  # center
+        left = pad // 2
+        right = pad - left
+        return (" " * left) + text + (" " * right)
+
+
+def format_table_as_box(
+    rows: List[List[str]],
+    alignments: Optional[List[str]] = None,
+    min_padding: int = 2
+) -> str:
+    """
+    Renders a 2D array of string cells into a perfectly aligned Unicode box table
+    with Left-to-Right marks (\u200e) on each line to ensure consistent LTR column
+    layout across all Telegram clients (preventing RTL column scrambling).
+    """
+    if not rows or len(rows) < 2:
+        return ""
+
+    num_cols = max(len(r) for r in rows)
+    norm_rows = []
+    for r in rows:
+        r_copy = [_clean_cell_text(c) for c in r]
+        while len(r_copy) < num_cols:
+            r_copy.append("")
+        norm_rows.append(r_copy)
+
+    col_widths = [0] * num_cols
+    for r in norm_rows:
+        for i, cell in enumerate(r):
+            col_widths[i] = max(col_widths[i], get_display_width(cell) + min_padding)
+
+    col_widths = [max(w, 4) for w in col_widths]
+
+    if not alignments:
+        alignments = ["center"] * num_cols
+    while len(alignments) < num_cols:
+        alignments.append("center")
+
+    lrm = "\u200e"
+    top = lrm + "┌" + "┬".join("─" * w for w in col_widths) + "┐"
+    mid = lrm + "├" + "┼".join("─" * w for w in col_widths) + "┤"
+    bot = lrm + "└" + "┴".join("─" * w for w in col_widths) + "┘"
+
+    out = [top]
+    # Header row (always centered for clean aesthetics)
+    header_cells = [pad_display_cell(c, col_widths[i], align="center") for i, c in enumerate(norm_rows[0])]
+    out.append(lrm + "│" + "│".join(header_cells) + "│")
+    out.append(mid)
+
+    # Data rows
+    for r in norm_rows[1:]:
+        row_cells = [pad_display_cell(c, col_widths[i], align=alignments[i]) for i, c in enumerate(r)]
+        out.append(lrm + "│" + "│".join(row_cells) + "│")
+
+    out.append(bot)
+    return "\n".join(out)
+
+
+TABLE_REGEX = re.compile(
+    r"((?:^[ \t]*\|?[^\n|]+\|[^\n]+\|?[ \t]*\n)"
+    r"(?:^[ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*:?-+:?[ \t]*\|?[ \t]*\n)"
+    r"(?:^[ \t]*\|?[^\n|]+\|[^\n]+\|?[ \t]*(?:\n|$))+)",
+    re.MULTILINE
+)
+
+
+def _split_table_row(line: str) -> List[str]:
+    clean = line.strip()
+    if clean.startswith("|") and clean.endswith("|"):
+        clean = clean[1:-1]
+    elif clean.startswith("|"):
+        clean = clean[1:]
+    elif clean.endswith("|"):
+        clean = clean[:-1]
+    return [c.strip() for c in clean.split("|")]
+
+
+def _detect_alignments(separator_line: str, num_cols: int) -> List[str]:
+    clean = separator_line.strip()
+    if clean.startswith("|") and clean.endswith("|"):
+        clean = clean[1:-1]
+    elif clean.startswith("|"):
+        clean = clean[1:]
+    elif clean.endswith("|"):
+        clean = clean[:-1]
+    parts = [p.strip() for p in clean.split("|")]
+    alignments = []
+    for p in parts:
+        if p.startswith(":") and p.endswith(":"):
+            alignments.append("center")
+        elif p.endswith(":"):
+            alignments.append("right")
+        elif p.startswith(":"):
+            alignments.append("left")
+        else:
+            alignments.append("center")
+    while len(alignments) < num_cols:
+        alignments.append("center")
+    return alignments[:num_cols]
+
+
 def convert_markdown_tables_to_box(text: str) -> str:
     """
-    Detects Markdown pipe tables (| a | b |) and converts them into
-    aligned Unicode box-drawing tables enclosed in monospace code blocks
-    for optimal presentation in Telegram clients.
+    Detects Markdown pipe tables (with or without outer boundary pipes) and converts them
+    into mathematically aligned Unicode box-drawing tables enclosed in monospace blocks.
+    Respects existing code blocks to avoid broken nested backticks.
     """
-    table_regex = re.compile(
-        r"((?:^[ \t]*\|[^\n]+\|[ \t]*\n)"
-        r"(?:^[ \t]*\|[\s\-:|]+\|[ \t]*\n)"
-        r"(?:^[ \t]*\|[^\n]+\|[ \t]*(?:\n|$))+)",
-        re.MULTILINE
-    )
+    if not text or "|" not in text:
+        return text
 
     def _replace_table(match):
         raw_table = match.group(1)
@@ -103,47 +245,76 @@ def convert_markdown_tables_to_box(text: str) -> str:
         if len(lines) < 2:
             return raw_table
 
-        rows = []
-        for line in lines:
-            if line.startswith("|") and line.endswith("|"):
-                line = line[1:-1]
-            cells = [c.strip() for c in line.split("|")]
-            # Skip separator line (e.g. |---|:---|)
+        header_line = lines[0]
+        sep_line = lines[1]
+        data_lines = lines[2:]
+
+        header_cells = [_clean_cell_text(c) for c in _split_table_row(header_line)]
+        alignments = _detect_alignments(sep_line, len(header_cells))
+
+        rows = [header_cells]
+        for dl in data_lines:
+            cells = [_clean_cell_text(c) for c in _split_table_row(dl)]
             if all(set(c).issubset({"-", ":", " "}) for c in cells):
                 continue
             rows.append(cells)
 
-        if not rows or len(rows) < 2:
+        if len(rows) < 2:
             return raw_table
 
-        num_cols = max(len(r) for r in rows)
-        for r in rows:
-            while len(r) < num_cols:
-                r.append("")
+        box_table = format_table_as_box(rows, alignments)
+        if not box_table:
+            return raw_table
 
-        col_widths = [0] * num_cols
-        for r in rows:
-            for i, c in enumerate(r):
-                col_widths[i] = max(col_widths[i], len(c) + 2)
+        is_inside_code = (text[:match.start()].count("```") % 2 == 1)
+        if is_inside_code:
+            return box_table + "\n"
+        return f"\n```\n{box_table}\n```\n"
 
-        top = "┌" + "┬".join("─" * w for w in col_widths) + "┐"
-        mid = "├" + "┼".join("─" * w for w in col_widths) + "┤"
-        bot = "└" + "┴".join("─" * w for w in col_widths) + "┘"
+    return TABLE_REGEX.sub(_replace_table, text)
 
-        out = [top]
-        header_cells = [f" {c} ".center(col_widths[i]) for i, c in enumerate(rows[0])]
-        out.append("│" + "│".join(header_cells) + "│")
-        out.append(mid)
 
-        for r in rows[1:]:
-            row_cells = [f" {c} ".center(col_widths[i]) for i, c in enumerate(r)]
-            out.append("│" + "│".join(row_cells) + "│")
-        out.append(bot)
+HTML_TABLE_REGEX = re.compile(r"<table[^>]*>([\s\S]*?)</table>", re.IGNORECASE)
 
-        box_table = "\n".join(out)
-        return "\n```\n" + box_table + "\n```\n"
 
-    return table_regex.sub(_replace_table, text)
+def convert_html_tables_to_box(text: str) -> str:
+    """
+    Detects raw HTML <table>...</table> elements and converts them into
+    aligned Telegram-compatible Unicode box tables inside monospace blocks.
+    """
+    if not text or "<table" not in text.lower():
+        return text
+
+    def _replace_html_table(match):
+        content = match.group(1)
+        row_pattern = re.compile(r"<tr[^>]*>([\s\S]*?)</tr>", re.IGNORECASE)
+        cell_pattern = re.compile(r"<(?:th|td)[^>]*>([\s\S]*?)</(?:th|td)>", re.IGNORECASE)
+
+        rows = []
+        for tr in row_pattern.finditer(content):
+            tr_content = tr.group(1)
+            cells = []
+            for cell in cell_pattern.finditer(tr_content):
+                raw_cell = cell.group(1)
+                clean_cell = re.sub(r"<[^>]+>", "", raw_cell)
+                clean_cell = html.unescape(clean_cell).strip()
+                cells.append(_clean_cell_text(clean_cell))
+            if cells:
+                rows.append(cells)
+
+        if len(rows) < 2:
+            return match.group(0)
+
+        box_table = format_table_as_box(rows)
+        if not box_table:
+            return match.group(0)
+
+        is_inside_code = (text[:match.start()].count("```") % 2 == 1)
+        if is_inside_code:
+            return box_table + "\n"
+        return f"\n```\n{box_table}\n```\n"
+
+    return HTML_TABLE_REGEX.sub(_replace_html_table, text)
 
 
 def markdown_to_telegram_html(text: str) -> str:
@@ -161,7 +332,7 @@ def markdown_to_telegram_html(text: str) -> str:
     - Strikethrough (~~strike~~) -> <s>
     - Spoilers (||spoiler||) -> <tg-spoiler>
     - Links ([text](url)) -> <a href="...">
-    - Tables -> Monospaced box tables
+    - Tables -> Monospaced box tables (Markdown & HTML)
     - Full tag balancing & sanitization
     """
     if not text:
@@ -169,16 +340,21 @@ def markdown_to_telegram_html(text: str) -> str:
 
     text = strip_thinking(text)
 
-    # 1. Convert raw markdown tables to aligned Unicode box tables
+    # 1. Convert raw HTML tables to aligned Unicode box tables
+    text = convert_html_tables_to_box(text)
+
+    # 2. Convert raw markdown tables to aligned Unicode box tables
     text = convert_markdown_tables_to_box(text)
 
-    # 2. Protect code blocks (```code```)
+    # 3. Protect code blocks (```code```)
     code_blocks = []
     def _save_code_block(match):
         lang = (match.group(1) or "").strip()
         code = match.group(2)
         escaped_code = html.escape(code)
-        if lang:
+        if "┌" in code and "└" in code:
+            tag = f'<pre>{escaped_code}</pre>'
+        elif lang:
             tag = f'<pre><code class="language-{html.escape(lang)}">{escaped_code}</code></pre>'
         else:
             tag = f'<pre>{escaped_code}</pre>'

@@ -161,20 +161,19 @@ Operating Directives:
      - Use structured bullet indicators (`• `, `🔹 `, `▫️ `) with bold leading phrases (`• **مورد اول:** توضیحات`).
      - Avoid messy raw asterisks or unspaced dashes.
   6. 📊 TABULAR DATA & MATRICES:
-     - Telegram mobile CANNOT render Markdown pipe tables (`| a | b |`).
-     - ALWAYS present comparisons or matrices using:
-       • Card format (optimal for mobile screens):
-         🔹 **[نام آیتم]**
+     - The Prometheus engine features a specialized Unicode box-table converter that automatically converts Markdown tables and HTML tables into pixel-perfect, mathematically aligned monospace box tables (<pre>)!
+     - When presenting tabular data or comparisons:
+       • Standard Tables (up to 3-4 columns): Use clean Markdown tables:
+         | شاخص / ویژگی | پایتون | گو |
+         |:---|:---:|---:|
+         | تایپینگ | داینامیک | استاتیک |
+         | سرعت | بالا | فوق‌العاده |
+         (The engine automatically renders this into a beautiful Unicode box table for Telegram clients).
+       • Wide Multi-Column Data (>3-4 columns): On mobile screens, wide tables require horizontal scrolling. Use visual Card Format for best mobile readability:
+         🔹 **[نام دارایی / آیتم]**
          ▫️ **مشخصه ۱:** مقدار
          ▫️ **مشخصه ۲:** مقدار
-       • OR Monospaced Box Table inside a code block (```):
-         ```
-         ┌────────┬───────────┐
-         │ ستون ۱ │ ستون ۲    │
-         ├────────┼───────────┤
-         │ داده ۱ │ داده ۲    │
-         └────────┴───────────┘
-         ```
+       • For comprehensive reports or large tables, you can publish directly to Telegraph via `/telegraph [عنوان]`.
   7. ⎯ SECTION SEPARATION:
      - Do NOT use raw `---` or `***`. Use a clean line like `⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯` or clean double newlines.
   8. 🙈 SPOILERS:
