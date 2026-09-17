@@ -701,6 +701,68 @@ def is_group_list_request(text: str) -> bool:
     return False
 
 
+_PROMETHEUS_TRIGGER_NAMES = ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس", "پرومتـه"]
+
+
+def is_direct_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_text: str) -> Tuple[bool, str]:
+    """
+    Determines if a message is a DIRECT request to Prometheus:
+    - In Private Chat (DM): Always True.
+    - In Group Chats: True ONLY if:
+        1. It starts with a slash command ('/')
+        2. It explicitly mentions the bot (@username)
+        3. It explicitly calls the bot by name (پرومته, prometheus, ...)
+        4. It is a direct reply to one of the bot's own messages.
+    Returns: (is_direct: bool, cleaned_text: str)
+    """
+    chat = update.effective_chat
+    message = update.effective_message
+    if not chat or not raw_text:
+        return False, ""
+
+    text = raw_text.strip()
+    if not text:
+        return False, ""
+
+    # 1. Private Chat (DM) is ALWAYS a direct interaction
+    if chat.type == ChatType.PRIVATE:
+        return True, text
+
+    # 2. Group Chats: Strictly require direct invocation
+    bot_id = context.bot.id if context and getattr(context, "bot", None) else None
+    bot_username = (context.bot.username or "").lower() if context and getattr(context, "bot", None) else ""
+
+    # a) Slash command
+    if text.startswith("/"):
+        if bot_username:
+            text = re.sub(rf"^(/[a-zA-Z0-9_]+)@{re.escape(bot_username)}\b", r"\1", text, flags=re.IGNORECASE)
+        return True, text
+
+    # b) Mention via @bot_username
+    if bot_username and f"@{bot_username}" in text.lower():
+        cleaned = re.sub(rf"@{re.escape(bot_username)}", "", text, flags=re.IGNORECASE).strip()
+        return True, cleaned
+
+    # c) Explicit trigger names (PROMETHEUS)
+    has_trigger_name = False
+    cleaned = text
+    for name in _PROMETHEUS_TRIGGER_NAMES:
+        if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text, flags=re.IGNORECASE):
+            has_trigger_name = True
+            cleaned = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "", cleaned, flags=re.IGNORECASE).strip()
+
+    if has_trigger_name:
+        cleaned = cleaned.lstrip("،, :!-؟?").rstrip("،, :!-؟?").strip()
+        return True, cleaned
+
+    # d) Direct reply to the bot's own message
+    if message and message.reply_to_message and message.reply_to_message.from_user:
+        if bot_id and message.reply_to_message.from_user.id == bot_id:
+            return True, text
+
+    return False, ""
+
+
 def extract_replied_message_context(message) -> str:
     """
     Extracts structured sender, text, caption, and media metadata from the replied-to message.
@@ -1931,20 +1993,29 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
     """
     Directly intercepts admin commands (Persian natural language and slash commands)
     and executes them immediately without ever sending them to the AI LLM.
+    Strictly requires that the bot is DIRECTLY addressed when in group chats.
     """
     user = update.effective_user
+    chat = update.effective_chat
     if not user or not is_admin(user.id):
         return False
 
-    t = (raw_text or "").strip()
+    # In group chats, strictly require that the bot was directly requested
+    if chat and chat.type != ChatType.PRIVATE:
+        is_direct, t = is_direct_bot_request(update, context, raw_text)
+        if not is_direct or not t:
+            return False
+    else:
+        t = (raw_text or "").strip()
+
     if not t:
         return False
 
-    bot_username = (context.bot.username or "").lower()
+    bot_username = (context.bot.username or "").lower() if context and getattr(context, "bot", None) else ""
     if bot_username:
         t = re.sub(rf"@{re.escape(bot_username)}", "", t, flags=re.IGNORECASE).strip()
 
-    for name in ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس"]:
+    for name in _PROMETHEUS_TRIGGER_NAMES:
         t = re.sub(rf"^(?:{re.escape(name)}[\s,:،-]*)+", "", t, flags=re.IGNORECASE).strip()
         t = re.sub(rf"[\s,:،-]+(?:{re.escape(name)})+$", "", t, flags=re.IGNORECASE).strip()
 
@@ -2072,42 +2143,19 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raw_text.strip():
         return
 
-    # Direct Interception of Admin Commands (Persian & Slash)
+    # 1. Enforce Direct Bot Request Policy:
+    # In groups, the bot strictly ignores any message that does not directly call or address it.
+    is_direct, cleaned_prompt = is_direct_bot_request(update, context, raw_text)
+    if not is_direct:
+        # Strictly remain silent in groups for all other messages
+        return
+
+    # 2. Direct Interception of Admin Commands (Persian & Slash)
     if is_admin(user.id):
         if await handle_admin_text_command(update, context, raw_text):
             return
 
-    is_private = (chat.type == ChatType.PRIVATE)
-    bot_id = context.bot.id
-    bot_username = (context.bot.username or "").lower()
-
-    # --- Trigger Policy (Silence By Default in Groups) ---
-    is_triggered = False
-
-    if is_private:
-        # 1. Private Chat (DM) -> Always trigger
-        is_triggered = True
-    else:
-        # 2. Group Chats: ONLY trigger if replied to bot, or explicitly mentioned
-        # a) Direct reply to bot's message
-        if message.reply_to_message and message.reply_to_message.from_user:
-            if message.reply_to_message.from_user.id == bot_id:
-                is_triggered = True
-
-        # b) Mention via @username
-        if bot_username and f"@{bot_username}" in raw_text.lower():
-            is_triggered = True
-
-        # c) Explicit trigger names (PROMETHEUS ONLY)
-        trigger_names = ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس", "پرومتـه"]
-        if any(name in raw_text.lower() for name in trigger_names):
-            is_triggered = True
-
-    if not is_triggered:
-        # Strictly remain silent in groups for all other messages
-        return
-
-    # Check Silence / Stop Triggers
+    # 3. Check Silence / Stop Triggers
     raw_lower = raw_text.lower().strip()
     silence_triggers = [
         "پرومته ساکت", "پرومته ساکت شو", "پرومته بسه", "پرومته بس کن",
@@ -2124,14 +2172,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed:
         await message.reply_text(limit_msg or "⚠️ لطفاً کمی شکیبا باشید و از ارسال رگباری پیام‌ها خودداری کنید.")
         return
-
-    # Clean the trigger name from the prompt for cleaner matching
-    cleaned_prompt = raw_text
-    if bot_username:
-        cleaned_prompt = re.sub(rf"@{re.escape(bot_username)}", "", cleaned_prompt, flags=re.IGNORECASE)
-    for name in ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس", "پرومتـه"]:
-        cleaned_prompt = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "", cleaned_prompt, flags=re.IGNORECASE)
-    cleaned_prompt = cleaned_prompt.lstrip("،, :!-؟?").strip()
 
     if not cleaned_prompt:
         await message.reply_text("درود بر شما! در خدمتم. چه کمکی از دست پرومته ساخته است؟")
