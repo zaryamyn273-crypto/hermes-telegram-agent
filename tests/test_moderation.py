@@ -243,6 +243,14 @@ async def test_group_approval_workflow():
     assert is_group_approved(chat_id_user) is False
     assert get_group_status(chat_id_user) == "rejected"
 
+    # Clean up test artifacts so production DB is never polluted
+    await database.execute_d1_query("DELETE FROM tracked_groups WHERE chat_id IN (?, ?)", [chat_id_admin, chat_id_user])
+    database._execute_sqlite("DELETE FROM tracked_groups WHERE chat_id IN (?, ?)", [chat_id_admin, chat_id_user])
+    from tools.moderation import _TRACKED_GROUPS, _MOD_LOCK
+    with _MOD_LOCK:
+        _TRACKED_GROUPS.pop(chat_id_admin, None)
+        _TRACKED_GROUPS.pop(chat_id_user, None)
+
 
 @pytest.mark.asyncio
 async def test_admin_settings_and_command_logging():
@@ -409,6 +417,17 @@ async def test_group_list_commands_and_interception():
     admin_id = 8814471014
     context = MagicMock()
     context.bot.username = "AMZprometheusopenbot"
+    context.bot.id = 8939248291
+    mock_chat = MagicMock()
+    mock_chat.title = "Unit Test Group"
+    mock_chat.username = "unittestgrp"
+    mock_chat.type = "supergroup"
+    mock_chat.member_count = 42
+    context.bot.get_chat = AsyncMock(return_value=mock_chat)
+    mock_member = MagicMock()
+    mock_member.status = "administrator"
+    context.bot.get_chat_member = AsyncMock(return_value=mock_member)
+    context.bot.get_chat_member_count = AsyncMock(return_value=42)
 
     # 1. Test get_all_tracked_groups
     cid_test = -1009988112233
@@ -441,29 +460,41 @@ async def test_group_list_commands_and_interception():
     up.effective_user.username = "admin"
     up.effective_chat.id = admin_id
     up.effective_chat.type = "private"
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
     msg = MagicMock()
-    msg.reply_text = AsyncMock()
+    msg.reply_text = AsyncMock(return_value=status_msg)
     up.effective_message = msg
 
     # Admin sending "لیست گروه"
     handled = await handle_admin_text_command(up, context, "لیست گروه")
     assert handled is True
     msg.reply_text.assert_called()
-    all_text = "".join(c[0][0] for c in msg.reply_text.call_args_list)
-    assert "فهرست گروه‌های ثبت‌شده" in all_text
+    assert status_msg.edit_text.called
+    all_text = status_msg.edit_text.call_args[0][0]
+    assert "فهرست گروه‌های زنده" in all_text
     assert str(cid_test) in all_text
 
     # Admin sending "لیست گروه‌ها"
     msg.reply_text.reset_mock()
+    status_msg.edit_text.reset_mock()
     handled2 = await handle_admin_text_command(up, context, "لیست گروه‌ها")
     assert handled2 is True
-    msg.reply_text.assert_called()
+    assert status_msg.edit_text.called
 
     # Admin sending "/groups"
     msg.reply_text.reset_mock()
+    status_msg.edit_text.reset_mock()
     handled3 = await handle_admin_text_command(up, context, "/groups")
     assert handled3 is True
-    msg.reply_text.assert_called()
+    assert status_msg.edit_text.called
+
+    # Clean up test artifacts
+    await database.execute_d1_query("DELETE FROM tracked_groups")
+    database._execute_sqlite("DELETE FROM tracked_groups")
+    from tools.moderation import _TRACKED_GROUPS, _MOD_LOCK
+    with _MOD_LOCK:
+        _TRACKED_GROUPS.clear()
 
 
 @pytest.mark.asyncio

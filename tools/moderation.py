@@ -934,6 +934,172 @@ async def get_all_tracked_groups(status_filter: Optional[str] = None) -> List[Di
     return groups
 
 
+def update_group_live_metadata(chat_id: int, title: str = "", username: str = ""):
+    """Updates group title and username in memory and async updates DB if changed."""
+    cid = int(chat_id)
+    with _MOD_LOCK:
+        entry = _TRACKED_GROUPS.get(cid)
+        if entry:
+            changed = False
+            if title and entry.get("title") != title:
+                entry["title"] = title
+                changed = True
+            clean_u = (username or "").lstrip("@").strip()
+            if clean_u and entry.get("username") != clean_u:
+                entry["username"] = clean_u
+                changed = True
+            if changed:
+                asyncio.create_task(database.execute_d1_query(
+                    "UPDATE tracked_groups SET title = ?, username = ? WHERE chat_id = ?",
+                    [entry.get("title", ""), entry.get("username", ""), cid]
+                ))
+
+
+async def get_live_telegram_groups(bot, include_left: bool = False) -> List[Dict[str, Any]]:
+    """
+    Performs real-time live verification of all candidate groups directly against Telegram Bot API:
+    - Collects candidate group IDs from tracked_groups, messages, and in-memory caches.
+    - Concurrently verifies if the bot is currently an active member or administrator in each group.
+    - Fetches live title, username, member count, and bot permissions directly from Telegram.
+    - Permanently purges non-existent/deleted groups (e.g. dummy test chats) from the database.
+    - Marks groups where the bot was kicked or left as 'left'.
+    - Returns strictly verified, live active groups.
+    """
+    candidate_cids: Set[int] = set()
+
+    # 1. From in-memory caches
+    with _MOD_LOCK:
+        candidate_cids.update(_TRACKED_GROUPS.keys())
+        candidate_cids.update(_BANNED_GROUPS.keys())
+        candidate_cids.update(_MUTED_GROUPS.keys())
+
+    # 2. From database tracked_groups
+    try:
+        res_t = await database.execute_d1_query("SELECT chat_id FROM tracked_groups")
+        if res_t.get("success"):
+            for r in res_t.get("results", []):
+                if r.get("chat_id"):
+                    candidate_cids.add(int(r["chat_id"]))
+    except Exception as e:
+        logger.debug(f"Candidate groups DB fetch: {e}")
+
+    # 3. From messages table (any group chat where messages were exchanged)
+    try:
+        res_m = await database.execute_d1_query("SELECT DISTINCT chat_id FROM messages WHERE chat_id < 0")
+        if res_m.get("success"):
+            for r in res_m.get("results", []):
+                if r.get("chat_id"):
+                    candidate_cids.add(int(r["chat_id"]))
+    except Exception as e:
+        logger.debug(f"Candidate messages DB fetch: {e}")
+
+    # 4. From local SQLite fallback
+    try:
+        r_sq = database._execute_sqlite("SELECT DISTINCT chat_id FROM messages WHERE chat_id < 0")
+        for r in r_sq.get("results", []):
+            if r.get("chat_id"):
+                candidate_cids.add(int(r["chat_id"]))
+        r_sq2 = database._execute_sqlite("SELECT chat_id FROM tracked_groups")
+        for r in r_sq2.get("results", []):
+            if r.get("chat_id"):
+                candidate_cids.add(int(r["chat_id"]))
+    except Exception:
+        pass
+
+    group_cids = [cid for cid in candidate_cids if cid < 0]
+    if not group_cids:
+        return []
+
+    sem = asyncio.Semaphore(15)
+    live_groups: List[Dict[str, Any]] = []
+
+    # Get current bot user ID
+    try:
+        bot_id = bot.id if hasattr(bot, "id") and bot.id else (await bot.get_me()).id
+    except Exception:
+        bot_id = 0
+
+    async def verify_chat(cid: int):
+        async with sem:
+            try:
+                tg_chat = await bot.get_chat(cid)
+                member = await bot.get_chat_member(cid, bot_id)
+
+                status_str = getattr(member, "status", "")
+                is_active = status_str in ("member", "administrator", "creator")
+
+                if is_active:
+                    is_admin = status_str in ("administrator", "creator")
+                    try:
+                        m_count = await bot.get_chat_member_count(cid)
+                    except Exception:
+                        m_count = getattr(tg_chat, "member_count", 0) or 0
+
+                    title = tg_chat.title or "گروه بدون عنوان"
+                    username = (tg_chat.username or "").lstrip("@")
+                    chat_type = str(getattr(tg_chat, "type", "supergroup"))
+
+                    existing_st = get_group_status(cid)
+                    if existing_st in ("unknown", "left"):
+                        existing_st = "approved"
+
+                    item = {
+                        "chat_id": cid,
+                        "title": title,
+                        "username": username,
+                        "chat_type": chat_type,
+                        "member_count": m_count,
+                        "status": existing_st,
+                        "is_admin": is_admin,
+                        "is_live": True,
+                    }
+
+                    with _MOD_LOCK:
+                        _TRACKED_GROUPS[cid] = item
+
+                    asyncio.create_task(database.execute_d1_query(
+                        """INSERT INTO tracked_groups (chat_id, title, username, chat_type, member_count, status)
+                           VALUES (?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(chat_id) DO UPDATE SET
+                           title=excluded.title, username=excluded.username, member_count=excluded.member_count,
+                           status=CASE WHEN tracked_groups.status = 'banned' THEN 'banned' ELSE excluded.status END""",
+                        [cid, title, username, chat_type, m_count, existing_st]
+                    ))
+
+                    live_groups.append(item)
+                else:
+                    with _MOD_LOCK:
+                        if cid in _TRACKED_GROUPS:
+                            _TRACKED_GROUPS[cid]["status"] = "left"
+                    asyncio.create_task(database.execute_d1_query(
+                        "UPDATE tracked_groups SET status = 'left' WHERE chat_id = ?", [cid]
+                    ))
+            except Exception as e:
+                err = str(e).lower()
+                if "chat not found" in err:
+                    with _MOD_LOCK:
+                        _TRACKED_GROUPS.pop(cid, None)
+                    asyncio.create_task(database.execute_d1_query(
+                        "DELETE FROM tracked_groups WHERE chat_id = ?", [cid]
+                    ))
+                    asyncio.create_task(asyncio.to_thread(
+                        database._execute_sqlite, "DELETE FROM tracked_groups WHERE chat_id = ?", [cid]
+                    ))
+                elif "kicked" in err or "forbidden" in err or "blocked" in err:
+                    with _MOD_LOCK:
+                        if cid in _TRACKED_GROUPS:
+                            _TRACKED_GROUPS[cid]["status"] = "left"
+                    asyncio.create_task(database.execute_d1_query(
+                        "UPDATE tracked_groups SET status = 'left' WHERE chat_id = ?", [cid]
+                    ))
+                else:
+                    logger.debug(f"Live group verification notice for {cid}: {e}")
+
+    await asyncio.gather(*(verify_chat(cid) for cid in group_cids), return_exceptions=True)
+    live_groups.sort(key=lambda g: (g.get("is_admin", False), g.get("member_count", 0)), reverse=True)
+    return live_groups
+
+
 async def get_unbanned_history(limit: int = 25) -> List[Dict[str, Any]]:
     """Returns unban audit logs."""
     res = await database.execute_d1_query(

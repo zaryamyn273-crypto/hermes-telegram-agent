@@ -63,6 +63,8 @@ from tools.moderation import (
     get_muted_groups_list,
     get_pending_groups_list,
     get_all_tracked_groups,
+    get_live_telegram_groups,
+    update_group_live_metadata,
     get_unbanned_history,
     get_admin_commands_log,
     set_admin_setting,
@@ -203,6 +205,13 @@ async def _check_moderation_guard(update: Update, context: ContextTypes.DEFAULT_
         if g_muted and not (is_admin_cmd and is_admin(uid)):
             logger.info(f"Gatekeeper: bot is muted in group {chat.id}")
             return False
+
+        # Keep live group title and username synchronized in RAM/DB
+        update_group_live_metadata(
+            chat_id=chat.id,
+            title=chat.title or "",
+            username=chat.username or ""
+        )
 
         # Group approval check
         status = get_group_status(chat.id)
@@ -400,6 +409,10 @@ async def chat_member_update_handler(update: Update, context: ContextTypes.DEFAU
                 pass
 
     elif new_status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+        from tools.moderation import _TRACKED_GROUPS
+        with _MOD_LOCK:
+            if chat.id in _TRACKED_GROUPS:
+                _TRACKED_GROUPS[chat.id]["status"] = "left"
         await database.execute_d1_query(
             "UPDATE tracked_groups SET status = 'left' WHERE chat_id = ?", [chat.id]
         )
@@ -3083,7 +3096,7 @@ async def mutelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays all tracked groups with their status (approved, pending, banned, muted)."""
+    """Displays all live, active groups verified in real time directly from Telegram."""
     user = update.effective_user
     msg = update.effective_message
     if not user or not is_admin(user.id):
@@ -3091,44 +3104,48 @@ async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("⛔️ دسترسی غیرمجاز. این دستور فقط مخصوص مدیران ربات است.")
         return
 
-    groups = await get_all_tracked_groups()
+    # Send temporary progress notice
+    status_msg = None
+    if msg:
+        try:
+            status_msg = await msg.reply_text(
+                "🔄 <i>در حال استعلام زنده وضعیت گروه‌ها از سرورهای تلگرام...</i>",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+
+    live_groups = await get_live_telegram_groups(context.bot)
     banned_groups = {int(g["chat_id"]): g for g in await get_banned_groups_list() if g.get("chat_id")}
     muted_groups = {int(g["chat_id"]): g for g in await get_muted_groups_list() if g.get("chat_id")}
 
-    # Also merge any banned groups that might not be in tracked_groups table
-    known_cids = {int(g["chat_id"]) for g in groups if g.get("chat_id")}
-    for bg_cid, bg_data in banned_groups.items():
-        if bg_cid not in known_cids:
-            groups.append({
-                "chat_id": bg_cid,
-                "title": bg_data.get("title") or "گروه مسدود",
-                "chat_type": "supergroup",
-                "member_count": 0,
-                "status": "banned",
-                "added_at": bg_data.get("banned_at", "")
-            })
-            known_cids.add(bg_cid)
-
-    if not groups:
-        await msg.reply_text(
-            "📋 <b>فهرست گروه‌های پرومته:</b>\n\n"
-            "<i>در حال حاضر هیچ گروهی در دیتابیس ثبت نشده است.</i>\n"
-            "💡 به محض اضافه شدن ربات به گروه یا دریافت پیام، گروه به صورت خودکار شناسایی و ذخیره می‌شود.",
-            parse_mode=ParseMode.HTML
+    if not live_groups:
+        no_groups_text = (
+            "📋 <b>فهرست گروه‌های زنده پرومته:</b>\n\n"
+            "<i>در حال حاضر پرومته در هیچ گروه تلگرامی زنده‌ای عضو نیست یا ربات از گروه‌ها خارج شده است.</i>\n\n"
+            "💡 <b>راهنمای اتصال به گروه جدید:</b>\n"
+            "۱. پرومته (@AMZprometheusopenbot) را به گروه تلگرامی خود اضافه فرمایید.\n"
+            "۲. جهت عملکرد بهینه و مدیریت کامل، به ربات دسترسی ادمین بدهید.\n"
+            "۳. به محض ورود یا ارسال اولین پیام، گروه به صورت خودکار شناسایی شده و در این لیست قرار می‌گیرد."
         )
+        if status_msg:
+            await status_msg.edit_text(no_groups_text, parse_mode=ParseMode.HTML)
+        elif msg:
+            await msg.reply_text(no_groups_text, parse_mode=ParseMode.HTML)
         return
 
-    lines = [f"👥 <b>فهرست گروه‌های ثبت‌شده در پرومته ({len(groups)} گروه):</b>\n"]
+    lines = [f"👥 <b>فهرست گروه‌های زنده و فعال پرومته ({len(live_groups)} گروه):</b>\n"]
 
-    for idx, g in enumerate(groups, 1):
+    for idx, g in enumerate(live_groups, 1):
         cid = int(g.get("chat_id") or 0)
         title = g.get("title") or "گروه بدون نام"
         uname = f"@{g.get('username')}" if g.get("username") else ""
         m_count = g.get("member_count") or 0
-        st = g.get("status", "unknown")
-        added_at = g.get("added_at") or ""
+        is_admin_in_group = g.get("is_admin", False)
+        st = g.get("status", "approved")
 
-        # Moderation badge & management commands
+        role_badge = "⭐️ مدیر (Admin)" if is_admin_in_group else "🟢 عضو عادی (Member)"
+
         if cid in banned_groups or st == "banned":
             st_text = "🚫 مسدود (Banned)"
             quick_act = f"دستور رفع بن: <code>/unbangroup {cid}</code>"
@@ -3138,34 +3155,37 @@ async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             quick_act = f"دستور رفع سکوت: <code>/unmutegroup {cid}</code>"
         elif st in ("approved", "active"):
             st_text = "✅ تایید شده و فعال (Active)"
-            quick_act = f"بن: <code>بن گروه {cid}</code> | میوت: <code>میوت گروه {cid} 1h</code>"
+            quick_act = f"بن: <code>/bangroup {cid}</code> | میوت: <code>/mutegroup {cid} 1h</code>"
         elif st == "pending":
             st_text = "⏳ در انتظار تایید ادمین (Pending)"
             quick_act = f"تایید: <code>/approvegroup {cid}</code> | رد: <code>/rejectgroup {cid}</code>"
-        elif st == "rejected":
-            st_text = "❌ رد شده (Rejected)"
-            quick_act = f"تایید مجدد: <code>/approvegroup {cid}</code>"
-        elif st == "left":
-            st_text = "🚪 خارج شده (Left)"
-            quick_act = f"تایید مجدد: <code>/approvegroup {cid}</code>"
         else:
             st_text = f"ℹ️ {st}"
-            quick_act = f"تایید: <code>/approvegroup {cid}</code>"
+            quick_act = f"مدیریت: <code>/bangroup {cid}</code>"
 
-        members_info = f" | 👥 {m_count} عضو" if m_count > 0 else ""
+        members_info = f" | 👥 {m_count:,} عضو" if m_count > 0 else ""
         uname_info = f" ({html.escape(uname)})" if uname else ""
-        date_info = f" | 📅 {added_at}" if added_at else ""
 
         lines.append(
             f"{idx}. <b>{html.escape(title)}</b>{uname_info}{members_info}\n"
-            f"   🆔 شناسه: <code>{cid}</code>{date_info}\n"
-            f"   📊 وضعیت: {st_text}\n"
+            f"   🆔 شناسه عددی: <code>{cid}</code>\n"
+            f"   🤖 وضعیت ربات: {role_badge}\n"
+            f"   📊 وضعیت پرومته: {st_text}\n"
             f"   ⚙️ {quick_act}\n"
         )
 
+    lines.append("⚡ <i>استعلام زنده وضعیت ربات از سرورهای تلگرام</i>")
     text = "\n".join(lines)
-    for chunk in split_message(text, max_len=3800):
-        await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+    chunks = split_message(text, max_len=3800)
+    if status_msg:
+        await status_msg.edit_text(chunks[0], parse_mode=ParseMode.HTML)
+        for ch in chunks[1:]:
+            if msg:
+                await msg.reply_text(ch, parse_mode=ParseMode.HTML)
+    elif msg:
+        for ch in chunks:
+            await msg.reply_text(ch, parse_mode=ParseMode.HTML)
 
 
 async def pendinggroups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
