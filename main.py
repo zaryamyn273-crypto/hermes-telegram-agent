@@ -841,7 +841,8 @@ def is_direct_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE, ra
 def extract_replied_message_context(message) -> str:
     """
     Extracts structured sender, text, caption, and media metadata from the replied-to message.
-    Allows Prometheus to understand and process whatever message the user replied to.
+    Guarantees that Telegram Numeric User IDs, Usernames, Forward Origins, and Message IDs
+    are directly injected into the prompt context for 100% accurate AI understanding.
     """
     reply_msg = getattr(message, "reply_to_message", None)
     if not reply_msg:
@@ -849,24 +850,60 @@ def extract_replied_message_context(message) -> str:
 
     author_parts = []
     if getattr(reply_msg, "from_user", None) and reply_msg.from_user:
-        name = reply_msg.from_user.first_name or "کاربر"
-        if getattr(reply_msg.from_user, "last_name", None) and reply_msg.from_user.last_name:
-            name += f" {reply_msg.from_user.last_name}"
-        if getattr(reply_msg.from_user, "username", None) and reply_msg.from_user.username:
-            name += f" (@{reply_msg.from_user.username})"
-        author_parts.append(name)
+        ru = reply_msg.from_user
+        name = ru.first_name or "کاربر"
+        if ru.last_name:
+            name += f" {ru.last_name}"
+        if ru.username:
+            name += f" (@{ru.username})"
+        author_parts.append(f"{name} [شناسه عددی (User ID): {ru.id}]")
+    elif getattr(reply_msg, "sender_chat", None) and reply_msg.sender_chat:
+        sc = reply_msg.sender_chat
+        sc_title = sc.title or "کانال/گروه"
+        if sc.username:
+            sc_title += f" (@{sc.username})"
+        author_parts.append(f"{sc_title} [شناسه عددی (Chat ID): {sc.id}]")
     else:
         author_parts.append("کاربر")
 
-    if getattr(reply_msg, "forward_from", None) and reply_msg.forward_from:
-        f_name = reply_msg.forward_from.first_name or "کاربر"
-        if getattr(reply_msg.forward_from, "username", None) and reply_msg.forward_from.username:
-            f_name += f" (@{reply_msg.forward_from.username})"
-        author_parts.append(f"فوروارد از {f_name}")
-    elif getattr(reply_msg, "forward_from_chat", None) and reply_msg.forward_from_chat:
-        title = getattr(reply_msg.forward_from_chat, "title", "") or ""
-        author_parts.append(f"فوروارد از کانال/گروه {title}")
+    # Check Modern Telegram Bot API 7.0+ Forward Origins
+    fo = getattr(reply_msg, "forward_origin", None)
+    if fo:
+        fo_type = getattr(fo, "type", "")
+        if fo_type == "user" and getattr(fo, "sender_user", None):
+            fu = fo.sender_user
+            fu_name = fu.first_name or "کاربر"
+            if fu.last_name:
+                fu_name += f" {fu.last_name}"
+            if fu.username:
+                fu_name += f" (@{fu.username})"
+            author_parts.append(f"فوروارد از کاربر اصلی: {fu_name} [شناسه عددی فرستنده اصلی: {fu.id}]")
+        elif fo_type in ("chat", "channel"):
+            fc = getattr(fo, "chat", None) or getattr(fo, "sender_chat", None)
+            if fc:
+                fc_title = getattr(fc, "title", "") or "کانال/گروه"
+                fc_user = f" (@{fc.username})" if getattr(fc, "username", None) else ""
+                author_parts.append(f"فوروارد از کانال/گروه: {fc_title}{fc_user} [شناسه عددی: {fc.id}]")
+        elif fo_type == "hidden_user":
+            h_name = getattr(fo, "sender_user_name", "کاربر ناشناس")
+            author_parts.append(f"فوروارد از کاربر با حساب مخفی: {h_name} [حریم خصوصی تلگرام]")
+    else:
+        # Legacy forward attributes fallback
+        if getattr(reply_msg, "forward_from", None) and reply_msg.forward_from:
+            ff = reply_msg.forward_from
+            f_name = ff.first_name or "کاربر"
+            if ff.last_name:
+                f_name += f" {ff.last_name}"
+            if ff.username:
+                f_name += f" (@{ff.username})"
+            author_parts.append(f"فوروارد از کاربر: {f_name} [شناسه عددی فرستنده اصلی: {ff.id}]")
+        elif getattr(reply_msg, "forward_from_chat", None) and reply_msg.forward_from_chat:
+            fc = reply_msg.forward_from_chat
+            title = getattr(fc, "title", "") or ""
+            f_user = f" (@{fc.username})" if getattr(fc, "username", None) else ""
+            author_parts.append(f"فوروارد از کانال/گروه: {title}{f_user} [شناسه عددی: {fc.id}]")
 
+    author_parts.append(f"[شماره پیام: {reply_msg.message_id}]")
     author_desc = " | ".join(author_parts)
     content = getattr(reply_msg, "text", None) or getattr(reply_msg, "caption", None) or ""
 
@@ -891,6 +928,57 @@ def extract_replied_message_context(message) -> str:
 
     body = content.strip() if content else "(بدون متن پیوست شده)"
     return f"📌 [پیام ریپلای‌شده از طرف {author_desc}{media_header}]:\n\"\"\"\n{body}\n\"\"\""
+
+
+def extract_forward_message_context(message) -> str:
+    """
+    Extracts structured sender metadata when the incoming message itself is forwarded.
+    Allows Prometheus to identify the original author and their Telegram User ID.
+    """
+    if not message:
+        return ""
+    fo = getattr(message, "forward_origin", None)
+    ff = getattr(message, "forward_from", None)
+    fc = getattr(message, "forward_from_chat", None)
+    if not fo and not ff and not fc:
+        return ""
+
+    origin_parts = []
+    if fo:
+        fo_type = getattr(fo, "type", "")
+        if fo_type == "user" and getattr(fo, "sender_user", None):
+            fu = fo.sender_user
+            fu_name = fu.first_name or "کاربر"
+            if fu.last_name:
+                fu_name += f" {fu.last_name}"
+            if fu.username:
+                fu_name += f" (@{fu.username})"
+            origin_parts.append(f"کاربر فرستنده اصلی: {fu_name} [شناسه عددی/User ID: {fu.id}]")
+        elif fo_type in ("chat", "channel"):
+            c = getattr(fo, "chat", None) or getattr(fo, "sender_chat", None)
+            if c:
+                c_title = getattr(c, "title", "") or "کانال/گروه"
+                c_user = f" (@{c.username})" if getattr(c, "username", None) else ""
+                origin_parts.append(f"کانال/گروه مبدا: {c_title}{c_user} [شناسه عددی: {c.id}]")
+        elif fo_type == "hidden_user":
+            h_name = getattr(fo, "sender_user_name", "کاربر ناشناس")
+            origin_parts.append(f"کاربر فرستنده اصلی با حساب مخفی: {h_name} [حریم خصوصی تلگرام]")
+    elif ff:
+        f_name = ff.first_name or "کاربر"
+        if ff.last_name:
+            f_name += f" {ff.last_name}"
+        if ff.username:
+            f_name += f" (@{ff.username})"
+        origin_parts.append(f"کاربر فرستنده اصلی: {f_name} [شناسه عددی/User ID: {ff.id}]")
+    elif fc:
+        c_title = getattr(fc, "title", "") or "کانال/گروه"
+        c_user = f" (@{fc.username})" if getattr(fc, "username", None) else ""
+        origin_parts.append(f"کانال/گروه مبدا: {c_title}{c_user} [شناسه عددی: {fc.id}]")
+
+    origin_desc = " | ".join(origin_parts) if origin_parts else "پیام فوروارد شده"
+    content = getattr(message, "text", None) or getattr(message, "caption", None) or ""
+    body = content.strip() if content else "(بدون متن پیوست شده)"
+    return f"📌 [پیام فوروارد شده از طرف {origin_desc}]:\n\"\"\"\n{body}\n\"\"\""
 
 
 _WEATHER_EXCLUSIONS = (
@@ -1474,6 +1562,11 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await msg.reply_text(ban_notice, parse_mode=ParseMode.HTML)
                 return
+
+    if caption and is_id_request(caption):
+        report = format_id_report(update)
+        await msg.reply_text(report, parse_mode=ParseMode.HTML)
+        return
 
     # Rate limit check
     allowed, limit_msg = check_user_rate_limit(user.id)
@@ -2453,7 +2546,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Fast-Path -2: Full Telegram Numeric ID & Diagnostics Extraction (<1ms)
-    if is_id_request(cleaned_lower):
+    is_direct_fwd = bool(
+        getattr(message, "forward_origin", None)
+        or getattr(message, "forward_from", None)
+        or getattr(message, "forward_from_chat", None)
+    )
+    if is_id_request(cleaned_lower) or (is_private and is_direct_fwd and (not cleaned_prompt or cleaned_lower in ["", "این کیه", "کیه", "کیه این", "who is this", "id", "info", "آیدی", "ایدی", "شناسه"])):
         report = format_id_report(update)
         await message.reply_text(report, parse_mode=ParseMode.HTML)
         return
@@ -2689,7 +2787,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if replied_context:
         agent_prompt = f"{replied_context}\n\nدستور یا پرسش کاربر درباره پیام بالا:\n{cleaned_prompt}"
     else:
-        agent_prompt = cleaned_prompt
+        forward_context = extract_forward_message_context(message)
+        if forward_context:
+            agent_prompt = f"{forward_context}\n\nدستور یا پرسش کاربر درباره پیام فوروارد شده:\n{cleaned_prompt}"
+        else:
+            agent_prompt = cleaned_prompt
 
     await _process_and_reply(update, context, agent_prompt)
 

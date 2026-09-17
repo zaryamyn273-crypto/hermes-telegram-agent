@@ -694,11 +694,14 @@ def test_extract_replied_message_context():
 
     mock_msg = MagicMock()
     mock_reply = MagicMock()
+    mock_reply.from_user.id = 55667788
     mock_reply.from_user.first_name = "سارا"
     mock_reply.from_user.last_name = "احمدی"
     mock_reply.from_user.username = "sara_ah"
+    mock_reply.forward_origin = None
     mock_reply.forward_from = None
     mock_reply.forward_from_chat = None
+    mock_reply.sender_chat = None
     mock_reply.document = None
     mock_reply.audio = None
     mock_reply.photo = None
@@ -706,12 +709,37 @@ def test_extract_replied_message_context():
     mock_reply.poll = None
     mock_reply.text = "هوش مصنوعی در سال‌های اخیر رشد چشمگیری داشته است."
     mock_reply.caption = None
+    mock_reply.message_id = 9876
     mock_msg.reply_to_message = mock_reply
 
     res = extract_replied_message_context(mock_msg)
     assert "سارا احمدی" in res
     assert "@sara_ah" in res
     assert "هوش مصنوعی" in res
+    assert "55667788" in res
+    assert "9876" in res
+
+
+def test_extract_forward_message_context():
+    from unittest.mock import MagicMock
+    from main import extract_forward_message_context
+
+    mock_msg = MagicMock()
+    mock_msg.forward_origin = None
+    mock_origin_user = MagicMock()
+    mock_origin_user.id = 33445566
+    mock_origin_user.first_name = "فرستنده اصلی"
+    mock_origin_user.last_name = ""
+    mock_origin_user.username = "original_author"
+
+    mock_msg.forward_from = mock_origin_user
+    mock_msg.forward_from_chat = None
+
+    res = extract_forward_message_context(mock_msg)
+    assert "33445566" in res
+    assert "فرستنده اصلی" in res
+    assert "@original_author" in res
+
 
 
 def test_user_rate_limiter():
@@ -768,6 +796,14 @@ def test_id_tool():
     assert is_id_request("شناسه عددی") is True
     assert is_id_request("آیدی من چیه") is True
     assert is_id_request("آیدی") is True
+    # Advanced natural queries from user
+    assert is_id_request("آیدی عددی یک نفر رو بده بهت یا استخراج بکنه") is True
+    assert is_id_request("آیدی عددی یک نفر رو بده") is True
+    assert is_id_request("آیدی این رو استخراج کن") is True
+    assert is_id_request("استخراج آیدی") is True
+    assert is_id_request("آیدی این طرف چنده") is True
+    assert is_id_request("آیدی ایشون رو بده") is True
+    assert is_id_request("whois") is True
 
     # Negatives
     assert is_id_request("آیدی کالای دیجیکالا چیه؟") is False
@@ -792,6 +828,9 @@ def test_id_tool():
     mock_msg = MagicMock()
     mock_msg.message_id = 456
     mock_msg.reply_to_message = None
+    mock_msg.forward_origin = None
+    mock_msg.forward_from = None
+    mock_msg.forward_from_chat = None
 
     mock_update.effective_user = mock_user
     mock_update.effective_chat = mock_chat
@@ -803,6 +842,61 @@ def test_id_tool():
     assert "<code>456</code>" in report
     assert "علی رضایی" in report
     assert "@alirez" in report
+
+
+def test_id_tool_target_reply():
+    from unittest.mock import MagicMock
+    from telegram.constants import ChatType
+    from tools.id_tool import format_id_report
+
+    mock_update = MagicMock()
+    mock_user = MagicMock()
+    mock_user.id = 11111111
+    mock_user.first_name = "درخواست‌دهنده"
+    mock_user.last_name = ""
+    mock_user.username = "requester"
+    mock_user.is_premium = False
+    mock_user.language_code = "fa"
+
+    mock_target = MagicMock()
+    mock_target.id = 99887766
+    mock_target.first_name = "کاربر"
+    mock_target.last_name = "هدف"
+    mock_target.username = "target_user"
+    mock_target.is_premium = True
+    mock_target.language_code = "en"
+
+    mock_reply = MagicMock()
+    mock_reply.message_id = 789
+    mock_reply.from_user = mock_target
+    mock_reply.sender_chat = None
+    mock_reply.forward_origin = None
+    mock_reply.forward_from = None
+    mock_reply.forward_from_chat = None
+
+    mock_msg = MagicMock()
+    mock_msg.message_id = 800
+    mock_msg.reply_to_message = mock_reply
+    mock_msg.forward_origin = None
+    mock_msg.forward_from = None
+    mock_msg.forward_from_chat = None
+
+    mock_chat = MagicMock()
+    mock_chat.id = -100123456789
+    mock_chat.type = ChatType.SUPERGROUP
+    mock_chat.title = "گروه تست"
+    mock_chat.username = None
+
+    mock_update.effective_user = mock_user
+    mock_update.effective_chat = mock_chat
+    mock_update.effective_message = mock_msg
+
+    report = format_id_report(mock_update)
+    assert "<code>99887766</code>" in report
+    assert "کاربر هدف" in report
+    assert "@target_user" in report
+    assert "مشخصات کاربر و پیام هدف (Target Info)" in report
+
 
 
 def test_barcode_and_qr_tool():
