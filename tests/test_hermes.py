@@ -1696,5 +1696,133 @@ async def test_ram_quota_per_group():
     assert history[-1]["content"] == f"RAM test message {_CHAT_RAM_QUOTA_MESSAGES + 14}"
 
 
+def test_personalized_bot_commands_and_collision_guard():
+    """Verify personalized bot prefixes (p, p_, pro, pro_) and group collision prevention."""
+    from main import (
+        make_bot_commands,
+        is_prometheus_prefixed_command,
+        is_command_addressed_to_bot,
+        is_direct_bot_request,
+        PROMETHEUS_BASE_COMMANDS,
+    )
+    from unittest.mock import MagicMock
+    from telegram.constants import ChatType
+
+    # 1. make_bot_commands expands properly
+    cmds = make_bot_commands(["info", "id"])
+    assert "info" in cmds
+    assert "pinfo" in cmds
+    assert "p_info" in cmds
+    assert "proinfo" in cmds
+    assert "pro_info" in cmds
+    assert "pid" in cmds
+    assert "p_id" in cmds
+    assert "proid" in cmds
+    assert "pro_id" in cmds
+
+    # 2. is_prometheus_prefixed_command identifies prefixes accurately
+    assert is_prometheus_prefixed_command("pinfo") is True
+    assert is_prometheus_prefixed_command("p_info") is True
+    assert is_prometheus_prefixed_command("proinfo") is True
+    assert is_prometheus_prefixed_command("pro_info") is True
+    assert is_prometheus_prefixed_command("pid") is True
+    assert is_prometheus_prefixed_command("p_id") is True
+    assert is_prometheus_prefixed_command("phelp") is True
+    assert is_prometheus_prefixed_command("p_help") is True
+    assert is_prometheus_prefixed_command("pstart") is True
+    assert is_prometheus_prefixed_command("pfast") is True
+    assert is_prometheus_prefixed_command("pagent") is True
+    assert is_prometheus_prefixed_command("pping") is True
+    assert is_prometheus_prefixed_command("pstatus") is True
+    assert is_prometheus_prefixed_command("prates") is True
+    assert is_prometheus_prefixed_command("pcalc") is True
+    assert is_prometheus_prefixed_command("pdel") is True
+    assert is_prometheus_prefixed_command("pban") is True
+    assert is_prometheus_prefixed_command("pmute") is True
+
+    # Bare / generic commands should not be marked as prefixed
+    assert is_prometheus_prefixed_command("info") is False
+    assert is_prometheus_prefixed_command("id") is False
+    assert is_prometheus_prefixed_command("help") is False
+    assert is_prometheus_prefixed_command("ping") is False
+    assert is_prometheus_prefixed_command("ban") is False
+    assert is_prometheus_prefixed_command("warn") is False
+    assert is_prometheus_prefixed_command("kick") is False
+
+    # 3. is_command_addressed_to_bot in Group Chats vs Private Chat
+    context = MagicMock()
+    context.bot.username = "AMZprometheusopenbot"
+    context.bot.id = 8939248291
+
+    def make_up(text, chat_type=ChatType.SUPERGROUP, sender_id=1234567, reply_user_id=None):
+        up = MagicMock()
+        up.effective_user.id = sender_id
+        up.effective_chat.type = chat_type
+        up.effective_chat.id = -100123456789
+        msg = MagicMock()
+        msg.text = text
+        if reply_user_id:
+            rep = MagicMock()
+            rep.from_user.id = reply_user_id
+            rep.from_user.username = "AMZprometheusopenbot" if reply_user_id == 8939248291 else "other"
+            msg.reply_to_message = rep
+        else:
+            msg.reply_to_message = None
+        up.effective_message = msg
+        return up
+
+    # In Private Chat: all commands allowed
+    up_pv_info = make_up("/info", chat_type=ChatType.PRIVATE)
+    assert is_command_addressed_to_bot(up_pv_info, context) is True
+    up_pv_pinfo = make_up("/pinfo", chat_type=ChatType.PRIVATE)
+    assert is_command_addressed_to_bot(up_pv_pinfo, context) is True
+
+    # In Group Chat:
+    # a) Prefixed commands MUST be accepted
+    assert is_command_addressed_to_bot(make_up("/pinfo"), context) is True
+    assert is_command_addressed_to_bot(make_up("/p_info"), context) is True
+    assert is_command_addressed_to_bot(make_up("/pid"), context) is True
+    assert is_command_addressed_to_bot(make_up("/p_id"), context) is True
+    assert is_command_addressed_to_bot(make_up("/phelp"), context) is True
+    assert is_command_addressed_to_bot(make_up("/pfast"), context) is True
+    assert is_command_addressed_to_bot(make_up("/pping"), context) is True
+    assert is_command_addressed_to_bot(make_up("/prates"), context) is True
+
+    # b) Commands explicitly mentioning bot username MUST be accepted
+    assert is_command_addressed_to_bot(make_up("/info@AMZprometheusopenbot"), context) is True
+    assert is_command_addressed_to_bot(make_up("/help@AMZprometheusopenbot"), context) is True
+    assert is_command_addressed_to_bot(make_up("/id@AMZprometheusopenbot"), context) is True
+
+    # c) Bare commands without prefix or mention MUST be ignored to prevent collision with other bots!
+    assert is_command_addressed_to_bot(make_up("/info"), context) is False
+    assert is_command_addressed_to_bot(make_up("/id"), context) is False
+    assert is_command_addressed_to_bot(make_up("/help"), context) is False
+    assert is_command_addressed_to_bot(make_up("/ping"), context) is False
+
+    # d) Commands directed to other bots in the group MUST be ignored
+    assert is_command_addressed_to_bot(make_up("/info@OtherBot"), context) is False
+
+    # e) Reply to Prometheus message is accepted
+    assert is_command_addressed_to_bot(make_up("/info", reply_user_id=8939248291), context) is True
+
+    # 4. is_direct_bot_request in Group Chats
+    # a) Unknown commands for other bots (e.g. /warn, /kick) are ignored
+    is_dir, _ = is_direct_bot_request(make_up("/warn @spammer"), context, "/warn @spammer")
+    assert is_dir is False
+    is_dir, _ = is_direct_bot_request(make_up("/kick @spammer"), context, "/kick @spammer")
+    assert is_dir is False
+
+    # b) Prometheus prefixed commands are recognized
+    is_dir, t = is_direct_bot_request(make_up("/p سلام پرومته"), context, "/p سلام پرومته")
+    assert is_dir is True
+    is_dir, t = is_direct_bot_request(make_up("/pfast هوای شیراز"), context, "/pfast هوای شیراز")
+    assert is_dir is True
+
+    # c) Direct mention or trigger name is recognized
+    is_dir, t = is_direct_bot_request(make_up("پرومته قیمت بیت کوین چنده"), context, "پرومته قیمت بیت کوین چنده")
+    assert is_dir is True
+
+
+
 
 

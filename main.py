@@ -16,6 +16,7 @@ import time
 import logging
 import asyncio
 from typing import Optional, Tuple, List, Dict, Any, Set, Union
+from datetime import datetime, timezone
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ParseMode, ChatType, ChatAction, ChatMemberStatus
@@ -789,7 +790,7 @@ def is_delete_request(text: str) -> bool:
 
 
 _GROUP_LIST_REGEX = re.compile(
-    r"^(?:/)?(?:groups|grouplist|listgroups|allgroups|all_groups|"
+    r"^(?:/)?(?:(?:p_|pro_|p|pro)?groups|grouplist|listgroups|allgroups|all_groups|"
     r"(?:لیست|فهرست|نمایش|مشاهده)\s+(?:تمام\s+|همه\s+)?گروه(?:[\s\u200c]*(?:ها|های|هایی))?(?:\s+(?:که\s+)?(?:عضوی|توشونی|توشون\s+هستی|هستی|ثبت\s+شده))?(?:\s+(?:من|ربات|ما|شما|تون|ت))?(?:\s+(?:رو|را)?\s*(?:بده|بفرست|بیار|نشون\s+بده))?|"
     r"گروه(?:[\s\u200c]*(?:ها|های|هایی))?(?:\s+(?:که\s+)?(?:عضوی|توشونی|توشون\s+هستی|هستی|ثبت\s+شده))?(?:\s+(?:من|ربات|ما|شما|تون|ت))?(?:\s+(?:رو|را)?\s*(?:بده|بفرست|بیار|نشون\s+بده))?"
     r")$",
@@ -816,20 +817,184 @@ def is_group_list_request(text: str) -> bool:
 
 _PROMETHEUS_TRIGGER_NAMES = ["پرومته", "prometheus", "پرومتئوس", "پرومتیوس", "پرومتيوس", "پرومتـه"]
 
+# Base commands registered in Prometheus
+PROMETHEUS_BASE_COMMANDS: Set[str] = {
+    "start", "help",
+    "agent", "research", "hermes",
+    "fast", "speed",
+    "mode", "setting", "settings",
+    "rates", "dollar", "arz", "gheymat",
+    "crypto",
+    "time", "saat",
+    "weather", "hava",
+    "digikala", "dk",
+    "music", "song", "ahang",
+    "read", "web", "url",
+    "telegraph", "telegra", "article",
+    "calc", "hesab",
+    "clear", "clean",
+    "id", "myid", "info", "chatid", "whoami",
+    "qr", "qrcode", "barcode", "bar",
+    "twitter", "tweet", "x",
+    "delete", "del", "pak", "hazf", "remove",
+    "ping", "status",
+    "summarize", "recap", "summary", "kholase",
+    "search", "find", "searchdb", "jostojoo",
+    # Admin commands
+    "ban", "block",
+    "unban", "unblock",
+    "mute", "silence",
+    "unmute", "unsilence",
+    "bangroup", "ban_group",
+    "unbangroup", "unban_group",
+    "mutegroup", "mutebot",
+    "unmutegroup", "unmutebot",
+    "banlist", "bans",
+    "mutelist", "mutes",
+    "groups", "grouplist", "listgroups", "allgroups",
+    "pendinggroups", "pending_groups",
+    "approvegroup", "approve_group", "addgroup", "add_group",
+    "rejectgroup", "reject_group",
+    "set", "set_setting",
+    "get", "get_setting",
+    "delsetting", "del_setting", "delrule", "del_rule", "deldirective",
+    "adminsettings", "customdata", "directives", "rules",
+    "adminlogs", "audit",
+}
+
+# Supported short prefixes derived from Prometheus (پرومته)
+PROMETHEUS_COMMAND_PREFIXES = ["p", "p_", "pro", "pro_"]
+
+
+def is_prometheus_prefixed_command(cmd_name: str) -> bool:
+    """
+    Checks whether a command string matches a Prometheus-specific prefixed command.
+    Matches:
+    - 'p' + command (e.g. 'pinfo', 'pid', 'phelp', 'pstart', 'pping', 'pstatus', 'prates', 'pfast', 'pagent', ...)
+    - 'p_' + command or arbitrary name (e.g. 'p_info', 'p_id', 'p_help', 'p_ping', ...)
+    - 'pro' + command (e.g. 'proinfo', 'prohelp', 'proping', ...)
+    - 'pro_' + command (e.g. 'pro_info', 'pro_help', ...)
+    - 'prom_' / 'prometheus_' + command
+    """
+    cmd = (cmd_name or "").lower().strip()
+    if not cmd:
+        return False
+    if cmd in ("p", "pro"):
+        return True
+    if cmd.startswith(("p_", "pro_", "prom_", "prometheus_")):
+        suffix = cmd.split("_", 1)[1]
+        return suffix in PROMETHEUS_BASE_COMMANDS or bool(suffix)
+    for prefix in ("pro", "p"):
+        if cmd.startswith(prefix):
+            remainder = cmd[len(prefix):]
+            if remainder in PROMETHEUS_BASE_COMMANDS:
+                return True
+    return False
+
+
+def make_bot_commands(base_commands: List[str]) -> List[str]:
+    """
+    Expands base commands with Prometheus-specific prefixes:
+    ['info', 'id'] -> ['info', 'id', 'pinfo', 'p_info', 'proinfo', 'pro_info', 'pid', 'p_id', 'proid', 'pro_id']
+    """
+    res = list(base_commands)
+    for cmd in base_commands:
+        for pref in PROMETHEUS_COMMAND_PREFIXES:
+            alias = f"{pref}{cmd}"
+            if alias not in res:
+                res.append(alias)
+    return res
+
+
+def is_command_addressed_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE, is_admin_cmd: bool = False) -> bool:
+    """
+    Determines if a slash command is specifically intended for Prometheus:
+    - In Private Chat (DM): Always True (both prefixed and standard commands are accepted).
+    - In Group Chats:
+      1. Explicitly mentions bot username (@AMZprometheusopenbot)
+      2. Uses personalized Prometheus prefix (e.g. /p..., /p_..., /pro..., /pro_..., /prom_..., /prometheus_...)
+      3. Is a direct reply to Prometheus's own message
+      4. Explicitly mentions Prometheus by name in text ('پرومته', 'prometheus', ...)
+      5. Is an authorized bot administrator executing an administrative command
+      Otherwise in groups: returns False to prevent command collision with other bots!
+    """
+    chat = update.effective_chat
+    message = update.effective_message
+    user = update.effective_user
+    if not chat or not message:
+        return True
+
+    if chat.type == ChatType.PRIVATE:
+        return True
+
+    # Authorized bot administrator issuing an admin command
+    if is_admin_cmd and user and is_admin(user.id):
+        return True
+
+    raw_text = (message.text or message.caption or "").strip()
+    if not raw_text:
+        return False
+
+    bot_user = context.bot if (context and getattr(context, "bot", None)) else None
+    bot_id = bot_user.id if bot_user else None
+    bot_username = (bot_user.username or "").lower() if bot_user else ""
+
+    # 1. Reply to bot's own message
+    if message.reply_to_message and message.reply_to_message.from_user:
+        rep_u = message.reply_to_message.from_user
+        if (bot_id and rep_u.id == bot_id) or (bot_username and rep_u.username and rep_u.username.lower() == bot_username):
+            return True
+
+    # 2. Contains Prometheus trigger names in the text
+    for name in _PROMETHEUS_TRIGGER_NAMES:
+        if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", raw_text, flags=re.IGNORECASE):
+            return True
+
+    # 3. Check the command word itself
+    first_token = raw_text.split()[0] if raw_text else ""
+    if not first_token.startswith("/"):
+        return False
+
+    cmd_part = first_token[1:]  # remove leading '/'
+    cmd_name = cmd_part.split("@")[0].lower()
+    target_bot = cmd_part.split("@")[1].lower() if "@" in cmd_part else ""
+
+    # Targeted explicitly to this bot: /cmd@bot_username
+    if target_bot:
+        if bot_username and target_bot == bot_username:
+            return True
+        else:
+            return False
+
+    # Starts with Prometheus personalized prefixes:
+    if cmd_name.startswith(("p_", "pro_", "prom_", "prometheus_")):
+        return True
+
+    # Starts with 'p' or 'pro' followed by a valid command suffix
+    if is_prometheus_prefixed_command(cmd_name):
+        return True
+
+    # Otherwise in group chats, generic bare commands (like bare /info, /help, /id, /ping) are ignored
+    # to avoid collisions with other bots in the same group!
+    logger.info(f"Command collision guard: ignoring generic un-prefixed command '/{cmd_name}' in group {chat.id}")
+    return False
+
 
 def is_direct_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_text: str) -> Tuple[bool, str]:
     """
     Determines if a message is a DIRECT request to Prometheus:
     - In Private Chat (DM): Always True.
     - In Group Chats: True ONLY if:
-        1. It starts with a slash command ('/')
+        1. It is a slash command targeted to Prometheus (@username) or prefixed with Prometheus abbreviations (p / p_ / pro)
         2. It explicitly mentions the bot (@username)
         3. It explicitly calls the bot by name (پرومته, prometheus, ...)
         4. It is a direct reply to one of the bot's own messages.
+        5. It is an authorized bot administrator issuing a known bot command
     Returns: (is_direct: bool, cleaned_text: str)
     """
     chat = update.effective_chat
     message = update.effective_message
+    user = update.effective_user
     if not chat or not raw_text:
         return False, ""
 
@@ -845,11 +1010,11 @@ def is_direct_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE, ra
     bot_id = context.bot.id if context and getattr(context, "bot", None) else None
     bot_username = (context.bot.username or "").lower() if context and getattr(context, "bot", None) else ""
 
-    # a) Slash command
-    if text.startswith("/"):
-        if bot_username:
-            text = re.sub(rf"^(/[a-zA-Z0-9_]+)@{re.escape(bot_username)}\b", r"\1", text, flags=re.IGNORECASE)
-        return True, text
+    # a) Direct reply to the bot's own message
+    if message and message.reply_to_message and message.reply_to_message.from_user:
+        rep_u = message.reply_to_message.from_user
+        if (bot_id and rep_u.id == bot_id) or (bot_username and rep_u.username and rep_u.username.lower() == bot_username):
+            return True, text
 
     # b) Mention via @bot_username
     if bot_username and f"@{bot_username}" in text.lower():
@@ -868,11 +1033,36 @@ def is_direct_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE, ra
         cleaned = cleaned.lstrip("،, :!-؟?").rstrip("،, :!-؟?").strip()
         return True, cleaned
 
-    # d) Direct reply to the bot's own message
-    if message and message.reply_to_message and message.reply_to_message.from_user:
-        rep_u = message.reply_to_message.from_user
-        if (bot_id and rep_u.id == bot_id) or (bot_username and rep_u.username and rep_u.username.lower() == bot_username):
+    # d) Slash command in groups: MUST be addressed or personalized to Prometheus!
+    if text.startswith("/"):
+        first_token = text.split()[0]
+        cmd_part = first_token[1:]  # remove leading '/'
+        cmd_name = cmd_part.split("@")[0].lower()
+        target_bot = cmd_part.split("@")[1].lower() if "@" in cmd_part else ""
+
+        # Explicit target @bot_username
+        if target_bot:
+            if bot_username and target_bot == bot_username:
+                cleaned = re.sub(rf"^(/[a-zA-Z0-9_]+)@{re.escape(bot_username)}\b", r"\1", text, flags=re.IGNORECASE)
+                return True, cleaned
+            else:
+                return False, ""
+
+        # Personalized prefix: /p, /p_..., /pro_..., /prom_..., /prometheus_...
+        if cmd_name in ("p", "pro") or cmd_name.startswith(("p_", "pro_", "prom_", "prometheus_")):
             return True, text
+
+        # Prefixed command name: p[command] or pro[command]
+        if is_prometheus_prefixed_command(cmd_name):
+            return True, text
+
+        # Authorized bot administrator issuing a known bot command
+        if user and is_admin(user.id) and (cmd_name in PROMETHEUS_BASE_COMMANDS or is_prometheus_prefixed_command(cmd_name)):
+            return True, text
+
+        # Bare slash commands in group chats (e.g. /warn, /kick, /info, /help, /pin)
+        # without bot mention or prefix are NOT for Prometheus!
+        return False, ""
 
     return False, ""
 
@@ -1114,24 +1304,24 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"⚡ **درود {u_name}! به پرومته (Prometheus AI) خوش آمدید.**\n\n"
         "من **پرومته** هستم؛ دستیار هوش مصنوعی پیشرفته، پرسرعت و خودمختار شما که ادغام‌شده با **مغز پردازش غول‌آسای هرمس ایجنت**، دیتابیس ابری کلودفلر و ابزارهای تخصصی زنده است:\n\n"
-        "• 🧠 **غول ایجنت خودمختار:** `/agent [پرسش یا موضوع تحقیق]` (اجرای تمام ابزارها، وب‌گردی، مرورگر و کدنویسی)\n"
-        "• ⚡ **حالت فوق‌سریع:** `/fast [پرسش]` (پاسخ‌دهی زیر ۱ ثانیه با شبکه خصوصی)\n"
-        "• ⚙️ **تنظیم حالت پاسخ‌دهی:** `/mode` (انتخاب بین هوشمند، غول ایجنت و فوق‌سریع)\n"
-        "• 🆔 **استخراج آیدی عددی و مشخصات چت:** `/id` یا `/myid` (کپی فوری با یک لمس)\n"
+        "• 🧠 **غول ایجنت خودمختار:** `/agent` یا `/pagent [موضوع تحقیق]` (اجرای تمام ابزارها، وب‌گردی، مرورگر و کدنویسی)\n"
+        "• ⚡ **حالت فوق‌سریع:** `/fast` یا `/pfast [پرسش]` (پاسخ‌دهی زیر ۱ ثانیه با شبکه اختصاصی)\n"
+        "• ⚙️ **تنظیم حالت پاسخ‌دهی:** `/mode` یا `/pmode` (انتخاب بین هوشمند، غول ایجنت و فوق‌سریع)\n"
+        "• 🆔 **استخراج آیدی عددی و مشخصات چت:** `/id` یا `/pid` یا `/pinfo` (کپی فوری با یک لمس)\n"
         "• 📷 **درک تصویر، OCR و بازسازی بصری:** ارسال مستقیم عکس یا ریپلای روی عکس\n"
-        "• 🏁 **ساخت بارکد و QR Code:** `/qr [متن]` یا `/barcode [کد]`\n"
-        "• 🐦 **کاوشگر و خواننده X (توییتر):** `/twitter [اکانت یا جستجو]` یا ارسال لینک توییت\n"
-        "• 📊 **نرخ لحظه‌ای دلار، تتر، طلا و سکه:** `/rates` یا `/dollar`\n"
-        "• 🪙 **استعلام زنده رمزارزها:** `/crypto btc` یا `/crypto eth`\n"
-        "• 🎵 **دانلود و آپلود مستقیم موزیک ۳۲۰:** `/music نام ترانه`\n"
+        "• 🏁 **ساخت بارکد و QR Code:** `/qr` یا `/pqr [متن]` یا `/barcode [کد]`\n"
+        "• 🐦 **کاوشگر و خواننده X (توییتر):** `/twitter` یا `/ptwitter` یا ارسال لینک توییت\n"
+        "• 📊 **نرخ لحظه‌ای دلار، تتر، طلا و سکه:** `/rates` یا `/prates` یا `/dollar`\n"
+        "• 🪙 **استعلام زنده رمزارزها:** `/crypto` یا `/pcrypto btc`\n"
+        "• 🎵 **دانلود و آپلود مستقیم موزیک ۳۲۰:** `/music` یا `/pmusic نام ترانه`\n"
         "• 📝 **انتشار فوری در تلگراف:** `/telegraph عنوان | متن`\n"
-        "• 🛍 **استعلام و قیمت دیجی‌کالا:** `/digikala نام کالا`\n"
-        "• 🌦 **پیش‌بینی آب و هوای زنده:** `/weather نام شهر`\n"
-        "• 🕒 **ساعت رسمی و تقویم شمسی:** `/time`\n"
-        "• 🧮 **ماشین حساب و ریاضی:** `/calc`\n"
-        "• 🗑 **حذف پیام‌های ارسالی ربات:** `/del` یا گفتن «پاکش کن» با ریپلای روی پیام ربات\n"
+        "• 🛍 **استعلام و قیمت دیجی‌کالا:** `/digikala` یا `/pdk نام کالا`\n"
+        "• 🌦 **پیش‌بینی آب و هوای زنده:** `/weather` یا `/pweather نام شهر`\n"
+        "• 🕒 **ساعت رسمی و تقویم شمسی:** `/time` یا `/ptime`\n"
+        "• 🧮 **ماشین حساب و ریاضی:** `/calc` یا `/pcalc [عبارت]`\n"
+        "• 🗑 **حذف پیام‌های ارسالی ربات:** `/del` یا `/pdel` با ریپلای روی پیام ربات\n"
         "• 📌 **درک هوشمند ریپلای:** روی هر پیامی ریپلای بزنید و سوال یا دستور خود را مطرح کنید تا ربات آن را تحلیل کند.\n\n"
-        "💡 *در گروه‌ها، من تنها زمانی پاسخ می‌دهم که نام «پرومته» را بیاورید، مرا منشن (@) کنید یا روی پیامم ریپلای بزنید.*"
+        "💡 *در گروه‌ها جهت جلوگیری از تداخل با سایر ربات‌ها، کلیه دستورات با پیشوند اختصاصی p یا p_ (مانند /pinfo، /pid، /phelp، /pfast، /prates) یا با منشن نام کاربری (@AMZprometheusopenbot) فعال می‌شوند.*"
     )
     formatted = markdown_to_telegram_html(text)
     await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
@@ -1147,29 +1337,33 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "📖 **راهنمای جامع دستورات پرومته (Prometheus AI):**\n\n"
+        "💡 **شخصی‌سازی دستورات در گروه‌ها (پیشوند p / p_):**\n"
+        "جهت جلوگیری کامل از تداخل با دستورات سایر ربات‌های حاضر در گروه، کلیه دستورات پرومته در گروه‌ها با پیشوند مخفف نام پرومته (`p` یا `p_`) یا منشن نام کاربری ربات فعال می‌شوند:\n"
+        "• مثال: `/pinfo` ، `/pid` ، `/phelp` ، `/pfast` ، `/prates` ، `/pagent` ، `/pping` یا `/info@AMZprometheusopenbot`\n"
+        "• در گفتگوی خصوصی (پیوی)، دستورات هم به شکل ساده (`/info`) و هم با پیشوند اختصاصی (`/pinfo`) فعال هستند.\n\n"
         "🧠 **هسته غول‌آسای هرمس ایجنت (Hermes Titan Brain):**\n"
-        "• `/agent [پرسش]` یا `/research [موضوع]` - ارجاع مستقیم به غول هرمس ایجنت برای وب‌گردی خودکار با Chromium، پژوهش عمیق، تحلیل چندمرحله‌ای و اجرای کد sandbox\n"
-        "• `/fast [پرسش]` - پاسخ‌دهی رعدآسا (زیر ۱ ثانیه) برای مکالمات و سوالات سریع\n"
-        "• `/mode` - مشاهده و تغییر حالت کاری (هوشمند خودکار / غول ایجنت / فوق‌سریع)\n\n"
+        "• `/agent [پرسش]` یا `/pagent [موضوع]` - ارجاع مستقیم به غول هرمس ایجنت برای وب‌گردی خودکار با Chromium، پژوهش عمیق، تحلیل چندمرحله‌ای و اجرای کد sandbox\n"
+        "• `/fast [پرسش]` یا `/pfast` - پاسخ‌دهی رعدآسا (زیر ۱ ثانیه) برای مکالمات و سوالات سریع\n"
+        "• `/mode` یا `/pmode` - مشاهده و تغییر حالت کاری (هوشمند خودکار / غول ایجنت / فوق‌سریع)\n\n"
         "🛠 **ابزارهای اختصاصی و بلادرنگ:**\n"
-        "• `/id` یا `/myid` - استخراج کامل آیدی عددی کاربر، چت، پیام، فرستنده فوروارد و فایل‌های مدیا به صورت کپی یک‌لمسی\n"
-        "• `/qr [متن/لینک]` - ساخت کیوآر کد اختصاصی با کیفیت فوق‌العاده بالا\n"
-        "• `/barcode [کد]` - ساخت بارکد میله‌ای استاندارد تجاری (Code128)\n"
+        "• `/id` یا `/pid` یا `/pinfo` - استخراج کامل آیدی عددی کاربر، چت، پیام، فرستنده فوروارد و مشخصات با کپی یک‌لمسی\n"
+        "• `/qr` یا `/pqr [متن/لینک]` - ساخت کیوآر کد اختصاصی با کیفیت فوق‌العاده بالا\n"
+        "• `/barcode [کد]` یا `/pbarcode` - ساخت بارکد میله‌ای استاندارد تجاری (Code128)\n"
         "• 📷 **بینایی ماشین (Vision):** ارسال هر تصویر یا ریپلای روی تصویر با سوال، استخراج متن (OCR)، تحلیل اشیاء یا درخواست «بازسازی تصویر»\n"
         "• `/tweet [لینک توییت]` - استخراج متن، آمار، رسانه‌ها و ترجمه توییت از X (توییتر)\n"
-        "• `/twitter [یوزرنیم یا موضوع]` - مشاهده پروفایل، بیوگرافی و جستجوی زنده در X\n"
-        "• `/rates` یا `/dollar` - قیمت زنده دلار، تتر، یورو، طلا و سکه در بازار ایران\n"
-        "• `/crypto [نماد]` - نرخ لحظه‌ای رمزارزها به دلار و تومان (مثال: `/crypto btc`)\n"
-        "• `/music [نام ترانه]` - جستجو و ارسال فایل کامل MP3 با کیفیت اصلی ۳۲۰\n"
+        "• `/twitter [یوزرنیم یا موضوع]` یا `/ptwitter` - مشاهده پروفایل، بیوگرافی و جستجوی زنده در X\n"
+        "• `/rates` یا `/prates` یا `/dollar` - قیمت زنده دلار، تتر، یورو، طلا و سکه در بازار ایران\n"
+        "• `/crypto [نماد]` یا `/pcrypto` - نرخ لحظه‌ای رمزارزها به دلار و تومان (مثال: `/crypto btc` یا `/pcrypto btc`)\n"
+        "• `/music [نام ترانه]` یا `/pmusic` - جستجو و ارسال فایل کامل MP3 با کیفیت اصلی ۳۲۰\n"
         "• `/telegraph [عنوان | متن]` - انتشار فوری در تلگراف با Instant View\n"
-        "• `/read [لینک]` - استخراج و خلاصه متن صفحات وب\n"
-        "• `/weather [شهر]` - وضعیت آب و هوای زنده شهرها\n"
-        "• `/digikala [کالا]` - استعلام قیمت و موجودی دیجی‌کالا\n"
-        "• `/time` - ساعت رسمی تهران و تاریخ دقیق شمسی\n"
-        "• `/calc [عبارت]` - محاسبات ریاضی و علمی\n"
-        "• `/del` یا `/delete` - حذف پیام ارسال شده توسط پرومته (با ریپلای روی پیام یا گفتن «پاکش کن»)\n"
-        "• `/clear` - پاکسازی حافظه نشست جاری\n"
-        "• `/ping` - بررسی بیداری و سرعت پاسخ‌دهی سرور\n\n"
+        "• `/read [لینک]` یا `/pread` - استخراج و خلاصه متن صفحات وب\n"
+        "• `/weather [شهر]` یا `/pweather` - وضعیت آب و هوای زنده شهرها\n"
+        "• `/digikala [کالا]` یا `/pdk` - استعلام قیمت و موجودی دیجی‌کالا\n"
+        "• `/time` یا `/ptime` - ساعت رسمی تهران و تاریخ دقیق شمسی\n"
+        "• `/calc [عبارت]` یا `/pcalc` - محاسبات ریاضی و علمی\n"
+        "• `/del` یا `/pdel` - حذف پیام ارسال شده توسط پرومته (با ریپلای روی پیام یا گفتن «پاکش کن»)\n"
+        "• `/clear` یا `/pclear` - پاکسازی حافظه نشست جاری\n"
+        "• `/ping` یا `/pping` - بررسی بیداری و سرعت پاسخ‌دهی سرور\n\n"
         "📌 **درک هوشمند ریپلای:** روی هر پیامی ریپلای بزنید و بپرسید «این رو ترجمه کن»، «نظرت چیه؟» یا «خلاصه‌اش کن» تا پرومته محتوای ریپلای‌شده را هوشمندانه بخواند و تحلیل کند.\n\n"
         "🗣 **مکالمه روان:** هر سوالی بپرسید، پرومته به صورت هوشمند و خودکار بهترین روش پاسخ را انتخاب می‌کند."
     )
@@ -1177,24 +1371,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user and is_admin(user.id):
         text += (
             "\n\n👮‍♂️ **دستورات مدیریت و نظارت ادمین (Admin Governance):**\n"
-            "• `/ban [کاربر/ریپلای] [علت]` - مسدودسازی دائم کاربر از ربات\n"
-            "• `/unban [کاربر/ریپلای]` - رفع مسدودیت کاربر و ثبت در دیتابیس\n"
-            "• `/mute [کاربر/ریپلای] [مدت] [علت]` - سکوت کاربر (مثال: `/mute 30m` یا `/mute 2h`)\n"
-            "• `/unmute [کاربر/ریپلای]` - لغو سکوت کاربر\n"
-            "• `/bangroup [شناسه گروه] [علت]` - مسدودسازی کامل ربات در گروه\n"
-            "• `/unbangroup [شناسه گروه]` - رفع مسدودیت گروه\n"
-            "• `/mutegroup [مدت]` - میوت کردن ربات در گروه\n"
-            "• `/unmutegroup` - لغو سکوت ربات در گروه\n"
-            "• `/banlist` - لیست دائم افراد و گروه‌های بن‌شده با یوزرنیم و آیدی عددی\n"
-            "• `/mutelist` - لیست فعال افراد و گروه‌های میوت‌شده با زمان باقیمانده\n"
-            "• `/groups` - فهرست تمامی گروه‌های ثبت‌شده، فعال، مسدود و وضعیت آن‌ها\n"
-            "• `/pendinggroups` - لیست گروه‌های جدید در انتظار تایید ادمین\n"
-            "• `/approvegroup [شناسه]` - تایید دستی فعال‌سازی ربات در گروه\n"
-            "• `/rejectgroup [شناسه]` - رد فعال‌سازی و خروج ربات از گروه\n"
-            "• `/set [کلید] [مقدار]` - ثبت دائم دستور و تنظیمات در دیتابیس\n"
-            "• `/get [کلید]` - خواندن تنظیمات از دیتابیس\n"
-            "• `/adminsettings` - مشاهده تمامی تنظیمات ذخیره‌شده\n"
-            "• `/adminlogs` - تاریخچه و لاگ دائم تمامی دستورات ادمین‌ها"
+            "• `/ban [کاربر/ریپلای]` یا `/pban` - مسدودسازی دائم کاربر از ربات\n"
+            "• `/unban [کاربر/ریپلای]` یا `/punban` - رفع مسدودیت کاربر و ثبت در دیتابیس\n"
+            "• `/mute [کاربر/ریپلای]` یا `/pmute [مدت]` - سکوت کاربر (مثال: `/mute 30m` یا `/pmute 2h`)\n"
+            "• `/unmute [کاربر/ریپلای]` یا `/punmute` - لغو سکوت کاربر\n"
+            "• `/bangroup [شناسه گروه]` یا `/pbangroup` - مسدودسازی کامل ربات در گروه\n"
+            "• `/unbangroup [شناسه گروه]` یا `/punbangroup` - رفع مسدودیت گروه\n"
+            "• `/mutegroup [مدت]` یا `/pmutegroup` - میوت کردن ربات در گروه\n"
+            "• `/unmutegroup` یا `/punmutegroup` - لغو سکوت ربات در گروه\n"
+            "• `/banlist` یا `/pbanlist` - لیست دائم افراد و گروه‌های بن‌شده با یوزرنیم و آیدی عددی\n"
+            "• `/mutelist` یا `/pmutelist` - لیست فعال افراد و گروه‌های میوت‌شده با زمان باقیمانده\n"
+            "• `/groups` یا `/pgroups` - فهرست تمامی گروه‌های ثبت‌شده، فعال، مسدود و وضعیت آن‌ها\n"
+            "• `/pendinggroups` یا `/ppendinggroups` - لیست گروه‌های جدید در انتظار تایید ادمین\n"
+            "• `/approvegroup [شناسه]` یا `/papprovegroup` - تایید دستی فعال‌سازی ربات در گروه\n"
+            "• `/rejectgroup [شناسه]` یا `/prejectgroup` - رد فعال‌سازی و خروج ربات از گروه\n"
+            "• `/set [کلید] [مقدار]` یا `/pset` - ثبت دائم دستور و تنظیمات در دیتابیس\n"
+            "• `/get [کلید]` یا `/pget` - خواندن تنظیمات از دیتابیس\n"
+            "• `/adminsettings` یا `/padminsettings` - مشاهده تمامی تنظیمات ذخیره‌شده\n"
+            "• `/adminlogs` یا `/padminlogs` - تاریخچه و لاگ دائم تمامی دستورات ادمین‌ها"
         )
 
     formatted = markdown_to_telegram_html(text)
@@ -2370,6 +2564,10 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
         t = re.sub(rf"^(?:{re.escape(name)}[\s,:،-]*)+", "", t, flags=re.IGNORECASE).strip()
         t = re.sub(rf"[\s,:،-]+(?:{re.escape(name)})+$", "", t, flags=re.IGNORECASE).strip()
 
+    # Normalize Prometheus command prefixes: /p_ban -> /ban, /pban -> /ban, etc.
+    t = re.sub(r"^/(?:p_|pro_|prom_|prometheus_)", "/", t, flags=re.IGNORECASE)
+    t = re.sub(r"^/(?:p|pro)(?=(?:ban|mute|groups|pending|approve|reject|set|get|del|admin|directives|rules))", "/", t, flags=re.IGNORECASE)
+
     if not t:
         return False
 
@@ -3462,60 +3660,62 @@ def build_application():
         .build()
     )
 
-    def guard(handler_func, is_admin_cmd: bool = False):
+    def guard(handler_func, is_admin_cmd: bool = False, is_cmd: bool = True):
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not await _check_moderation_guard(update, context, is_admin_cmd=is_admin_cmd):
+                return
+            if is_cmd and not is_command_addressed_to_bot(update, context, is_admin_cmd=is_admin_cmd):
                 return
             return await handler_func(update, context)
         return wrapper
 
-    # Core Commands & Aliases
-    app.add_handler(CommandHandler(["start"], guard(start_command)))
-    app.add_handler(CommandHandler(["help"], guard(help_command)))
-    app.add_handler(CommandHandler(["agent", "research", "hermes"], guard(agent_command)))
-    app.add_handler(CommandHandler(["fast", "speed"], guard(fast_command)))
-    app.add_handler(CommandHandler(["mode", "setting", "settings"], guard(mode_command)))
-    app.add_handler(CallbackQueryHandler(guard(mode_callback), pattern=r"^setmode_"))
-    app.add_handler(CommandHandler(["rates", "dollar", "arz", "gheymat"], guard(rates_command)))
-    app.add_handler(CommandHandler(["crypto"], guard(crypto_command)))
-    app.add_handler(CommandHandler(["time", "saat"], guard(time_command)))
-    app.add_handler(CommandHandler(["weather", "hava"], guard(weather_command)))
-    app.add_handler(CommandHandler(["digikala", "dk"], guard(digikala_command)))
-    app.add_handler(CommandHandler(["music", "song", "ahang"], guard(music_command)))
-    app.add_handler(CommandHandler(["read", "web", "url"], guard(read_command)))
-    app.add_handler(CommandHandler(["telegraph", "telegra", "article"], guard(telegraph_command)))
-    app.add_handler(CommandHandler(["calc", "hesab"], guard(calc_command)))
-    app.add_handler(CommandHandler(["clear"], guard(clear_command)))
-    app.add_handler(CommandHandler(["id", "myid", "info", "chatid", "whoami"], guard(id_command)))
-    app.add_handler(CommandHandler(["qr", "qrcode"], guard(barcode_command)))
-    app.add_handler(CommandHandler(["barcode", "bar"], guard(barcode_command)))
-    app.add_handler(CommandHandler(["twitter", "tweet", "x"], guard(twitter_command)))
-    app.add_handler(CommandHandler(["delete", "del", "pak", "hazf", "remove"], guard(delete_command)))
-    app.add_handler(CommandHandler(["ping"], guard(ping_command)))
-    app.add_handler(CommandHandler(["summarize", "recap", "summary", "kholase"], guard(summarize_command)))
-    app.add_handler(CommandHandler(["search", "find", "searchdb", "jostojoo"], guard(search_command)))
+    # Core Commands & Aliases (Personalized with p / p_ / pro / pro_ prefixes)
+    app.add_handler(CommandHandler(make_bot_commands(["start"]), guard(start_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["help"]), guard(help_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["agent", "research", "hermes"]), guard(agent_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["fast", "speed"]), guard(fast_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["mode", "setting", "settings"]), guard(mode_command, is_cmd=True)))
+    app.add_handler(CallbackQueryHandler(guard(mode_callback, is_cmd=False), pattern=r"^setmode_"))
+    app.add_handler(CommandHandler(make_bot_commands(["rates", "dollar", "arz", "gheymat"]), guard(rates_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["crypto"]), guard(crypto_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["time", "saat"]), guard(time_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["weather", "hava"]), guard(weather_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["digikala", "dk"]), guard(digikala_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["music", "song", "ahang"]), guard(music_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["read", "web", "url"]), guard(read_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["telegraph", "telegra", "article"]), guard(telegraph_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["calc", "hesab"]), guard(calc_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["clear", "clean"]), guard(clear_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["id", "myid", "info", "chatid", "whoami"]), guard(id_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["qr", "qrcode"]), guard(barcode_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["barcode", "bar"]), guard(barcode_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["twitter", "tweet", "x"]), guard(twitter_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["delete", "del", "pak", "hazf", "remove"]), guard(delete_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["ping", "status"]), guard(ping_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["summarize", "recap", "summary", "kholase"]), guard(summarize_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["search", "find", "searchdb", "jostojoo"]), guard(search_command, is_cmd=True)))
 
 
-    # Admin Governance & Moderation Commands
-    app.add_handler(CommandHandler(["ban", "block"], guard(ban_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["unban", "unblock"], guard(unban_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["mute", "silence"], guard(mute_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["unmute", "unsilence"], guard(unmute_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["bangroup", "ban_group"], guard(bangroup_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["unbangroup", "unban_group"], guard(unbangroup_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["mutegroup", "mutebot"], guard(mutegroup_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["unmutegroup", "unmutebot"], guard(unmutegroup_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["banlist", "bans"], guard(banlist_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["mutelist", "mutes"], guard(mutelist_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["groups", "grouplist", "listgroups", "allgroups"], guard(grouplist_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["pendinggroups", "pending_groups"], guard(pendinggroups_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["approvegroup", "approve_group", "addgroup", "add_group"], guard(approvegroup_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["rejectgroup", "reject_group"], guard(rejectgroup_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["set", "set_setting"], guard(set_setting_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["get", "get_setting"], guard(get_setting_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["delsetting", "del_setting", "delrule", "del_rule", "deldirective"], guard(del_setting_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["adminsettings", "customdata", "directives", "rules"], guard(settings_command, is_admin_cmd=True)))
-    app.add_handler(CommandHandler(["adminlogs", "audit"], guard(adminlogs_command, is_admin_cmd=True)))
+    # Admin Governance & Moderation Commands (Personalized with p / p_ / pro / pro_ prefixes)
+    app.add_handler(CommandHandler(make_bot_commands(["ban", "block"]), guard(ban_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["unban", "unblock"]), guard(unban_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["mute", "silence"]), guard(mute_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["unmute", "unsilence"]), guard(unmute_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["bangroup", "ban_group"]), guard(bangroup_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["unbangroup", "unban_group"]), guard(unbangroup_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["mutegroup", "mutebot"]), guard(mutegroup_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["unmutegroup", "unmutebot"]), guard(unmutegroup_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["banlist", "bans"]), guard(banlist_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["mutelist", "mutes"]), guard(mutelist_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["groups", "grouplist", "listgroups", "allgroups"]), guard(grouplist_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["pendinggroups", "pending_groups"]), guard(pendinggroups_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["approvegroup", "approve_group", "addgroup", "add_group"]), guard(approvegroup_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["rejectgroup", "reject_group"]), guard(rejectgroup_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["set", "set_setting"]), guard(set_setting_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["get", "get_setting"]), guard(get_setting_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["delsetting", "del_setting", "delrule", "del_rule", "deldirective"]), guard(del_setting_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["adminsettings", "customdata", "directives", "rules"]), guard(settings_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["adminlogs", "audit"]), guard(adminlogs_command, is_admin_cmd=True, is_cmd=True)))
 
     # Callback Query Handlers for Group Approvals
     app.add_handler(CallbackQueryHandler(group_approval_callback, pattern=r"^grp_(app|rej):"))
@@ -3524,13 +3724,13 @@ def build_application():
     app.add_handler(ChatMemberHandler(chat_member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))
 
     # Multimodal photo handler
-    app.add_handler(MessageHandler(filters.PHOTO, guard(photo_handler)))
+    app.add_handler(MessageHandler(filters.PHOTO, guard(photo_handler, is_cmd=False)))
 
     # All text messages (with silence-by-default logic)
     app.add_handler(
         MessageHandler(
             filters.TEXT | filters.CAPTION,
-            guard(message_handler)
+            guard(message_handler, is_cmd=False)
         )
     )
 
