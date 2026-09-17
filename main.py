@@ -9,6 +9,7 @@ Features:
 - Zero typing animations or message stream edits to strictly protect Prometheus identity
 """
 
+import io
 import re
 import os
 import html
@@ -142,10 +143,17 @@ from tools.virustotal import (
 )
 from tools.sandbox import (
     run_python_sandbox,
+    run_code_sandbox,
     format_sandbox_result,
     is_sandbox_request,
     extract_code_snippet,
     sandbox_command_handler,
+)
+from tools.shell_tool import (
+    shell_command_handler,
+    shell_callback_handler,
+    is_shell_request,
+    extract_shell_command,
 )
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
@@ -914,7 +922,8 @@ PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "search", "find", "searchdb", "jostojoo",
     "file", "createfile", "makefile",
     "scan", "vt", "virustotal", "antivirus",
-    "run", "exec", "py", "python", "sandbox",
+    "run", "exec", "py", "python", "sandbox", "e2b",
+    "sh", "shell", "bash", "terminal", "cmd",
     # Admin commands
     "ban", "block",
     "unban", "unblock",
@@ -4175,20 +4184,35 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await _deliver_reply(message, res)
                 return
 
-    # Fast-Path 8.5: Python Sandbox Code Execution (<10ms)
+    # Fast-Path 8.5: Python & E2B Cloud Sandbox Code Execution
     if is_sandbox_request(cleaned_prompt) or is_sandbox_request(raw_text):
         code_to_run = extract_code_snippet(cleaned_prompt) or extract_code_snippet(raw_text)
         if not code_to_run and message.reply_to_message:
             rep_m = message.reply_to_message
             code_to_run = extract_code_snippet(rep_m.text or rep_m.caption or "")
         if code_to_run:
-            res = await run_python_sandbox(code_to_run)
+            res = await run_code_sandbox(code_to_run)
+            images = res.get("images", [])
+            for img_bytes in images:
+                try:
+                    await message.reply_photo(
+                        photo=io.BytesIO(img_bytes),
+                        caption="📊 <b>نمودار / خروجی تصویری ساندباکس E2B</b>",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as pe:
+                    logger.warning(f"Could not send E2B plot image: {pe}")
             formatted = format_sandbox_result(res, code_to_run)
             await message.reply_text(formatted, parse_mode=ParseMode.HTML)
             return
-        elif any(w in cleaned_lower for w in ["/run", "/exec", "/py", "/python", "/sandbox"]):
+        elif any(w in cleaned_lower for w in ["/run", "/exec", "/py", "/python", "/sandbox", "/e2b"]):
             await sandbox_command_handler(update, context)
             return
+
+    # Fast-Path 8.6: Shell & Terminal Command Execution
+    if is_shell_request(cleaned_prompt) or is_shell_request(raw_text):
+        await shell_command_handler(update, context)
+        return
 
     # Fast-Path 9: Music Search, Download & Upload (Direct Native Telegram MP3 Delivery)
     if is_music_request(cleaned_lower) or is_music_request(raw_text):
@@ -4746,7 +4770,9 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["search", "find", "searchdb", "jostojoo"]), guard(search_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["file", "createfile", "makefile"]), guard(file_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["scan", "vt", "virustotal", "antivirus"]), guard(scan_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["run", "exec", "py", "python", "sandbox"]), guard(sandbox_command_handler, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["run", "exec", "py", "python", "sandbox", "e2b"]), guard(sandbox_command_handler, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["sh", "shell", "bash", "terminal", "cmd"]), guard(shell_command_handler, is_cmd=True)))
+    app.add_handler(CallbackQueryHandler(shell_callback_handler, pattern=r"^sh_(exec|cancel):"))
     app.add_handler(CallbackQueryHandler(virustotal_callback, pattern=r"^vt_scan:"))
 
 

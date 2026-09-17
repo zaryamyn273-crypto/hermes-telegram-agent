@@ -32,6 +32,7 @@ try:
             default="8c715c84eef42a06fcc42d407e547c63cb77ababf962877bfcea30834d1ff084",
             env="VIRUSTOTAL_API_KEY"
         )
+        E2B_API_KEY: str = Field(default="", env="E2B_API_KEY")
         CLOUDFLARE_ACCOUNT_ID: str = Field(default="", env="CLOUDFLARE_ACCOUNT_ID")
         CLOUDFLARE_API_TOKEN: str = Field(default="", env="CLOUDFLARE_API_TOKEN")
         CLOUDFLARE_D1_ID: str = Field(default="", env="CLOUDFLARE_D1_ID")
@@ -76,6 +77,7 @@ except ImportError:
             "VIRUSTOTAL_API_KEY",
             "8c715c84eef42a06fcc42d407e547c63cb77ababf962877bfcea30834d1ff084"
         )
+        E2B_API_KEY: str = os.getenv("E2B_API_KEY", "")
         CLOUDFLARE_ACCOUNT_ID: str = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
         CLOUDFLARE_API_TOKEN: str = os.getenv("CLOUDFLARE_API_TOKEN", "")
         CLOUDFLARE_D1_ID: str = os.getenv("CLOUDFLARE_D1_ID", "")

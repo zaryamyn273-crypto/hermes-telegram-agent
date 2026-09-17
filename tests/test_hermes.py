@@ -2175,6 +2175,240 @@ async def test_debounce_incoming_album():
     assert cap_res == "Album caption here"
 
 
+@pytest.mark.asyncio
+async def test_e2b_and_code_sandbox():
+    """Tests E2B intent recognition, snippet extraction, and code execution fallback."""
+    from tools.sandbox import (
+        is_sandbox_request,
+        extract_code_snippet,
+        run_code_sandbox,
+        format_sandbox_result,
+    )
+
+    assert is_sandbox_request("/e2b print('e2b test')") is True
+    assert is_sandbox_request("/pe2b 2 * 3") is True
+    assert is_sandbox_request("کد رو توی e2b تست کن:\nprint('ok')") is True
+
+    snip = extract_code_snippet("/e2b print('hello world')")
+    assert snip == "print('hello world')"
+
+    res = await run_code_sandbox("x = 100\ny = 200\nprint(x + y)")
+    assert res["success"] is True
+    assert res["stdout"] == "300"
+    assert res["exit_code"] == 0
+
+    fmt = format_sandbox_result(res, "print(300)")
+    assert "ساندباکس" in fmt
+    assert "300" in fmt
+
+    # Test formatting with simulated visual plot / chart output
+    fake_e2b_res = {
+        "success": True,
+        "stdout": "plot generated",
+        "stderr": "",
+        "exit_code": 0,
+        "duration_ms": 150.0,
+        "timed_out": False,
+        "error": None,
+        "backend": "e2b",
+        "images": [b"fake_png_data"],
+        "text_results": ["<Figure size 640x480 with 1 Axes>"],
+    }
+    fmt_e2b = format_sandbox_result(fake_e2b_res, "plt.plot([1, 2, 3])")
+    assert "E2B" in fmt_e2b
+    assert "خروجی نمودار/تصویر" in fmt_e2b
+
+
+@pytest.mark.asyncio
+async def test_shell_command_classifier():
+    """Tests granular classification of safe vs dangerous shell commands."""
+    from tools.shell_tool import classify_shell_command
+
+    # Safe inspection commands (allowed for all users)
+    safe_cmds = [
+        "ls -la",
+        "uptime",
+        "uname -a",
+        "df -h",
+        "free -m",
+        "whoami",
+        "id",
+        "date",
+        "cat /etc/os-release",
+        "python3 --version",
+        "git --version",
+        "git status",
+        "echo 'Hello World'",
+        "ps aux",
+    ]
+    for sc in safe_cmds:
+        is_safe, risk = classify_shell_command(sc)
+        assert is_safe is True, f"Expected '{sc}' to be safe, got risk: {risk}"
+
+    # Dangerous commands (strictly restricted to admin + confirmation)
+    dangerous_cmds = [
+        ("rm -rf /tmp/test", "rm"),
+        ("rmdir /tmp/dir", "rmdir"),
+        ("kill -9 1234", "kill"),
+        ("pkill python", "pkill"),
+        ("killall node", "killall"),
+        ("reboot", "reboot"),
+        ("shutdown -h now", "shutdown"),
+        ("chmod 777 /app/main.py", "chmod"),
+        ("chown root:root /app", "chown"),
+        ("echo 'malicious' > /tmp/hacked.txt", "ریدایرکت"),
+        ("cat file >> /tmp/append.txt", "ریدایرکت"),
+        ("pip install requests", "pip"),
+        ("apt-get update", "apt"),
+        ("systemctl restart nginx", "systemctl"),
+        ("cat .env", "فایل‌های حساس"),
+        ("head -n 5 /etc/shadow", "فایل‌های حساس"),
+        ("python3 -c 'print(1)'", "داینامیک"),
+    ]
+    for dc, keyword in dangerous_cmds:
+        is_safe, risk = classify_shell_command(dc)
+        assert is_safe is False, f"Expected '{dc}' to be dangerous, but was marked safe"
+        assert keyword in risk or "غیرمجاز" in risk or "حساس" in risk
+
+
+@pytest.mark.asyncio
+async def test_shell_execution_and_formatting():
+    """Tests actual subprocess shell execution, output capture, and HTML formatting."""
+    from tools.shell_tool import (
+        execute_shell_command,
+        format_shell_result,
+        is_shell_request,
+        extract_shell_command,
+    )
+
+    # Intent detection
+    assert is_shell_request("/sh uname -a") is True
+    assert is_shell_request("/shell ls") is True
+    assert is_shell_request("/bash df -h") is True
+    assert is_shell_request("/terminal whoami") is True
+    assert is_shell_request("دستور شل زیر رو بزن:\nls") is True
+
+    snip = extract_shell_command("/sh uname -a")
+    assert snip == "uname -a"
+
+    # Execution
+    res = await execute_shell_command("uname")
+    assert res["success"] is True
+    assert "Linux" in res["stdout"]
+    assert res["exit_code"] == 0
+    assert res["duration_ms"] > 0
+
+    fmt = format_shell_result(res, "uname")
+    assert "ترمینال" in fmt
+    assert "Linux" in fmt
+    assert "موفقیت‌آمیز" in fmt
+
+
+@pytest.mark.asyncio
+async def test_shell_permission_and_admin_confirmation():
+    """Tests that ordinary users cannot run dangerous shell commands and admins receive confirmation prompts."""
+    from unittest.mock import AsyncMock, MagicMock
+    from tools.shell_tool import (
+        shell_command_handler,
+        shell_callback_handler,
+        _PENDING_SHELL_COMMANDS,
+    )
+
+    # 1. Ordinary user attempts dangerous command
+    regular_user = MagicMock()
+    regular_user.id = 11223344  # Not an admin
+    reg_msg = MagicMock()
+    reg_msg.text = "/sh rm -rf /tmp/abc"
+    reg_msg.caption = None
+    reg_msg.reply_to_message = None
+    reg_msg.reply_text = AsyncMock()
+
+    reg_update = MagicMock()
+    reg_update.effective_user = regular_user
+    reg_update.effective_message = reg_msg
+    reg_update.effective_chat.id = 11223344
+
+    reg_ctx = MagicMock()
+    reg_ctx.args = ["rm", "-rf", "/tmp/abc"]
+
+    await shell_command_handler(reg_update, reg_ctx)
+    assert reg_msg.reply_text.called
+    reg_call_text = reg_msg.reply_text.call_args[0][0]
+    assert "دسترسی غیرمجاز" in reg_call_text
+    assert "ادمین" in reg_call_text
+
+    # 2. Ordinary user attempts safe command (e.g. uname)
+    reg_msg.reset_mock()
+    reg_ctx.args = ["uname"]
+    await shell_command_handler(reg_update, reg_ctx)
+    assert reg_msg.reply_text.called
+    reg_safe_text = reg_msg.reply_text.call_args[0][0]
+    assert "ترمینال سرور پرومته" in reg_safe_text
+    assert "Linux" in reg_safe_text
+
+    # 3. Admin attempts dangerous command -> Prompt for confirmation
+    from config import settings
+    admin_user = MagicMock()
+    admin_user.id = settings.ADMIN_ID
+    admin_msg = MagicMock()
+    admin_msg.text = "/sh kill -9 9999"
+    admin_msg.caption = None
+    admin_msg.reply_to_message = None
+    admin_msg.reply_text = AsyncMock()
+
+    admin_update = MagicMock()
+    admin_update.effective_user = admin_user
+    admin_update.effective_message = admin_msg
+    admin_update.effective_chat.id = settings.ADMIN_ID
+
+    admin_ctx = MagicMock()
+    admin_ctx.args = ["kill", "-9", "9999"]
+
+    await shell_command_handler(admin_update, admin_ctx)
+    assert admin_msg.reply_text.called
+    admin_prompt_text = admin_msg.reply_text.call_args[0][0]
+    assert "هشدار امنیتی: تایید اجرای دستور حساس ترمینال" in admin_prompt_text
+    kb = admin_msg.reply_text.call_args[1].get("reply_markup")
+    assert kb is not None
+    # Verify buttons
+    buttons = kb.inline_keyboard[0]
+    assert "sh_exec:" in buttons[0].callback_data
+    assert "sh_cancel:" in buttons[1].callback_data
+    token = buttons[0].callback_data.split(":")[1]
+    assert token in _PENDING_SHELL_COMMANDS
+
+    # 4. Non-admin tries to click the confirmation button -> Denied
+    fake_query = MagicMock()
+    fake_query.data = f"sh_exec:{token}"
+    fake_query.from_user = regular_user
+    fake_query.answer = AsyncMock()
+    cb_update = MagicMock()
+    cb_update.callback_query = fake_query
+
+    await shell_callback_handler(cb_update, reg_ctx)
+    assert fake_query.answer.called
+    assert "صرفاً توسط ادمین" in fake_query.answer.call_args[0][0]
+    # Token remains unconsumed
+    assert token in _PENDING_SHELL_COMMANDS
+
+    # 5. Admin clicks Cancel button -> Command canceled
+    cancel_query = MagicMock()
+    cancel_query.data = f"sh_cancel:{token}"
+    cancel_query.from_user = admin_user
+    cancel_query.answer = AsyncMock()
+    cancel_query.edit_message_text = AsyncMock()
+    cb_cancel_update = MagicMock()
+    cb_cancel_update.callback_query = cancel_query
+
+    await shell_callback_handler(cb_cancel_update, admin_ctx)
+    assert cancel_query.answer.called
+    assert cancel_query.edit_message_text.called
+    assert "لغو شد" in cancel_query.edit_message_text.call_args[0][0]
+    assert token not in _PENDING_SHELL_COMMANDS
+
+
+
+
 
 
 
