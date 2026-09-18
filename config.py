@@ -38,7 +38,7 @@ try:
         CLOUDFLARE_D1_ID: str = Field(default="", env="CLOUDFLARE_D1_ID")
         CLOUDFLARE_KV_ID: str = Field(default="", env="CLOUDFLARE_KV_ID")
 
-        MAX_SESSION_HISTORY: int = Field(default=20, env="MAX_SESSION_HISTORY")
+        MAX_SESSION_HISTORY: int = Field(default=50, env="MAX_SESSION_HISTORY")
         STREAM_EDIT_INTERVAL: float = Field(default=0.85, env="STREAM_EDIT_INTERVAL")
         DAILY_USER_LIMIT: int = Field(default=50, env="DAILY_USER_LIMIT")
         RATE_LIMIT_USER_MAX_REQUESTS: int = Field(default=40, env="RATE_LIMIT_USER_MAX_REQUESTS")
@@ -82,7 +82,7 @@ except ImportError:
         CLOUDFLARE_D1_ID: str = os.getenv("CLOUDFLARE_D1_ID", "")
         CLOUDFLARE_KV_ID: str = os.getenv("CLOUDFLARE_KV_ID", "")
 
-        MAX_SESSION_HISTORY: int = int(os.getenv("MAX_SESSION_HISTORY", "20"))
+        MAX_SESSION_HISTORY: int = int(os.getenv("MAX_SESSION_HISTORY", "50"))
         STREAM_EDIT_INTERVAL: float = float(os.getenv("STREAM_EDIT_INTERVAL", "0.85"))
         DAILY_USER_LIMIT: int = int(os.getenv("DAILY_USER_LIMIT", "50"))
         RATE_LIMIT_USER_MAX_REQUESTS: int = int(os.getenv("RATE_LIMIT_USER_MAX_REQUESTS", "40"))

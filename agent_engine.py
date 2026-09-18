@@ -35,8 +35,8 @@ logger = logging.getLogger("PrometheusOSINTEngine")
 # Isolated Per-Chat Working RAM Buffer with Strict Memory Quota & LRU Eviction:
 _SESSIONS: OrderedDict[int, List[Dict[str, Any]]] = OrderedDict()
 _SESSIONS_LOCK = threading.RLock()
-_CHAT_RAM_QUOTA_MESSAGES = 30  # Max turns retained in fast RAM per chat
-_MAX_CHATS_IN_RAM = 500        # Max active chat contexts held simultaneously in RAM
+_CHAT_RAM_QUOTA_MESSAGES = 50  # Max 50 turns retained in isolated fast RAM per group/chat
+_MAX_CHATS_IN_RAM = 1000       # Max active chat contexts held simultaneously in RAM
 
 # Persistent HTTP Client with Connection Pooling
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
@@ -190,61 +190,48 @@ def check_security_guardrails(text: str) -> Optional[str]:
 # =========================================================================
 
 async def ensure_session_history(chat_id: int) -> List[Dict[str, Any]]:
-    """Loads session history from database into isolated RAM buffer if cold."""
+    """Loads session history from isolated in-memory RAM buffer (up to 50 messages per group/chat)."""
     with _SESSIONS_LOCK:
         if chat_id in _SESSIONS:
             _SESSIONS.move_to_end(chat_id)
-            return _SESSIONS[chat_id]
+            return list(_SESSIONS[chat_id])
 
-    try:
-        d1_history = await database.load_session_history_from_d1(chat_id, limit=settings.MAX_SESSION_HISTORY)
-    except Exception:
-        d1_history = []
-
-    with _SESSIONS_LOCK:
         while len(_SESSIONS) >= _MAX_CHATS_IN_RAM:
             try:
                 _SESSIONS.popitem(last=False)
             except KeyError:
                 break
-        _SESSIONS[chat_id] = d1_history[-_CHAT_RAM_QUOTA_MESSAGES:]
-        _SESSIONS.move_to_end(chat_id)
-        return _SESSIONS[chat_id]
+        _SESSIONS[chat_id] = []
+        return []
 
 
 def get_session_history(chat_id: int) -> List[Dict[str, Any]]:
-    """Returns RAM history for a chat."""
+    """Returns isolated in-memory RAM history for a chat/group (up to 50 messages)."""
     with _SESSIONS_LOCK:
         return list(_SESSIONS.get(chat_id, []))
 
 
 def append_to_session(chat_id: int, role: str, content: str, user_id: int = 0, username: str = ""):
-    """Appends message to RAM buffer and enqueues D1 persistence."""
+    """Appends message to isolated per-group RAM buffer (strictly capped at 50 messages, zero DB calls)."""
     item = {"role": role, "content": content}
     with _SESSIONS_LOCK:
         if chat_id not in _SESSIONS:
+            while len(_SESSIONS) >= _MAX_CHATS_IN_RAM:
+                try:
+                    _SESSIONS.popitem(last=False)
+                except KeyError:
+                    break
             _SESSIONS[chat_id] = []
         _SESSIONS[chat_id].append(item)
         if len(_SESSIONS[chat_id]) > _CHAT_RAM_QUOTA_MESSAGES:
             _SESSIONS[chat_id] = _SESSIONS[chat_id][-_CHAT_RAM_QUOTA_MESSAGES:]
         _SESSIONS.move_to_end(chat_id)
 
-    asyncio.create_task(
-        database.save_message_to_d1(
-            chat_id=chat_id,
-            role=role,
-            content=content,
-            user_id=user_id,
-            username=username
-        )
-    )
-
 
 def clear_session(chat_id: int):
-    """Clears working session history for a chat."""
+    """Clears working session history for a chat from in-memory RAM buffer."""
     with _SESSIONS_LOCK:
         _SESSIONS.pop(chat_id, None)
-    asyncio.create_task(database.clear_session_history_d1(chat_id))
 
 
 # =========================================================================

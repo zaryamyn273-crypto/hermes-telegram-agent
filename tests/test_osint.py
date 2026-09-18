@@ -161,3 +161,44 @@ async def test_crawl_webpage_layers():
     assert "Example Domain" in (data.get("title") or "")
     assert "internal_links" in data
     assert "emails" in data
+
+
+@pytest.mark.asyncio
+async def test_group_ram_memory_quota_50():
+    from agent_engine import append_to_session, get_session_history, clear_session
+    import database
+
+    group1_id = -100999111
+    group2_id = -100999222
+
+    clear_session(group1_id)
+    clear_session(group2_id)
+
+    # 1. Add 60 messages to group 1 in RAM
+    for i in range(1, 61):
+        append_to_session(group1_id, "user" if i % 2 != 0 else "assistant", f"Message {i}")
+        await database.persist_message(group1_id, 1000 + i, "user", f"Message {i}")
+
+    # Verify group 1 RAM is capped at exactly 50
+    h1 = get_session_history(group1_id)
+    assert len(h1) == 50
+    assert h1[0]["content"] == "Message 11"
+    assert h1[-1]["content"] == "Message 60"
+
+    # Verify database in-memory summary reads at most 50
+    summary_msgs = await database.get_chat_messages_for_summary(group1_id, limit=100)
+    assert len(summary_msgs) <= 50
+
+    # 2. Add 10 messages to group 2 and verify isolation
+    for j in range(1, 11):
+        append_to_session(group2_id, "user", f"Group2 Msg {j}")
+
+    h2 = get_session_history(group2_id)
+    assert len(h2) == 10
+    # Group 1 remains untouched at 50
+    assert len(get_session_history(group1_id)) == 50
+
+    clear_session(group1_id)
+    clear_session(group2_id)
+    assert len(get_session_history(group1_id)) == 0
+    assert len(get_session_history(group2_id)) == 0
