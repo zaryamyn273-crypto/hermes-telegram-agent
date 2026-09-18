@@ -9,6 +9,7 @@ import html
 import logging
 from typing import Dict, Any, List, Optional
 import dns.resolver
+import asyncio
 
 from utils.formatter import wrap_in_expandable_blockquote
 
@@ -296,3 +297,8 @@ def format_email_security_report(data: Dict[str, Any]) -> str:
 
     lines.append("\n⚡️ <i>استعلام مستقیم رکوردهای احراز هویت پست الکترونیک بر پایه استانداردهای RFC 7208 و RFC 7489</i>")
     return "\n".join(lines)
+
+
+async def audit_domain_email_security_async(target: str) -> Dict[str, Any]:
+    """Non-blocking asynchronous email security auditor offloaded to threadpool."""
+    return await asyncio.to_thread(audit_domain_email_security, target)

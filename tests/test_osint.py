@@ -77,6 +77,18 @@ from tools.osint_social import (
     format_social_search_report,
 )
 from tools.osint_username import format_username_recon_report
+from tools.system import calculate_math, calculate_math_async
+from tools.osint_network import inspect_ssl_certificate_async
+from tools.osint_email_security import audit_domain_email_security_async
+from tools.osint_exif import extract_exif_metadata_async
+from tools.file_tool import (
+    create_document_file,
+    create_document_file_async,
+    extract_file_content,
+    extract_file_content_async,
+)
+from tools.osint_reverse_image import perform_reverse_image_recon
+import database
 from PIL import Image
 import io
 from agent_engine import (
@@ -692,6 +704,187 @@ async def test_social_media_reconnaissance():
     assert "Social Media OSINT" in report
     assert "Telegram" in report
     assert "دورک‌های اختصاصی گوگل" in report
+
+
+@pytest.mark.asyncio
+async def test_safe_math_ast_evaluator():
+    # 1. Standard arithmetic
+    r1 = calculate_math("2 + 3 * 4")
+    assert "14" in r1
+    assert "خطا" not in r1
+
+    # 2. Scientific functions and power
+    r2 = calculate_math("sqrt(144) + 6")
+    assert "18" in r2
+
+    r3 = calculate_math("2^10")
+    assert "1024" in r3
+
+    # 3. Exponentiation DoS Guard (Prevent CPU/RAM exhaustion)
+    r_dos1 = calculate_math("2**1000")
+    assert "خطا" in r_dos1
+
+    r_dos2 = calculate_math("10000**50")
+    assert "خطا" in r_dos2
+
+    # 4. Code Execution / Sandbox Escape Immunity (ast.walk + _safe_eval_node)
+    r_sec1 = calculate_math("__import__('os').system('id')")
+    assert "خطا" in r_sec1
+
+    r_sec2 = calculate_math("open('/etc/passwd').read()")
+    assert "خطا" in r_sec2
+
+    r_div0 = calculate_math("10 / 0")
+    assert "تقسیم بر صفر" in r_div0
+
+    # 5. Async Offloaded Math
+    r_async = await calculate_math_async("25 * 4")
+    assert "100" in r_async
+
+
+@pytest.mark.asyncio
+async def test_username_sanitization_and_security():
+    # 1. URL Injection / Path traversal attempt
+    res = await search_username_across_platforms("../../../etc/passwd")
+    # All slashes stripped, only safe alphanumeric/dots
+    assert res["success"] is True
+
+    # 2. Entirely invalid characters
+    res_bad = await search_username_across_platforms("$$$%%%@@@")
+    assert res_bad["success"] is False
+    assert "نام کاربری نامعتبر است" in res_bad["error"]
+
+
+@pytest.mark.asyncio
+async def test_image_payload_and_decompression_guard():
+    oversized_bytes = b"0" * (26 * 1024 * 1024)
+
+    # 1. Reverse image payload limit
+    rev_res = await perform_reverse_image_recon(oversized_bytes, perform_ai_id=False)
+    assert rev_res["success"] is False
+    assert "بیش از سقف مجاز ۲۵ مگابایت" in rev_res["error"]
+
+    # 2. EXIF metadata payload limit
+    exif_res = extract_exif_metadata(oversized_bytes)
+    assert exif_res["success"] is False
+    assert "بیش از سقف مجاز ۲۵ مگابایت" in exif_res["error"]
+
+
+@pytest.mark.asyncio
+async def test_ssrf_guards_comprehensive():
+    # 1. Redirect tracer SSRF guard
+    r_res = await trace_http_redirect_chain("http://127.0.0.1:8080")
+    assert any("SSRF" in h.get("note", "") for h in r_res.get("hops", []))
+
+    # 2. Web crawler SSRF guard
+    c_res = await crawl_webpage_layers("http://169.254.169.254/latest/meta-data/")
+    assert c_res["success"] is False
+    assert "SSRF" in c_res.get("error", "")
+
+    # 3. Web meta SSRF guard
+    m_res = await inspect_web_meta("127.0.0.1")
+    assert m_res["success"] is False
+    assert "SSRF" in m_res.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_async_database_execution():
+    res = await database.execute_d1_query("SELECT 42 AS answer")
+    assert res["success"] is True
+    assert len(res["results"]) == 1
+    assert res["results"][0]["answer"] == 42
+
+
+@pytest.mark.asyncio
+async def test_async_wrappers():
+    # 1. Async SSL inspection
+    ssl_res = await inspect_ssl_certificate_async("google.com")
+    assert ssl_res["success"] is True
+    assert ssl_res["domain"] == "google.com"
+
+    # 2. Async Email security audit
+    email_sec = await audit_domain_email_security_async("google.com")
+    assert email_sec["success"] is True
+    assert email_sec["spf"]["has_spf"] is True
+
+    # 3. Async File generator & parser
+    buf, fname = await create_document_file_async("report.txt", "Prometheus OSINT Suite Async Test")
+    assert fname == "report.txt"
+    assert buf.getvalue() == b"Prometheus OSINT Suite Async Test"
+
+    parsed = await extract_file_content_async(buf.getvalue(), fname)
+    assert parsed["success"] is True
+    assert "Prometheus OSINT" in parsed["content"]
+
+    # 4. Async EXIF metadata
+    img = Image.new("RGB", (100, 100), color="blue")
+    img_io = io.BytesIO()
+    img.save(img_io, format="JPEG")
+    exif_res = await extract_exif_metadata_async(img_io.getvalue(), "blue.jpg")
+    assert exif_res["success"] is True
+    assert exif_res["width"] == 100
+    assert exif_res["height"] == 100
+
+
+@pytest.mark.asyncio
+async def test_twitter_osint():
+    from tools.osint_twitter import investigate_twitter_profile, format_twitter_report
+    # Test valid account (jack)
+    res_jack = await investigate_twitter_profile("jack")
+    assert res_jack["success"] is True
+    assert res_jack["handle"] == "jack"
+    assert res_jack["found"] is True
+    assert res_jack["numeric_id"] == "12"
+    report_jack = format_twitter_report(res_jack)
+    assert "@jack" in report_jack
+    assert "شناسه عددی" in report_jack
+
+    # Test non-existent account
+    res_nonexistent = await investigate_twitter_profile("zxqy981726a_")
+    assert res_nonexistent["success"] is True
+    assert res_nonexistent["found"] is False
+    report_none = format_twitter_report(res_nonexistent)
+    assert "یافت نشد" in report_none or "آرشیو" in report_none
+
+
+def test_telegram_era_estimation():
+    from tools.id_tool import estimate_telegram_account_era
+    era_old = estimate_telegram_account_era(100000)
+    assert "۲۰۱۳" in era_old or "2013" in era_old or "اوایل" in era_old
+    era_durov = estimate_telegram_account_era(777000)
+    assert "۲۰۱۳" in era_durov or "2013" in era_durov
+    era_new = estimate_telegram_account_era(7900000000)
+    assert "۲۰۲۴" in era_new or "۲۰۲۵" in era_new or "۲۰۲۶" in era_new or "جدید" in era_new
+
+
+@pytest.mark.asyncio
+async def test_eternal_directives_and_bans():
+    from tools.moderation import (
+        set_eternal_directive,
+        delete_eternal_directive,
+        format_directives_report,
+        ban_user,
+        unban_user,
+        format_banlist_report,
+    )
+    # Test directive creation and reporting
+    set_ok = await set_eternal_directive("test_directive_alpha", "همواره پاسخ‌ها دقیق باشد", admin_id=123)
+    assert set_ok is True
+    report = format_directives_report()
+    assert "test_directive_alpha" in report
+    assert "همواره پاسخ‌ها دقیق باشد" in report
+
+    # Test ban user and banlist reporting
+    await ban_user(user_id=987654321, username="test_banned_user", name="Test Banned", reason="تست امنیتی", banned_by=123)
+    ban_rep = format_banlist_report()
+    assert "987654321" in ban_rep
+    assert "@test_banned_user" in ban_rep
+    assert "تست امنیتی" in ban_rep
+
+    # Cleanup
+    await unban_user(user_id=987654321, unbanned_by=123)
+    await delete_eternal_directive("test_directive_alpha", admin_id=123)
+
 
 
 

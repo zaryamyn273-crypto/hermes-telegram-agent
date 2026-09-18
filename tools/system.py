@@ -106,6 +106,10 @@ def get_system_time_context() -> str:
         return ""
 
 
+import html
+import asyncio
+from typing import Union, Dict, Any, List, Optional
+
 # Safe Math AST Evaluator
 _SAFE_MATH_NAMES = {
     "abs": abs,
@@ -125,18 +129,78 @@ _SAFE_MATH_NAMES = {
 }
 
 
-_ALLOWED_AST_NODES = (
-    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
-    ast.Call, ast.Name, ast.Load,
-    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
-    ast.USub, ast.UAdd
-)
+def _safe_eval_node(node: ast.AST) -> Union[int, float]:
+    """Recursively evaluates AST math nodes safely with strict bounds and zero eval()."""
+    if isinstance(node, ast.Expression):
+        return _safe_eval_node(node.body)
+    elif isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)):
+            return node.value
+        raise ValueError("صرفاً مقادیر عددی مجاز می‌باشند.")
+    elif isinstance(node, ast.UnaryOp):
+        operand = _safe_eval_node(node.operand)
+        if isinstance(node.op, ast.UAdd):
+            return +operand
+        elif isinstance(node.op, ast.USub):
+            return -operand
+        raise ValueError("عملگر یکانی نامعتبر است.")
+    elif isinstance(node, ast.BinOp):
+        left = _safe_eval_node(node.left)
+        right = _safe_eval_node(node.right)
+        if isinstance(node.op, ast.Add):
+            return left + right
+        elif isinstance(node.op, ast.Sub):
+            return left - right
+        elif isinstance(node.op, ast.Mult):
+            res = left * right
+            if abs(res) > 1e100:
+                raise OverflowError("حاصل‌ضرب فراتر از سقف مجاز حافظه است.")
+            return res
+        elif isinstance(node.op, ast.Div):
+            if right == 0:
+                raise ZeroDivisionError("تقسیم بر صفر امکان‌پذیر نیست.")
+            return left / right
+        elif isinstance(node.op, ast.FloorDiv):
+            if right == 0:
+                raise ZeroDivisionError("تقسیم بر صفر امکان‌پذیر نیست.")
+            return left // right
+        elif isinstance(node.op, ast.Mod):
+            if right == 0:
+                raise ZeroDivisionError("تقسیم بر صفر امکان‌پذیر نیست.")
+            return left % right
+        elif isinstance(node.op, ast.Pow):
+            if abs(right) > 500:
+                raise OverflowError("توان انتخابی بیش از حد بزرگ است (حداکثر ۵۰۰).")
+            if abs(left) > 1000 and right > 10:
+                raise OverflowError("محاسبه توان موجب سرریز پردازش و حافظه می‌شود.")
+            res = left ** right
+            if isinstance(res, complex):
+                raise ValueError("اعداد مختلط پشتیبانی نمی‌شوند.")
+            if abs(res) > 1e100:
+                raise OverflowError("حاصل توان فراتر از سقف مجاز حافظه است.")
+            return res
+        raise ValueError("عملگر محاسباتی نامعتبر است.")
+    elif isinstance(node, ast.Call):
+        func_name = getattr(node.func, "id", None)
+        if not func_name or func_name not in _SAFE_MATH_NAMES:
+            raise ValueError(f"تابع '{func_name}' در توابع مجاز ریاضی تعریف نشده است.")
+        fn = _SAFE_MATH_NAMES[func_name]
+        args = [_safe_eval_node(arg) for arg in node.args]
+        res = fn(*args)
+        if isinstance(res, complex):
+            raise ValueError("اعداد مختلط پشتیبانی نمی‌شوند.")
+        return res
+    elif isinstance(node, ast.Name):
+        if node.id in _SAFE_MATH_NAMES and isinstance(_SAFE_MATH_NAMES[node.id], (int, float)):
+            return _SAFE_MATH_NAMES[node.id]
+        raise ValueError(f"شناسه یا متغیر '{node.id}' نامعتبر است.")
+    raise ValueError("ساختار دستور ریاضی غیرمجاز است.")
 
 
 def calculate_math(expression: str) -> str:
     """
-    Safely evaluates basic and scientific math expressions using AST parsing.
-    Strictly prevents AST injection, memory exhaustion, and exponentiation DoS.
+    Safely evaluates basic and scientific math expressions using pure AST traversal.
+    Zero use of eval() or compile() - 100% immune to sandbox escaping and memory exhaustion DoS.
     """
     cleaned_expr = expression.strip()
     if not cleaned_expr:
@@ -148,36 +212,22 @@ def calculate_math(expression: str) -> str:
     try:
         expr = cleaned_expr.replace("^", "**").replace("×", "*").replace("÷", "/")
         node = ast.parse(expr, mode='eval')
-
-        for subnode in ast.walk(node):
-            if not isinstance(subnode, _ALLOWED_AST_NODES):
-                return "❌ دستورات یا عبارات نامجاز در محاسبه ریاضی شناسایی شد."
-
-            if isinstance(subnode, (ast.Call, ast.Name)):
-                name = getattr(subnode, 'id', None) or getattr(getattr(subnode, 'func', None), 'id', None)
-                if name and name not in _SAFE_MATH_NAMES:
-                    return f"❌ تابع یا شناسه نامجاز در عبارت ریاضی: `{name}`"
-
-            # Guard against exponentiation Denial of Service
-            if isinstance(subnode, ast.BinOp) and isinstance(subnode.op, ast.Pow):
-                if isinstance(subnode.right, ast.Constant):
-                    if isinstance(subnode.right.value, (int, float)) and abs(subnode.right.value) > 1000:
-                        return "❌ توان انتخابی بیش از حد بزرگ است (حداکثر ۱۰۰۰)."
-                if isinstance(subnode.left, ast.Constant) and isinstance(subnode.right, ast.Constant):
-                    if abs(subnode.left.value) > 1000 and abs(subnode.right.value) > 100:
-                        return "❌ محاسبه توان موجب سرریز حافظه می‌شود."
-
-        code_obj = compile(node, "<math>", "eval")
-        result = eval(code_obj, {"__builtins__": {}}, _SAFE_MATH_NAMES)
+        result = _safe_eval_node(node)
 
         if isinstance(result, float) and result.is_integer():
             result = int(result)
 
-        return f"🧮 **نتیجه محاسبه:**\n\n`{cleaned_expr}` = **{result}**"
+        safe_expr = html.escape(cleaned_expr)
+        return f"🧮 <b>نتیجه محاسبه:</b>\n\n<code>{safe_expr}</code> = <b>{result}</b>"
     except (ValueError, OverflowError, ZeroDivisionError, MemoryError) as me:
-        return f"❌ خطا در محاسبه عبارت ریاضی: {str(me)}"
+        return f"❌ خطا در محاسبه عبارت ریاضی: {html.escape(str(me))}"
     except Exception as e:
-        return f"❌ خطا در محاسبه عبارت ریاضی: {str(e)}"
+        return f"❌ خطا در محاسبه عبارت ریاضی: {html.escape(str(e))}"
+
+
+async def calculate_math_async(expression: str) -> str:
+    """Non-blocking asynchronous math evaluator offloaded to threadpool."""
+    return await asyncio.to_thread(calculate_math, expression)
 
 
 # =========================================================================

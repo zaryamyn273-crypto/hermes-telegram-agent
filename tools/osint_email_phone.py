@@ -10,6 +10,7 @@ import logging
 from typing import Dict, Any, Optional
 import httpx
 import dns.resolver
+import asyncio
 
 logger = logging.getLogger("OSINT_EmailPhone")
 
@@ -31,15 +32,17 @@ async def investigate_email(email_str: str) -> Dict[str, Any]:
 
     domain = match.group(1)
 
-    # 1. MX Record Check
+    # 1. MX Record Check (Non-blocking async threadpool)
     has_mx = False
     mx_records = []
     try:
-        resolver = dns.resolver.Resolver()
-        resolver.timeout = 3.5
-        resolver.lifetime = 3.5
-        answers = resolver.resolve(domain, "MX")
-        mx_records = [str(r.exchange).rstrip(".") for r in answers]
+        def _resolve_mx(target_dom: str) -> list:
+            r = dns.resolver.Resolver()
+            r.timeout = 3.5
+            r.lifetime = 3.5
+            return [str(ans.exchange).rstrip(".") for ans in r.resolve(target_dom, "MX")]
+
+        mx_records = await asyncio.to_thread(_resolve_mx, domain)
         has_mx = len(mx_records) > 0
     except Exception:
         has_mx = False

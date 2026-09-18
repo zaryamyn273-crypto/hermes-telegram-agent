@@ -283,6 +283,14 @@ async def crawl_webpage_layers(url: str, max_text_len: int = 3500) -> Dict[str, 
     parsed_root = urllib.parse.urlparse(clean_url)
     root_domain = parsed_root.netloc.lower()
 
+    from tools.web_reader import is_safe_public_url
+    if not is_safe_public_url(clean_url):
+        return {
+            "success": False,
+            "url": clean_url,
+            "error": "دسترسی به آدرس‌های لوکال، شبکه محلی و سرورهای داخلی مسدود است (حفاظت SSRF)."
+        }
+
     try:
         async with httpx.AsyncClient(headers=_HEADERS, timeout=15.0, follow_redirects=True) as client:
             resp = await client.get(clean_url)

@@ -11,6 +11,7 @@ import html
 import logging
 from typing import Dict, Any, List, Optional
 import httpx
+import asyncio
 
 from utils.formatter import wrap_in_expandable_blockquote
 
@@ -136,7 +137,7 @@ async def lookup_domain_whois(domain: str) -> Dict[str, Any]:
 
     # 2. Fallback to Socket WHOIS
     try:
-        raw_text = _socket_whois(clean_d)
+        raw_text = await asyncio.to_thread(_socket_whois, clean_d)
         if raw_text and "error" not in raw_text.lower():
             # Basic parsing of common WHOIS keys
             reg_match = re.search(r"(?:registrar|registrar name):\s*(.+)", raw_text, re.I)

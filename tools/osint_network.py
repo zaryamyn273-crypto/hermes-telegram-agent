@@ -269,6 +269,11 @@ def inspect_ssl_certificate(domain: str, port: int = 443) -> Dict[str, Any]:
         }
 
 
+async def inspect_ssl_certificate_async(domain: str, port: int = 443) -> Dict[str, Any]:
+    """Non-blocking asynchronous SSL inspection offloaded to threadpool."""
+    return await asyncio.to_thread(inspect_ssl_certificate, domain, port)
+
+
 async def audit_http_security_headers(target: str) -> Dict[str, Any]:
     """
     Audits HTTP security headers (HSTS, CSP, X-Frame-Options, X-Content-Type-Options, etc.),

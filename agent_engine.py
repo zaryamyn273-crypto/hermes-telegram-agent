@@ -503,7 +503,7 @@ async def augment_osint_prompt(user_prompt: str) -> str:
             try:
                 from tools.osint_email_security import audit_domain_email_security
                 em_domain = em_match.group(1)
-                em_res = audit_domain_email_security(em_domain)
+                em_res = await asyncio.to_thread(audit_domain_email_security, em_domain)
                 if em_res.get("success"):
                     augmented_prompt = f"{augmented_prompt}\n\n[ارزیابی امنیتی رکوردهای SPF و DMARC برای {em_domain}]: {json.dumps(em_res, ensure_ascii=False)[:1000]}"
                     logger.info(f"Auto-injected email security audit for {em_domain}")
@@ -597,6 +597,27 @@ async def augment_osint_prompt(user_prompt: str) -> str:
                     logger.info(f"Auto-injected social recon for {s_target}")
             except Exception as err:
                 logger.warning(f"Failed to auto-search social media: {err}")
+
+    # Check for Twitter / X Reconnaissance mentions
+    if any(k in user_prompt.lower() for k in ["توییتر", "تویتر", "twitter", "x.com", "ایکس", "اکانت x"]):
+        x_match = re.search(r"(?:twitter\.com/|x\.com/)(?:#!/)?([a-zA-Z0-9_]{1,15})", user_prompt, re.I)
+        if not x_match:
+            x_match = re.search(r"(?:توییتر|تویتر|twitter|x\.com|ایکس|اکانت\s*x)\s*[:=]?\s*@?([a-zA-Z0-9_]{1,15})", user_prompt, re.I)
+        if not x_match:
+            x_match = re.search(r"@([a-zA-Z0-9_]{1,15})", user_prompt)
+        if x_match:
+            tw_target = x_match.group(1)
+            try:
+                from tools.osint_twitter import investigate_twitter_profile
+                tw_res = await investigate_twitter_profile(tw_target)
+                augmented_prompt = (
+                    f"{augmented_prompt}\n\n"
+                    f"[استعلام زنده حساب توییتر / X برای @{tw_target}]:\n"
+                    f"{json.dumps(tw_res, ensure_ascii=False)[:1800]}"
+                )
+                logger.info(f"Auto-injected Twitter/X intel for @{tw_target}")
+            except Exception as err:
+                logger.warning(f"Failed to auto-fetch Twitter info: {err}")
 
     return augmented_prompt
 

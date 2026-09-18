@@ -7,10 +7,14 @@ and exact GPS coordinates with direct Google Maps and OpenStreetMap links.
 import io
 import html
 import logging
+import asyncio
 from typing import Dict, Any, Optional, Tuple
 import httpx
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS, IFD
+
+# Prevent decompression bomb DoS attacks
+Image.MAX_IMAGE_PIXELS = 100_000_000
 
 from utils.formatter import wrap_in_expandable_blockquote
 
@@ -37,6 +41,13 @@ def extract_exif_metadata(image_bytes: bytes, filename: str = "image.jpg") -> Di
     """
     Parses EXIF and GPS IFD metadata from raw image bytes.
     """
+    if len(image_bytes) > 25 * 1024 * 1024:
+        return {
+            "success": False,
+            "filename": filename,
+            "error": "حجم تصویر بیش از سقف مجاز ۲۵ مگابایت است.",
+        }
+
     try:
         image = Image.open(io.BytesIO(image_bytes))
     except Exception as e:
@@ -238,3 +249,8 @@ def format_exif_report(data: Dict[str, Any]) -> str:
 
     lines.append("\n⚡️ <i>استخراج متاداده‌های هویتی، تجهیزات تصویربرداری و موقعیت‌یابی ماهواره‌ای</i>")
     return "\n".join(lines)
+
+
+async def extract_exif_metadata_async(image_bytes: bytes, filename: str = "image.jpg") -> Dict[str, Any]:
+    """Non-blocking asynchronous EXIF extractor offloaded to threadpool."""
+    return await asyncio.to_thread(extract_exif_metadata, image_bytes, filename)

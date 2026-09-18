@@ -47,6 +47,16 @@ async def trace_http_redirect_chain(target_url: str, max_hops: int = 12) -> Dict
 
                 seen_urls.add(current_url)
 
+                from tools.web_reader import is_safe_public_url
+                if not is_safe_public_url(current_url):
+                    hops.append({
+                        "step": step,
+                        "url": current_url,
+                        "status": 0,
+                        "note": "دسترسی به شبکه محلی یا منابع داخلی مسدود است (حفاظت SSRF)."
+                    })
+                    break
+
                 try:
                     resp = await client.get(current_url)
                 except Exception as req_err:

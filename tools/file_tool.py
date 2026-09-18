@@ -26,6 +26,7 @@ import json
 import html
 import zipfile
 import logging
+import asyncio
 from typing import Optional, Tuple, Dict, Any, Union, List
 
 logger = logging.getLogger("HermesTelegramAgent.FileTool")
@@ -477,3 +478,22 @@ def detect_file_creation_intent(text: str, reply_text: Optional[str] = None) -> 
             return fn, cnt
 
     return None
+
+
+async def create_document_file_async(
+    filename: str,
+    content: Union[str, bytes],
+    file_type: Optional[str] = None
+) -> Tuple[io.BytesIO, str]:
+    """Non-blocking asynchronous document file generator offloaded to threadpool."""
+    return await asyncio.to_thread(create_document_file, filename, content, file_type)
+
+
+async def extract_file_content_async(
+    file_bytes: bytes,
+    file_name: str,
+    mime_type: Optional[str] = None,
+    max_chars: int = 15000
+) -> Dict[str, Any]:
+    """Non-blocking asynchronous file content extractor offloaded to threadpool."""
+    return await asyncio.to_thread(extract_file_content, file_bytes, file_name, mime_type, max_chars)

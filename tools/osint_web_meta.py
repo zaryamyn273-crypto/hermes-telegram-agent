@@ -39,6 +39,11 @@ async def inspect_web_meta(target: str) -> Dict[str, Any]:
         return {"success": False, "domain": domain, "error": "دامنه وارد شده نامعتبر است."}
 
     base_url = f"https://{domain}"
+
+    from tools.web_reader import is_safe_public_url
+    if not is_safe_public_url(base_url):
+        return {"success": False, "domain": domain, "error": "دسترسی به مقاصد محلی و سرورهای داخلی مسدود است (حفاظت SSRF)."}
+
     report: Dict[str, Any] = {
         "success": True,
         "domain": domain,

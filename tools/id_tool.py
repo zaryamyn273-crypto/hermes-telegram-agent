@@ -84,6 +84,30 @@ def is_id_request(text: str) -> bool:
     return False
 
 
+def estimate_telegram_account_era(uid: int) -> str:
+    """Estimates the approximate year and era when a Telegram account was registered based on numeric ID."""
+    if uid <= 0:
+        return "گروه یا کانال"
+    if uid < 50_000_000:
+        return "۲۰۱۳ - ۲۰۱۴ (اوایل تاسیس تلگرام - عتیقه 👑)"
+    elif uid < 150_000_000:
+        return "۲۰۱۵ - ۲۰۱۶ (قدیمی / Early Adopter 💎)"
+    elif uid < 450_000_000:
+        return "۲۰۱۶ - ۲۰۱۷ (کلاسیک ⏳)"
+    elif uid < 800_000_000:
+        return "۲۰۱۸ - ۲۰۱۹"
+    elif uid < 1_500_000_000:
+        return "۲۰۲۰ - ۲۰۲۱"
+    elif uid < 3_000_000_000:
+        return "۲۰۲۱ - ۲۰۲۲"
+    elif uid < 5_500_000_000:
+        return "۲۰۲۲ - ۲۰۲۳"
+    elif uid < 7_500_000_000:
+        return "۲۰۲۳ - ۲۰۲۴"
+    else:
+        return "۲۰۲۴ - ۲۰۲۶ (حساب جدید 🆕)"
+
+
 def _format_user_name(u: Any) -> str:
     """Safely extracts and formats a user's full name, handling MagicMock objects in tests."""
     if not u:
@@ -164,7 +188,7 @@ def _extract_origin_info(origin: Any, forward_from: Optional[User] = None, forwa
     return None
 
 
-def format_id_report(update: Update) -> str:
+def format_id_report(update: Update, target_arg: Optional[str] = None) -> str:
     """Generates a comprehensive diagnostic report of all available Telegram IDs."""
     message = update.effective_message
     user = update.effective_user
@@ -172,6 +196,23 @@ def format_id_report(update: Update) -> str:
 
     sections = []
     reply = message.reply_to_message if (message and getattr(message, "reply_to_message", None)) else None
+
+    # Priority 0: Direct target parameter (if passed via command args, e.g. /id 123456789)
+    if target_arg:
+        t_clean = target_arg.strip()
+        if re.match(r"^-?\d{4,16}$", t_clean):
+            nid = int(t_clean)
+            era = estimate_telegram_account_era(nid)
+            entity_type = "👤 کاربر حقیقی یا ربات" if nid > 0 else "👥 سوپرگروه یا کانال تلگرام"
+            t_parts = [
+                "🔍 <b>کالبدشکافی شناسه عددی هدف (Numeric ID Lookup):</b>",
+                f"• 🆔 <b>آیدی عددی استخراج‌شده:</b> <code>{nid}</code>",
+                f"• 📌 <b>نوع ماهیت تلگرام:</b> {entity_type}",
+            ]
+            if nid > 0:
+                t_parts.append(f"• ⏳ <b>تخمین دوره ساخت اکانت:</b> <i>{era}</i>")
+                t_parts.append(f"• 🔗 <b>پروتکل فراخوانی مستقیم:</b> <code>tg://user?id={nid}</code>")
+            sections.append("\n".join(t_parts))
 
     # Priority 1: Replied Target Details (Target User / Channel / Forward / Media)
     reply_user = getattr(reply, "from_user", None) if reply else None
@@ -189,9 +230,11 @@ def format_id_report(update: Update) -> str:
             rn = _format_user_name(r_user)
             ru_handle = f"@{r_user.username}" if isinstance(getattr(r_user, "username", None), str) and r_user.username else "ندارد"
             r_bot = "🤖 ربات" if getattr(r_user, "is_bot", False) else "👤 کاربر حقیقی"
+            era = estimate_telegram_account_era(r_user.id)
             r_parts.append(f"• 🆔 <b>آیدی عددی کاربر (User ID):</b> <code>{r_user.id}</code>")
             r_parts.append(f"• 🏷 <b>نام نمایشی:</b> {html.escape(rn)} ({r_bot})")
             r_parts.append(f"• 🔗 <b>نام کاربری:</b> {ru_handle}")
+            r_parts.append(f"• ⏳ <b>تخمین زمان ساخت اکانت:</b> <i>{era}</i>")
         elif getattr(reply, "sender_chat", None) and isinstance(getattr(reply.sender_chat, "id", None), int):
             sc = reply.sender_chat
             sc_type = "📢 کانال" if getattr(sc, "type", None) == ChatType.CHANNEL else "👥 گروه"
@@ -269,9 +312,11 @@ def format_id_report(update: Update) -> str:
         if finfo:
             f_parts = ["↪️ <b>مشخصات پیام فوروارد شده (Forward Source):</b>"]
             if finfo["type"] == "user":
+                era = estimate_telegram_account_era(finfo['id'])
                 f_parts.append(f"• 🆔 <b>آیدی عددی فرستنده اصلی (User ID):</b> <code>{finfo['id']}</code>")
                 f_parts.append(f"• 🏷 <b>نام فرستنده:</b> {html.escape(finfo['name'])}")
                 f_parts.append(f"• 🔗 <b>نام کاربری:</b> {finfo['username']}")
+                f_parts.append(f"• ⏳ <b>تخمین زمان ثبت اکانت:</b> <i>{era}</i>")
             elif finfo["type"] in ("chat", "channel"):
                 ctype = "کانال" if finfo["type"] == "channel" else "گروه"
                 f_parts.append(f"• 🆔 <b>آیدی عددی {ctype} مبدا:</b> <code>{finfo['id']}</code>")
@@ -290,10 +335,12 @@ def format_id_report(update: Update) -> str:
         uname = getattr(user, "username", None)
         u_handle = f"@{uname}" if isinstance(uname, str) and uname else "ندارد"
         is_prem = "✅" if getattr(user, "is_premium", False) is True else "❌"
+        u_era = estimate_telegram_account_era(user.id)
         ctx_parts.append(
             "👤 <b>مشخصات شما (Your Info):</b>\n"
             f"• 🆔 <b>آیدی عددی شما:</b> <code>{user.id}</code>\n"
-            f"• 🏷 <b>نام:</b> {html.escape(u_name)} | 🔗 <b>یوزرنیم:</b> {u_handle} | ⭐ <b>پرمیوم:</b> {is_prem}"
+            f"• 🏷 <b>نام:</b> {html.escape(u_name)} | 🔗 <b>یوزرنیم:</b> {u_handle} | ⭐ <b>پرمیوم:</b> {is_prem}\n"
+            f"• ⏳ <b>تخمین زمان ساخت اکانت شما:</b> <i>{u_era}</i>"
         )
 
     if chat and isinstance(getattr(chat, "id", None), int):

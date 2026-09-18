@@ -1,0 +1,29 @@
+{
+  "banned_users": {
+    "777666": {
+      "user_id": 777666,
+      "name": "",
+      "first_name": "",
+      "username": "banned_guy",
+      "reason": "توسط ادمین مسدود شد",
+      "banned_by": 8814471014,
+      "banned_at": "2026-09-18 17:35:55",
+      "banned_at_jalali": "1405/06/27 - 17:35:55",
+      "source_chat_id": 0,
+      "source_chat_title": ""
+    },
+    "444333222": {
+      "user_id": 444333222,
+      "name": "Bad Actor",
+      "first_name": "Bad Actor",
+      "username": "persian_test_bad",
+      "reason": "دستور مستقیم ادمین",
+      "banned_by": 8814471014,
+      "banned_at": "2026-09-18 17:35:55",
+      "banned_at_jalali": "1405/06/27 - 17:35:55",
+      "source_chat_id": -100999888,
+      "source_chat_title": "Test Group"
+    }
+  },
+  "banned_groups": {}
+}

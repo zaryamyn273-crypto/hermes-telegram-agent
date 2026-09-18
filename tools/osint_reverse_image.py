@@ -15,6 +15,9 @@ from typing import Dict, Any, List, Optional
 import httpx
 from PIL import Image
 
+# Decompression bomb guard
+Image.MAX_IMAGE_PIXELS = 100_000_000
+
 from utils.formatter import wrap_in_expandable_blockquote
 
 logger = logging.getLogger("OSINT_ReverseImage")
@@ -161,6 +164,17 @@ async def perform_reverse_image_recon(
     - Generates direct Google Lens, Yandex, Bing, and TinEye query links
     - Executes multimodal AI visual identification and background intel search
     """
+    if len(image_bytes) > 25 * 1024 * 1024:
+        return {
+            "success": False,
+            "error": "حجم تصویر ارسالی بیش از سقف مجاز ۲۵ مگابایت است.",
+            "fingerprints": {},
+            "public_url": "",
+            "search_urls": {},
+            "ai_summary": "",
+            "entity_search_data": None,
+        }
+
     # Run fingerprinting and upload concurrently
     fp_task = asyncio.to_thread(compute_image_fingerprints, image_bytes)
     up_task = upload_image_for_recon(image_bytes, filename=filename)

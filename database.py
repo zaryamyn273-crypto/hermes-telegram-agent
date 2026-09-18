@@ -287,13 +287,13 @@ def _execute_sqlite(sql: str, params: Optional[List[Any]] = None) -> Dict[str, A
 
 async def execute_d1_query(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     """
-    Executes parameterized SQL in pure RAM (zero external cloud database).
+    Executes parameterized SQL in pure RAM asynchronously offloaded to threadpool.
     """
     clean_params = [
         p if isinstance(p, (int, float, str, bool)) or p is None else str(p)
         for p in (params or [])
     ]
-    return _execute_sqlite(sql, clean_params)
+    return await asyncio.to_thread(_execute_sqlite, sql, clean_params)
 
 
 # =========================================================================

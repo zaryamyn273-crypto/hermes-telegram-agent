@@ -689,7 +689,7 @@ async def _process_and_reply(
                 ext = "py" if "پایتون" in p_lower else (ext or "txt")
 
             try:
-                buf, final_fn = create_document_file(f"script.{ext}", c_code)
+                buf, final_fn = await asyncio.to_thread(create_document_file, f"script.{ext}", c_code)
                 await message.reply_document(
                     document=buf,
                     filename=final_fn,
@@ -2231,7 +2231,7 @@ async def ssl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await chat.send_action(ChatAction.TYPING)
     status_msg = await msg.reply_text(f"🔒 <b>در حال برقراری هندشیک TLS و بازرسی گواهی برای:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
     t0 = time.perf_counter()
-    res = inspect_ssl_certificate(target)
+    res = await asyncio.to_thread(inspect_ssl_certificate, target)
     elapsed = time.perf_counter() - t0
     record_chat_latency(chat.id, elapsed, f"بازرسی SSL ({target[:15]})")
 
@@ -2381,7 +2381,7 @@ async def email_security_command(update: Update, context: ContextTypes.DEFAULT_T
     await chat.send_action(ChatAction.TYPING)
     status_msg = await msg.reply_text(f"🛡 <b>در حال ممیزی رکوردهای احراز هویت ایمیل برای:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
     t0 = time.perf_counter()
-    res = audit_domain_email_security(target)
+    res = await asyncio.to_thread(audit_domain_email_security, target)
     elapsed = time.perf_counter() - t0
     record_chat_latency(chat.id, elapsed, f"ارزیابی ایمیل ({target[:15]})")
 
@@ -2687,7 +2687,7 @@ async def exif_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t0 = time.perf_counter()
 
     if img_bytes:
-        res = extract_exif_metadata(img_bytes, filename=filename)
+        res = await asyncio.to_thread(extract_exif_metadata, img_bytes, filename=filename)
     else:
         res = await extract_exif_from_url(target_url)
 
@@ -3003,7 +3003,7 @@ async def calc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("ℹ️ لطفاً عبارت ریاضی مورد نظر را وارد کنید. مثال: `/calc 25 * 4 + 10`", parse_mode=ParseMode.MARKDOWN)
         return
     expr = " ".join(args).strip()
-    res = calculate_math(expr)
+    res = await asyncio.to_thread(calculate_math, expr)
     await _deliver_reply(update.effective_message, res)
 
 
@@ -3053,7 +3053,8 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
         return
-    report = format_id_report(update)
+    target_arg = " ".join(context.args).strip() if context and context.args else None
+    report = format_id_report(update, target_arg=target_arg)
     await msg.reply_text(report, parse_mode=ParseMode.HTML)
 
 
@@ -3406,7 +3407,7 @@ async def file_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await chat.send_action(ChatAction.UPLOAD_DOCUMENT)
     t0 = time.perf_counter()
     try:
-        buf, final_name = create_document_file(target_filename, content)
+        buf, final_name = await asyncio.to_thread(create_document_file, target_filename, content)
         elapsed = time.perf_counter() - t0
         record_chat_latency(chat.id, elapsed, f"تولید فایل ({final_name})")
         size_kb = len(buf.getvalue()) / 1024
@@ -3741,7 +3742,7 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Read & parse the file content
-        parsed = extract_file_content(bytes(file_bytes), f_name, mime_type=f_mime)
+        parsed = await asyncio.to_thread(extract_file_content, bytes(file_bytes), f_name, mime_type=f_mime)
         elapsed = time.perf_counter() - t0
         record_chat_latency(chat.id, elapsed, f"استخراج و تحلیل محتوای فایل ({f_name})")
 
@@ -5389,7 +5390,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fname, fcontent = file_intent
         t0 = time.perf_counter()
         try:
-            buf, final_name = create_document_file(fname, fcontent)
+            buf, final_name = await asyncio.to_thread(create_document_file, fname, fcontent)
             elapsed = time.perf_counter() - t0
             record_chat_latency(chat.id, elapsed, f"تولید فایل درخواستی ({final_name})")
             size_kb = len(buf.getvalue()) / 1024
@@ -5476,7 +5477,7 @@ async def unmutegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def banlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays permanently stored banned users and groups with username and numeric ID."""
+    """Displays permanently stored banned users and groups with rich expandable details."""
     user = update.effective_user
     msg = update.effective_message
     if not user or not is_admin(user.id):
@@ -5484,33 +5485,8 @@ async def banlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("⛔️ دسترسی غیرمجاز.")
         return
 
-    users = await get_banned_users_list()
-    groups = await get_banned_groups_list()
-
-    lines = ["📋 <b>لیست دائم کاربران و گروه‌های مسدودشده (Banned):</b>\n"]
-
-    if not users and not groups:
-        lines.append("<i>هیچ موردی در دیتابیس ثبت نشده است.</i>")
-    else:
-        if users:
-            lines.append(f"👤 <b>کاربران مسدودشده ({len(users)} نفر):</b>")
-            for idx, u in enumerate(users[:35], 1):
-                uid = u.get("user_id")
-                uname = f"@{u.get('username')}" if u.get("username") else "بدون یوزرنیم"
-                name = u.get("name") or u.get("first_name") or ""
-                reason = u.get("reason") or "بدون علت"
-                date = u.get("banned_at") or ""
-                lines.append(f"{idx}. <code>{uid}</code> | {html.escape(uname)} {html.escape(name)}\n   └ علت: {html.escape(reason)} ({date})")
-
-        if groups:
-            lines.append(f"\n👥 <b>گروه‌های مسدودشده ({len(groups)} گروه):</b>")
-            for idx, g in enumerate(groups[:25], 1):
-                cid = g.get("chat_id")
-                title = g.get("title") or "گروه"
-                reason = g.get("reason") or ""
-                lines.append(f"{idx}. <code>{cid}</code> | <b>{html.escape(title)}</b>\n   └ علت: {html.escape(reason)}")
-
-    text = "\n".join(lines)
+    from tools.moderation import format_banlist_report
+    text = format_banlist_report()
     for chunk in split_message(text, max_len=3800):
         await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
 
@@ -5925,6 +5901,132 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
 
 
+async def setrule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sets an eternal directive/rule injected into the agent system prompt permanently."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز. این فرمان مختص مدیران ربات می‌باشد.")
+        return
+
+    args = context.args or []
+    if len(args) < 2:
+        await msg.reply_text(
+            "⚠️ <b>نحوه استفاده از ثبت قانون دائمی پرومته:</b>\n"
+            "<code>/pb_setrule &lt;نام_قانون&gt; &lt;متن دستور یا قانون&gt;</code>\n\n"
+            "<i>مثال:</i>\n"
+            "<code>/pb_setrule strict_privacy همواره قبل از ارسال هرگونه گزارش هویت، هشدارهای امنیتی را در اولویت قرار بده.</code>\n\n"
+            "💡 <i>این فرامین در فایل دائمی <code>eternal_directives.json</code> و دیتابیس D1 ثبت شده و تا ابد بر رفتار مدل اعمال می‌شوند.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    key = args[0].strip()
+    val = " ".join(args[1:]).strip()
+    from tools.moderation import set_eternal_directive
+    await set_eternal_directive(key, val, admin_id=user.id)
+    await msg.reply_text(
+        f"✅ <b>دستور دائمی سیستم با موفقیت ثبت گردید:</b>\n\n"
+        f"🏷 <b>نام قانون:</b> <code>{html.escape(key)}</code>\n"
+        f"📝 <b>متن دستور:</b>\n<code>{html.escape(val)}</code>\n\n"
+        f"🔒 <i>این قانون هم‌اکنون در حافظه L1 RAM، فایل دائمی <code>eternal_directives.json</code> و Cloudflare D1 مستقر گردید و مستقیماً به هوش مصنوعی پرومته تزریق می‌شود.</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def delrule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deletes an eternal directive/rule permanently."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    args = context.args or []
+    if not args:
+        await msg.reply_text("⚠️ نحوه استفاده: <code>/pb_delrule &lt;نام_قانون&gt;</code>", parse_mode=ParseMode.HTML)
+        return
+
+    key = args[0].strip()
+    from tools.moderation import delete_eternal_directive
+    await delete_eternal_directive(key, admin_id=user.id)
+    await msg.reply_text(
+        f"🗑 <b>قانون دائمی <code>{html.escape(key)}</code> با موفقیت از سیستم پرومته حذف گردید.</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists all eternal directives and rules currently active in Prometheus."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
+    from tools.moderation import format_directives_report
+    text = format_directives_report()
+    for chunk in split_message(text, max_len=3800):
+        await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+
+async def twitter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Investigates a Twitter / X account, extracting profile metadata, stats, and historical footprints."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    target = None
+    if context.args:
+        target = context.args[0].strip()
+    elif msg.reply_to_message:
+        reply_text = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+        m = re.search(r"(?:twitter\.com/|x\.com/)(?:#!/)?([a-zA-Z0-9_]{1,15})", reply_text, re.I)
+        if m:
+            target = m.group(1)
+        else:
+            m = re.search(r"@([a-zA-Z0-9_]{1,15})", reply_text)
+            if m:
+                target = m.group(1)
+
+    if not target:
+        await msg.reply_text(
+            "⚠️ <b>نحوه استفاده از دستور اوسینت توییتر / X:</b>\n\n"
+            "• <code>/pb_x @username</code> یا <code>/pb_twitter username</code>\n"
+            "• یا ریپلای روی پیامی که حاوی یوزرنیم یا لینک توییتر است با دستور <code>/pb_x</code>\n\n"
+            "<i>مثال:</i> <code>/pb_x 4rsh14p</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    status_msg = await msg.reply_text(
+        f"🔍 <i>در حال کاوش و استعلام زنده اطلاعات اکانت توییتر (X) برای @{html.escape(target.lstrip('@'))}...</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+    try:
+        from tools.osint_twitter import investigate_twitter_profile, format_twitter_report
+        data = await investigate_twitter_profile(target)
+        report = format_twitter_report(data)
+        for chunk in split_message(report, max_len=3800):
+            await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
+        if status_msg:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Error in twitter_command: {e}")
+        err_msg = f"⚠️ خطا در استعلام حساب توییتر / X: {html.escape(str(e))}"
+        if status_msg:
+            await status_msg.edit_text(err_msg, parse_mode=ParseMode.HTML)
+        else:
+            await msg.reply_text(err_msg, parse_mode=ParseMode.HTML)
+
+
 async def adminlogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists recent admin commands and unbans from D1."""
     user = update.effective_user
@@ -6097,6 +6199,7 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["cidr", "subnet", "ptr", "ipcalc"]), guard(subnet_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["exif", "metadata", "gps", "photo"]), guard(exif_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["phish", "phishing", "scam", "fake", "typo"]), guard(phish_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["x", "twitter", "pb_x", "pb_twitter"]), guard(twitter_command, is_cmd=True)))
 
     # Threat Intelligence & Utilities
     app.add_handler(CommandHandler(make_bot_commands(["scan", "vt", "virustotal", "antivirus"]), guard(scan_command, is_cmd=True)))
@@ -6129,8 +6232,11 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["rejectgroup", "reject_group"]), guard(rejectgroup_command, is_admin_cmd=True, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["set", "set_setting"]), guard(set_setting_command, is_admin_cmd=True, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["get", "get_setting"]), guard(get_setting_command, is_admin_cmd=True, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["delsetting", "del_setting", "delrule", "del_rule", "deldirective"]), guard(del_setting_command, is_admin_cmd=True, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["adminsettings", "customdata", "directives", "rules"]), guard(settings_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["delsetting", "del_setting"]), guard(del_setting_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["setrule", "set_rule", "directive", "addrule", "pb_setrule"]), guard(setrule_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["delrule", "del_rule", "deldirective", "removerule", "pb_delrule"]), guard(delrule_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["rules", "directives", "eternalrules", "pb_rules"]), guard(rules_command, is_admin_cmd=True, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["adminsettings", "customdata"]), guard(settings_command, is_admin_cmd=True, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["adminlogs", "audit"]), guard(adminlogs_command, is_admin_cmd=True, is_cmd=True)))
 
     # Callback Query Handlers for Group Approvals

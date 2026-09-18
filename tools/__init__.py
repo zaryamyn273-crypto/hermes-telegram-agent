@@ -51,6 +51,7 @@ from .osint_network import (
     enumerate_subdomains_crtsh,
     lookup_ip_intel,
     inspect_ssl_certificate,
+    inspect_ssl_certificate_async,
     audit_http_security_headers,
     format_ssl_report,
     format_http_headers_report,
@@ -61,6 +62,7 @@ from .osint_whois import (
 )
 from .osint_email_security import (
     audit_domain_email_security,
+    audit_domain_email_security_async,
     format_email_security_report,
 )
 from .osint_web_meta import (
@@ -113,12 +115,40 @@ from .osint_subnet import (
 )
 from .osint_exif import (
     extract_exif_metadata,
+    extract_exif_metadata_async,
     extract_exif_from_url,
     format_exif_report,
 )
 from .osint_phish_intel import (
     analyze_phishing_heuristics,
     format_phish_report,
+)
+from .file_tool import (
+    create_document_file,
+    create_document_file_async,
+    extract_file_content,
+    extract_file_content_async,
+)
+from .system import (
+    calculate_math,
+    calculate_math_async,
+)
+from .osint_twitter import (
+    investigate_twitter_profile,
+    format_twitter_report,
+)
+from .id_tool import (
+    is_id_request,
+    format_id_report,
+    estimate_telegram_account_era,
+)
+from .moderation import (
+    set_eternal_directive,
+    delete_eternal_directive,
+    get_all_eternal_directives,
+    format_directives_report,
+    format_banlist_report,
+    get_current_jalali_timestamp,
 )
 
 __all__ = [
@@ -192,4 +222,24 @@ __all__ = [
     "detect_vision_mode",
     "analyze_image_with_vision",
     "is_reconstruction_query",
+    "inspect_ssl_certificate_async",
+    "audit_domain_email_security_async",
+    "extract_exif_metadata_async",
+    "create_document_file",
+    "create_document_file_async",
+    "extract_file_content",
+    "extract_file_content_async",
+    "calculate_math",
+    "calculate_math_async",
+    "investigate_twitter_profile",
+    "format_twitter_report",
+    "is_id_request",
+    "format_id_report",
+    "estimate_telegram_account_era",
+    "set_eternal_directive",
+    "delete_eternal_directive",
+    "get_all_eternal_directives",
+    "format_directives_report",
+    "format_banlist_report",
+    "get_current_jalali_timestamp",
 ]

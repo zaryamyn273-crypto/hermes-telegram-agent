@@ -53,6 +53,17 @@ _TRACKED_GROUPS: Dict[int, Dict[str, Any]] = {}
 _PENDING_NOTIFIED_CHATS: Set[int] = set()
 
 _GROUPS_JSON_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "tracked_groups.json")
+_DIRECTIVES_JSON_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "eternal_directives.json")
+_BANS_JSON_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "eternal_bans.json")
+
+
+def get_current_jalali_timestamp() -> str:
+    """Returns formatted Solar Jalali timestamp (e.g. 1405/06/27 - 17:30:00)."""
+    try:
+        import jdatetime
+        return jdatetime.datetime.now().strftime("%Y/%m/%d - %H:%M:%S")
+    except Exception:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _normalize_chat_ids(chat_id: Union[int, str]) -> List[int]:
@@ -114,11 +125,113 @@ def _save_groups_to_file():
         logger.warning(f"Failed to save tracked groups to {_GROUPS_JSON_PATH}: {e}")
 
 
-# Pre-load persistent groups immediately on module import
-_load_groups_from_file()
+async def _save_groups_to_file_async():
+    """Asynchronously persists approved and tracked groups to JSON file on threadpool."""
+    await asyncio.to_thread(_save_groups_to_file)
+
 
 # In-memory fast cache for custom settings & directives (key_name -> dict)
 _ADMIN_SETTINGS: Dict[str, Dict[str, Any]] = {}
+
+
+def _load_directives_from_file():
+    """Loads eternal directives from persistent JSON file into RAM cache."""
+    if not os.path.exists(_DIRECTIVES_JSON_PATH):
+        return
+    try:
+        with open(_DIRECTIVES_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            with _MOD_LOCK:
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, dict):
+                            _ADMIN_SETTINGS[k] = v
+                        elif isinstance(v, str):
+                            _ADMIN_SETTINGS[k] = {
+                                "key_name": k,
+                                "data_value": v,
+                                "category": "directive",
+                                "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                            }
+        logger.info(f"Loaded eternal directives from {_DIRECTIVES_JSON_PATH}.")
+    except Exception as e:
+        logger.warning(f"Failed to load directives from {_DIRECTIVES_JSON_PATH}: {e}")
+
+
+def _save_directives_to_file():
+    """Saves eternal directives to persistent JSON file."""
+    try:
+        os.makedirs(os.path.dirname(_DIRECTIVES_JSON_PATH), exist_ok=True)
+        with _MOD_LOCK:
+            save_dict = {
+                k: v for k, v in _ADMIN_SETTINGS.items()
+                if v.get("category") in ("directive", "rule", "instruction", "system")
+            }
+        with open(_DIRECTIVES_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(save_dict, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save directives to {_DIRECTIVES_JSON_PATH}: {e}")
+
+
+async def _save_directives_to_file_async():
+    """Asynchronously persists eternal directives to JSON file on threadpool."""
+    await asyncio.to_thread(_save_directives_to_file)
+
+
+def _load_bans_from_file():
+    """Loads eternal user and group bans from persistent JSON file into RAM cache."""
+    if not os.path.exists(_BANS_JSON_PATH):
+        return
+    try:
+        with open(_BANS_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            users = data.get("banned_users", {})
+            groups = data.get("banned_groups", {})
+            with _MOD_LOCK:
+                for uid_str, item in users.items():
+                    try:
+                        uid = int(uid_str)
+                        _BANNED_USERS[uid] = item
+                        uname = (item.get("username") or "").lower().lstrip("@")
+                        if uname:
+                            _BANNED_USERNAMES[uname] = item
+                    except (ValueError, TypeError):
+                        pass
+                for cid_str, item in groups.items():
+                    try:
+                        cid = int(cid_str)
+                        _BANNED_GROUPS[cid] = item
+                    except (ValueError, TypeError):
+                        pass
+        logger.info(f"Loaded eternal bans from {_BANS_JSON_PATH}.")
+    except Exception as e:
+        logger.warning(f"Failed to load eternal bans from {_BANS_JSON_PATH}: {e}")
+
+
+def _save_bans_to_file():
+    """Saves eternal user and group bans to persistent JSON file."""
+    try:
+        os.makedirs(os.path.dirname(_BANS_JSON_PATH), exist_ok=True)
+        with _MOD_LOCK:
+            save_data = {
+                "banned_users": {str(k): v for k, v in _BANNED_USERS.items()},
+                "banned_groups": {str(k): v for k, v in _BANNED_GROUPS.items()},
+            }
+        with open(_BANS_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(save_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save eternal bans to {_BANS_JSON_PATH}: {e}")
+
+
+async def _save_bans_to_file_async():
+    """Asynchronously persists eternal bans to JSON file on threadpool."""
+    await asyncio.to_thread(_save_bans_to_file)
+
+
+# Pre-load persistent groups, directives, and bans immediately on module import
+_load_groups_from_file()
+_load_directives_from_file()
+_load_bans_from_file()
 
 # In-memory circular buffer for recent admin commands
 _ADMIN_COMMANDS_CACHE: deque = deque(maxlen=100)
@@ -305,14 +418,15 @@ async def refresh_moderation_caches():
                                 _PENDING_NOTIFIED_CHATS.add(vid)
                             elif r.get("status") == "pending":
                                 _PENDING_NOTIFIED_CHATS.add(vid)
-    # Ensure persistent file groups are hydrated
+    # Ensure persistent file groups, directives, and bans are hydrated
     _load_groups_from_file()
+    _load_directives_from_file()
+    _load_bans_from_file()
 
     # 6. Admin Custom Settings & Directives
     res_settings = await database.execute_d1_query("SELECT key_name, data_value, category, updated_at FROM custom_data_store")
     if res_settings.get("success"):
         with _MOD_LOCK:
-            _ADMIN_SETTINGS.clear()
             for r in res_settings.get("results", []):
                 k = r.get("key_name")
                 if k:
@@ -463,6 +577,7 @@ async def ban_user(
     """Permanently bans a user from using the bot, updating RAM cache & D1."""
     clean_username = (username or "").lstrip("@").strip()
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    jalali_now = get_current_jalali_timestamp()
 
     item = {
         "user_id": int(user_id),
@@ -472,6 +587,7 @@ async def ban_user(
         "reason": reason or "توسط ادمین مسدود شد",
         "banned_by": banned_by,
         "banned_at": now_str,
+        "banned_at_jalali": jalali_now,
         "source_chat_id": chat_id,
         "source_chat_title": chat_title
     }
@@ -484,6 +600,9 @@ async def ban_user(
         _MUTED_USERS.pop(int(user_id), None)
         if clean_username:
             _MUTED_USERNAMES.pop(clean_username.lower(), None)
+
+    # Persist in eternal JSON
+    await _save_bans_to_file_async()
 
     # Persist in D1
     sql = """
@@ -522,6 +641,9 @@ async def unban_user(user_id: int, unbanned_by: int = 0, reason: str = "") -> Tu
         if res.get("success") and res.get("results"):
             item = res["results"][0]
             uname = item.get("username") or ""
+
+    # Persist in eternal JSON
+    await _save_bans_to_file_async()
 
     # Delete from D1
     await database.execute_d1_query("DELETE FROM banned_users WHERE user_id = ?", [user_id])
@@ -634,18 +756,23 @@ async def ban_group(
 ) -> bool:
     """Permanently bans a group."""
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    jalali_now = get_current_jalali_timestamp()
     item = {
         "chat_id": int(chat_id),
         "title": title or "",
         "reason": reason or "مسدودسازی گروه توسط ادمین",
         "banned_by": banned_by,
-        "banned_at": now_str
+        "banned_at": now_str,
+        "banned_at_jalali": jalali_now
     }
 
     with _MOD_LOCK:
         _BANNED_GROUPS[int(chat_id)] = item
         if int(chat_id) in _TRACKED_GROUPS:
             _TRACKED_GROUPS[int(chat_id)]["status"] = "banned"
+
+    # Persist in eternal JSON
+    await _save_bans_to_file_async()
 
     sql = """
     INSERT OR REPLACE INTO banned_groups (chat_id, title, reason, banned_by, banned_at)
@@ -671,6 +798,9 @@ async def unban_group(chat_id: int, unbanned_by: int = 0, reason: str = "") -> T
         item = _BANNED_GROUPS.pop(int(chat_id), None)
         if int(chat_id) in _TRACKED_GROUPS:
             _TRACKED_GROUPS[int(chat_id)]["status"] = "active"
+
+    # Persist in eternal JSON
+    await _save_bans_to_file_async()
 
     if not item:
         res = await database.execute_d1_query("SELECT * FROM banned_groups WHERE chat_id = ?", [chat_id])
@@ -797,7 +927,7 @@ async def register_group_event(
                         else:
                             _TRACKED_GROUPS[v] = dict(existing, chat_id=v, status="approved")
                         _PENDING_NOTIFIED_CHATS.add(v)
-                    _save_groups_to_file()
+                    await _save_groups_to_file_async()
                     for v in variants:
                         asyncio.create_task(database.execute_d1_query(
                             "UPDATE tracked_groups SET status = 'approved', added_by = ?, title = CASE WHEN ? != '' THEN ? ELSE title END WHERE chat_id = ?",
@@ -844,7 +974,7 @@ async def register_group_event(
             _TRACKED_GROUPS[vid] = dict(item, chat_id=vid)
             _PENDING_NOTIFIED_CHATS.add(vid)
 
-    _save_groups_to_file()
+    await _save_groups_to_file_async()
 
     sql = """
     INSERT OR REPLACE INTO tracked_groups
@@ -874,7 +1004,7 @@ async def approve_group(chat_id: int, reviewed_by: int = 0, title: str = "") -> 
                 _TRACKED_GROUPS[vid] = {"chat_id": vid, "title": title or "گروه", "status": "approved", "added_at": now_str}
             _PENDING_NOTIFIED_CHATS.add(vid)
 
-    _save_groups_to_file()
+    await _save_groups_to_file_async()
 
     sql = """
     INSERT INTO tracked_groups (chat_id, title, status, added_at)
@@ -907,7 +1037,7 @@ async def reject_group(chat_id: int, reviewed_by: int = 0) -> bool:
                 _TRACKED_GROUPS[vid] = {"chat_id": vid, "status": "rejected", "added_at": now_str}
             _PENDING_NOTIFIED_CHATS.add(vid)
 
-    _save_groups_to_file()
+    await _save_groups_to_file_async()
 
     sql = """
     INSERT INTO tracked_groups (chat_id, status, added_at)
@@ -1373,6 +1503,125 @@ def get_cached_admin_directives() -> List[Dict[str, Any]]:
             dict(v) for v in _ADMIN_SETTINGS.values()
             if v.get("category") in ("directive", "rule", "instruction", "system")
         ]
+
+
+async def set_eternal_directive(key_name: str, instruction: str, admin_id: int = 0) -> bool:
+    """Sets a permanent instruction/rule for the AI agent, persisting in RAM, JSON, and D1."""
+    res = await set_admin_setting(
+        key_name=key_name,
+        data_value=instruction,
+        category="directive",
+        admin_id=admin_id
+    )
+    await _save_directives_to_file_async()
+    return res
+
+
+async def delete_eternal_directive(key_name: str, admin_id: int = 0) -> bool:
+    """Deletes an eternal instruction/rule, updating RAM, JSON, and D1."""
+    res = await delete_admin_setting(key_name=key_name, admin_id=admin_id)
+    await _save_directives_to_file_async()
+    return res
+
+
+def get_all_eternal_directives() -> List[Dict[str, Any]]:
+    """Returns all active eternal directives from in-memory RAM cache."""
+    return get_cached_admin_directives()
+
+
+def format_directives_report() -> str:
+    """Formats all active eternal rules and directives for admin viewing in HTML."""
+    directives = get_cached_admin_directives()
+    if not directives:
+        return (
+            "📜 <b>قوانین و دستورات دائمی سیستم (Eternal Directives)</b>\n\n"
+            "▫️ در حال حاضر هیچ قانون یا دستور دائمی ثبت نشده است.\n\n"
+            "💡 <i>برای ثبت قانون جدید:</i> <code>/pb_setrule &lt;نام&gt; &lt;متن دستور&gt;</code>"
+        )
+
+    import html
+    lines = [
+        "📜 <b>قوانین و فرامین دائمی ربات (Eternal Directives):</b>",
+        "<i>این قوانین به صورت پایدار ذخیره شده و همواره در پرامپت سامانه به مدل هوش مصنوعی تزریق می‌شوند.</i>\n"
+    ]
+    for idx, d in enumerate(directives, 1):
+        k = d.get("key_name", "نامشخص")
+        v = d.get("data_value", "")
+        updated = d.get("updated_at", "")
+        lines.append(f"{idx}. 🏷 <b><code>{html.escape(k)}</code></b>")
+        lines.append(f"   📝 دستور: <code>{html.escape(v)}</code>")
+        if updated:
+            lines.append(f"   🕒 آخرین بروزرسانی: <code>{html.escape(updated)}</code>")
+        lines.append("")
+
+    lines.append("💡 <i>برای حذف یک قانون:</i> <code>/pb_delrule &lt;نام&gt;</code>")
+    return "\n".join(lines).strip()
+
+
+def format_banlist_report() -> str:
+    """
+    Formats an extensive, rich report of all banned users and groups with
+    numeric ID, username, full name, reason, admin ID, and Jalali/UTC timestamps.
+    """
+    import html
+    with _MOD_LOCK:
+        users = list(_BANNED_USERS.values())
+        groups = list(_BANNED_GROUPS.values())
+
+    total_bans = len(users) + len(groups)
+    if total_bans == 0:
+        return (
+            "🛡 <b>فهرست سیاه و محرومیت‌های دائمی (Ban List)</b>\n\n"
+            "▫️ در حال حاضر هیچ کاربر یا گروهی در لیست سیاه ثبت نشده است.\n"
+            "▫️ وضعیت امنیتی: <b>سبز و پایدار</b>"
+        )
+
+    lines = [
+        "🛡 <b>فهرست سیاه جامع و محرومیت‌های دائمی (Ban List)</b>",
+        f"📊 <b>مجموع موارد مسدود:</b> <code>{total_bans}</code> مورد (<code>{len(users)}</code> کاربر | <code>{len(groups)}</code> گروه)\n"
+    ]
+
+    if users:
+        lines.append(f"👤 <b>کاربران مسدود شده ({len(users)} نفر):</b>")
+        lines.append("<blockquote expandable>")
+        for idx, u in enumerate(users, 1):
+            uid = u.get("user_id")
+            uname = u.get("username")
+            name = u.get("name") or u.get("first_name") or "نامشخص"
+            reason = u.get("reason") or "بدون توضیح"
+            banned_by = u.get("banned_by") or "سیستم / ناشناس"
+            jalali_time = u.get("banned_at_jalali") or ""
+            utc_time = u.get("banned_at") or ""
+            time_display = jalali_time if jalali_time else utc_time
+
+            uname_str = f"@{html.escape(uname)}" if uname else "فاقد یوزرنیم"
+            lines.append(f"<b>{idx}.</b> 👤 <b>نام:</b> <code>{html.escape(str(name))}</code> | <b>آیدی عددی:</b> <code>{uid}</code>")
+            lines.append(f"   ▫️ <b>یوزرنیم:</b> {uname_str}")
+            lines.append(f"   ▫️ <b>علت:</b> {html.escape(str(reason))}")
+            lines.append(f"   ▫️ <b>ثبت توسط:</b> <code>{banned_by}</code> | <b>زمان:</b> <code>{time_display}</code>")
+            lines.append("──────────────────────")
+        lines.append("</blockquote>\n")
+
+    if groups:
+        lines.append(f"👥 <b>گروه‌های مسدود شده ({len(groups)} گروه):</b>")
+        lines.append("<blockquote expandable>")
+        for idx, g in enumerate(groups, 1):
+            cid = g.get("chat_id")
+            title = g.get("title") or "گروه بدون نام"
+            reason = g.get("reason") or "بدون توضیح"
+            banned_by = g.get("banned_by") or "سیستم / ناشناس"
+            jalali_time = g.get("banned_at_jalali") or ""
+            utc_time = g.get("banned_at") or ""
+            time_display = jalali_time if jalali_time else utc_time
+
+            lines.append(f"<b>{idx}.</b> 👥 <b>عنوان گروه:</b> <code>{html.escape(str(title))}</code> | <b>شناسه:</b> <code>{cid}</code>")
+            lines.append(f"   ▫️ <b>علت مسدودیت:</b> {html.escape(str(reason))}")
+            lines.append(f"   ▫️ <b>ثبت توسط:</b> <code>{banned_by}</code> | <b>زمان:</b> <code>{time_display}</code>")
+            lines.append("──────────────────────")
+        lines.append("</blockquote>\n")
+
+    lines.append("💡 <i>برای رفع مسدودیت:</i> <code>/pb_unban &lt;user_id&gt;</code> یا <code>/pb_unbangroup &lt;chat_id&gt;</code>")
+    return "\n".join(lines).strip()
 
 
 # =========================================================================

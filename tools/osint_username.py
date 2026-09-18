@@ -4,6 +4,7 @@ Scans 65+ global online platforms across 8 distinct operational categories concu
 with anti-false-positive verification, async semaphore throttling, and categorized reporting.
 """
 
+import re
 import html
 import logging
 import asyncio
@@ -141,6 +142,17 @@ async def _check_single_platform(
                         return {"platform": name, "category": category, "url": f"https://t.me/{username}"}
                 return None
 
+            if name == "Twitter / X":
+                resp = await client.get(f"https://api.fxtwitter.com/{username}", timeout=4.0, follow_redirects=True)
+                if resp.status_code == 200:
+                    try:
+                        j = resp.json()
+                        if j.get("code") == 200 and j.get("user"):
+                            return {"platform": name, "category": category, "url": f"https://x.com/{username}"}
+                    except Exception:
+                        pass
+                return None
+
             resp = await client.get(url, timeout=3.5, follow_redirects=False)
             if resp.status_code == 200:
                 # Anti-false-positive verification on body text
@@ -163,9 +175,9 @@ async def search_username_across_platforms(username: str) -> Dict[str, Any]:
     Scans 65+ online platforms in parallel for profile presence of a username.
     Throttled via asyncio Semaphore for high concurrency without local socket exhaustion.
     """
-    clean_u = username.strip().lstrip("@")
+    clean_u = re.sub(r"[^a-zA-Z0-9_.-]", "", username.strip().lstrip("@")).strip()
     if not clean_u:
-        return {"success": False, "error": "نام کاربری نامعتبر است."}
+        return {"success": False, "error": "نام کاربری نامعتبر است. صرفاً حروف انگلیسی، اعداد، نقطه و خط تیره مجاز است."}
 
     # Check cache
     cached = await username_cache.get(clean_u.lower())
