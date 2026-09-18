@@ -20,6 +20,43 @@ from config import settings
 
 logger = logging.getLogger("PrometheusStorage")
 
+
+def normalize_persian_text(text: str) -> str:
+    """
+    Normalizes Persian and Arabic text for robust search matching:
+    - Unifies Arabic and Persian Yeh (ي, ى -> ی)
+    - Unifies Arabic and Persian Kaf (ك -> ک)
+    - Normalizes Teh Marbuta (ة -> ه)
+    - Normalizes Alef forms (آ, أ, إ -> ا)
+    - Strips Arabic harakat/diacritics (َ, ِ, ُ, ً, ٍ, ٌ, ّ, ْ, ٰ)
+    - Replaces ZWNJ (\u200c) with space
+    - Converts Persian & Arabic digits to English digits
+    - Collapses consecutive whitespace
+    """
+    if not text:
+        return ""
+    t = str(text)
+    # 1. Unify Yeh & Kaf & Teh Marbuta & Alef
+    t = t.replace("\u064A", "\u06CC").replace("\u0649", "\u06CC")
+    t = t.replace("\u0643", "\u06A9")
+    t = t.replace("\u0629", "\u0647")
+    t = t.replace("\u0622", "\u0627").replace("\u0623", "\u0627").replace("\u0625", "\u0627")
+
+    # 2. Strip diacritics / harakat
+    t = re.sub(r"[\u064B-\u065F\u0670]", "", t)
+
+    # 3. ZWNJ (نیم‌فاصله) to standard space
+    t = t.replace("\u200c", " ")
+
+    # 4. Digits normalization (Persian & Arabic to ASCII)
+    persian_digits = "۰۱۲۳۴۵۶۷۸۹"
+    arabic_digits = "٠١٢٣٤٥٦٧٨٩"
+    for i in range(10):
+        t = t.replace(persian_digits[i], str(i)).replace(arabic_digits[i], str(i))
+
+    return " ".join(t.split()).strip()
+
+
 # =========================================================================
 # Tier 1: Sub-Millisecond In-Memory LRU L1 Fast Buffer
 # =========================================================================
@@ -212,6 +249,7 @@ def _init_sqlite_tables(conn: sqlite3.Connection):
             full_name TEXT DEFAULT '',
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            normalized_content TEXT DEFAULT '',
             reply_to_message_id INTEGER DEFAULT 0,
             media_type TEXT DEFAULT 'text',
             is_bot INTEGER DEFAULT 0,
@@ -225,6 +263,7 @@ def _init_sqlite_tables(conn: sqlite3.Connection):
         needed_cols = {
             "message_id": "INTEGER DEFAULT 0",
             "full_name": "TEXT DEFAULT ''",
+            "normalized_content": "TEXT DEFAULT ''",
             "reply_to_message_id": "INTEGER DEFAULT 0",
             "media_type": "TEXT DEFAULT 'text'",
             "is_bot": "INTEGER DEFAULT 0",
@@ -236,45 +275,92 @@ def _init_sqlite_tables(conn: sqlite3.Connection):
                 except Exception as ex:
                     logger.debug(f"Migration note for messages.{col_name}: {ex}")
 
-        # 3. High-performance composite indexes for strict chat isolation & speed
+        # 3. Clean up and deduplicate existing duplicate rows before applying unique index
+        try:
+            cur.execute("""
+            DELETE FROM messages
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM messages
+                GROUP BY chat_id, message_id
+            ) AND message_id > 0;
+            """)
+            # Also clean up duplicate synthetic messages (message_id=0) matching real messages
+            cur.execute("""
+            DELETE FROM messages
+            WHERE message_id = 0 AND EXISTS (
+                SELECT 1 FROM messages m2
+                WHERE m2.chat_id = messages.chat_id
+                  AND m2.role = messages.role
+                  AND m2.content = messages.content
+                  AND m2.message_id > 0
+            );
+            """)
+        except Exception as dedup_err:
+            logger.debug(f"Pre-indexing deduplication note: {dedup_err}")
+
+        # 4. Backfill normalized_content for older rows where it is empty
+        try:
+            cur.execute("SELECT id, content FROM messages WHERE normalized_content IS NULL OR normalized_content = '';")
+            rows_to_norm = cur.fetchall()
+            if rows_to_norm:
+                for r in rows_to_norm:
+                    norm_val = normalize_persian_text(r["content"] or "")
+                    cur.execute("UPDATE messages SET normalized_content = ? WHERE id = ?;", (norm_val, r["id"]))
+        except Exception as norm_err:
+            logger.debug(f"Normalized content backfill note: {norm_err}")
+
+        # 5. High-performance composite & unique indexes for strict chat isolation & speed
         cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id ON messages (chat_id, id DESC);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_user ON messages (chat_id, user_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_msg_id ON messages (chat_id, message_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages (chat_id, created_at DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_norm ON messages (chat_id, normalized_content);")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_msg_unique ON messages (chat_id, message_id) WHERE message_id > 0;")
 
-        # 4. Initialize SQLite FTS5 full-text search virtual table and synchronization triggers
+        # 6. Initialize SQLite FTS5 full-text search virtual table and synchronization triggers
         try:
-            cur.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                content,
-                username,
-                full_name,
-                content='messages',
-                content_rowid='id',
-                tokenize='unicode61 remove_diacritics 2'
-            );
-            """)
+            cur.execute("PRAGMA table_info(messages_fts);")
+            fts_cols = {row["name"] for row in cur.fetchall()}
+            if not fts_cols or "normalized_content" not in fts_cols:
+                # Upgraded schema: drop legacy FTS and triggers, then rebuild with normalized_content
+                cur.execute("DROP TRIGGER IF EXISTS messages_ai;")
+                cur.execute("DROP TRIGGER IF EXISTS messages_ad;")
+                cur.execute("DROP TRIGGER IF EXISTS messages_au;")
+                cur.execute("DROP TABLE IF EXISTS messages_fts;")
+                cur.execute("""
+                CREATE VIRTUAL TABLE messages_fts USING fts5(
+                    content,
+                    normalized_content,
+                    username,
+                    full_name,
+                    content='messages',
+                    content_rowid='id',
+                    tokenize='unicode61 remove_diacritics 2'
+                );
+                """)
+                cur.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild');")
 
             cur.execute("""
             CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-              INSERT INTO messages_fts(rowid, content, username, full_name)
-              VALUES (new.id, new.content, new.username, new.full_name);
+              INSERT INTO messages_fts(rowid, content, normalized_content, username, full_name)
+              VALUES (new.id, new.content, new.normalized_content, new.username, new.full_name);
             END;
             """)
 
             cur.execute("""
             CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-              INSERT INTO messages_fts(messages_fts, rowid, content, username, full_name)
-              VALUES ('delete', old.id, old.content, old.username, old.full_name);
+              INSERT INTO messages_fts(messages_fts, rowid, content, normalized_content, username, full_name)
+              VALUES ('delete', old.id, old.content, old.normalized_content, old.username, old.full_name);
             END;
             """)
 
             cur.execute("""
             CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-              INSERT INTO messages_fts(messages_fts, rowid, content, username, full_name)
-              VALUES ('delete', old.id, old.content, old.username, old.full_name);
-              INSERT INTO messages_fts(rowid, content, username, full_name)
-              VALUES (new.id, new.content, new.username, new.full_name);
+              INSERT INTO messages_fts(messages_fts, rowid, content, normalized_content, username, full_name)
+              VALUES ('delete', old.id, old.content, old.normalized_content, old.username, old.full_name);
+              INSERT INTO messages_fts(rowid, content, normalized_content, username, full_name)
+              VALUES (new.id, new.content, new.normalized_content, new.username, new.full_name);
             END;
             """)
         except Exception as fts_err:
@@ -373,26 +459,75 @@ async def persist_message(
 ) -> bool:
     """
     Persists a message with complete Telegram metadata into the database.
-    Automatically indexed by SQLite FTS5 for sub-millisecond retrieval.
+    Accurately handles upserts for edited messages via UNIQUE(chat_id, message_id),
+    prevents phantom duplicate synthetic rows, and synchronizes SQLite FTS5 index.
     """
     if not content or not content.strip():
         return False
 
     clean_content = content.strip()
+    norm_content = normalize_persian_text(clean_content)
     clean_role = role if role in ("user", "assistant", "system") else "user"
+    m_id = int(message_id or 0)
 
+    # 1. Deduplication guard for synthetic / message_id=0 inserts:
+    # If the same content and role was already recorded in this chat within the last 15 seconds, avoid phantom duplication.
+    if m_id <= 0:
+        check_sql = """
+        SELECT id FROM messages
+        WHERE chat_id = ? AND role = ? AND content = ? AND created_at >= datetime('now', '-15 seconds')
+        LIMIT 1
+        """
+        existing = await execute_d1_query(check_sql, [chat_id, clean_role, clean_content])
+        if existing.get("success") and existing.get("results"):
+            return True
+
+        sql = """
+        INSERT INTO messages (chat_id, message_id, user_id, username, full_name, role, content, normalized_content, reply_to_message_id, media_type, is_bot, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        """
+        params = [
+            chat_id,
+            0,
+            int(user_id or 0),
+            str(username or ""),
+            str(full_name or ""),
+            clean_role,
+            clean_content,
+            norm_content,
+            int(reply_to_message_id or 0),
+            str(media_type or "text"),
+            int(is_bot or 0)
+        ]
+        res = await execute_d1_query(sql, params)
+        return bool(res.get("success"))
+
+    # 2. For real Telegram messages (m_id > 0): UPSERT on (chat_id, message_id)
+    # Reflects message edits instantly in place without creating duplicate database rows.
     sql = """
-    INSERT INTO messages (chat_id, message_id, user_id, username, full_name, role, content, reply_to_message_id, media_type, is_bot, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO messages (chat_id, message_id, user_id, username, full_name, role, content, normalized_content, reply_to_message_id, media_type, is_bot, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(chat_id, message_id) WHERE message_id > 0 DO UPDATE SET
+        content = excluded.content,
+        normalized_content = excluded.normalized_content,
+        user_id = excluded.user_id,
+        username = excluded.username,
+        full_name = excluded.full_name,
+        role = excluded.role,
+        reply_to_message_id = excluded.reply_to_message_id,
+        media_type = excluded.media_type,
+        is_bot = excluded.is_bot,
+        created_at = datetime('now');
     """
     params = [
         chat_id,
-        int(message_id or 0),
+        m_id,
         int(user_id or 0),
         str(username or ""),
         str(full_name or ""),
         clean_role,
         clean_content,
+        norm_content,
         int(reply_to_message_id or 0),
         str(media_type or "text"),
         int(is_bot or 0)
@@ -435,43 +570,68 @@ async def search_messages_db(
     role: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
-    High-performance full-text search strictly scoped to the given chat_id.
-    Uses SQLite FTS5 BM25 ranking when available, with automatic fallback to indexed LIKE.
+    High-performance, normalized full-text search strictly scoped to the given chat_id.
+    Features:
+    - Persian/Arabic character normalization (ی/ي, ک/ك, ZWNJ stripping, diacritic removal).
+    - Multi-token keyword matching (finds messages containing all search words in any order).
+    - SQLite FTS5 BM25 ranking with sub-millisecond execution.
+    - Resilient multi-column fallback across content, normalized_content, and usernames.
     """
     if not query or not query.strip():
         return []
 
     clean_query = query.strip()
     clean_limit = min(100, max(1, int(limit)))
+    norm_query = normalize_persian_text(clean_query)
 
-    # 1. Try SQLite FTS5 with BM25 ranking
-    # Sanitize FTS search term: wrap terms in quotes to handle punctuation safely
-    fts_tokens = [f'"{tok}"*' for tok in re.findall(r"[\w\u0600-\u06FF]+", clean_query) if tok]
-    if fts_tokens:
-        fts_match_expr = " AND ".join(fts_tokens)
+    # Extract distinct search tokens
+    raw_tokens = [tok.strip() for tok in re.findall(r"[\w\u0600-\u06FF]+", clean_query) if tok.strip()]
+    norm_tokens = [tok.strip() for tok in re.findall(r"[\w\u0600-\u06FF]+", norm_query) if tok.strip()]
+    all_tokens = list(dict.fromkeys(raw_tokens + norm_tokens))
+
+    # 1. Try SQLite FTS5 with BM25 ranking across tokens
+    if norm_tokens or raw_tokens:
+        fts_terms = []
+        for tok in (norm_tokens or raw_tokens):
+            norm_tok = normalize_persian_text(tok)
+            if norm_tok and norm_tok != tok:
+                fts_terms.append(f'("{tok}"* OR "{norm_tok}"*)')
+            else:
+                fts_terms.append(f'"{tok}"*')
+
+        fts_match_expr = " AND ".join(fts_terms)
         fts_sql = """
         SELECT m.id, m.chat_id, m.message_id, m.user_id, m.username, m.full_name, m.role, m.content, m.media_type, m.created_at, bm25(messages_fts) as rank
         FROM messages_fts f
         JOIN messages m ON f.rowid = m.id
         WHERE m.chat_id = ? AND messages_fts MATCH ?
-        ORDER BY rank ASC
-        LIMIT ?
         """
+        fts_params: List[Any] = [chat_id, fts_match_expr]
+        if user_id:
+            fts_sql += " AND m.user_id = ?"
+            fts_params.append(int(user_id))
+        if role:
+            fts_sql += " AND m.role = ?"
+            fts_params.append(str(role))
+
+        fts_sql += " ORDER BY rank ASC LIMIT ?"
+        fts_params.append(clean_limit)
+
         try:
-            res = await execute_d1_query(fts_sql, [chat_id, fts_match_expr, clean_limit])
+            res = await execute_d1_query(fts_sql, fts_params)
             if res.get("success") and res.get("results"):
                 return res["results"]
         except Exception as ex:
             logger.debug(f"FTS5 query fallback triggered for '{clean_query}': {ex}")
 
-    # 2. Fallback to indexed LIKE search
-    like_pattern = f"%{clean_query}%"
+    # 2. Multi-Token Normalized LIKE search
+    # Matches all tokens across content, normalized_content, username, or full_name
     base_sql = """
     SELECT id, chat_id, message_id, user_id, username, full_name, role, content, media_type, created_at
     FROM messages
-    WHERE chat_id = ? AND (content LIKE ? OR username LIKE ? OR full_name LIKE ?)
+    WHERE chat_id = ?
     """
-    params: List[Any] = [chat_id, like_pattern, like_pattern, like_pattern]
+    params: List[Any] = [chat_id]
     if user_id:
         base_sql += " AND user_id = ?"
         params.append(int(user_id))
@@ -479,6 +639,17 @@ async def search_messages_db(
         base_sql += " AND role = ?"
         params.append(str(role))
 
+    tokens_to_match = norm_tokens if norm_tokens else raw_tokens
+    if not tokens_to_match:
+        tokens_to_match = [clean_query]
+
+    token_clauses = []
+    for tok in tokens_to_match:
+        token_clauses.append("(content LIKE ? OR normalized_content LIKE ? OR username LIKE ? OR full_name LIKE ?)")
+        pat = f"%{tok}%"
+        params.extend([pat, pat, pat, pat])
+
+    base_sql += " AND (" + " AND ".join(token_clauses) + ")"
     base_sql += " ORDER BY id DESC LIMIT ?"
     params.append(clean_limit)
 

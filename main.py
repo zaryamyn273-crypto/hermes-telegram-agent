@@ -539,7 +539,23 @@ async def _deliver_reply(message, final_text: str):
                 logger.warning(f"HTML delivery failed for chunk ({html_err}), attempting sanitized fallback...")
                 clean_ch = re.sub(r"<[^>]+>", "", ch).strip()
                 if clean_ch:
-                    await message.reply_text(clean_ch)
+                    sent = await message.reply_text(clean_ch)
+                    if sent and message.chat:
+                        bot_user = sent.from_user
+                        asyncio.create_task(
+                            database.persist_message(
+                                chat_id=message.chat.id,
+                                message_id=sent.message_id,
+                                user_id=bot_user.id if bot_user else 0,
+                                username=bot_user.username or "" if bot_user else "",
+                                full_name=bot_user.full_name or "Prometheus" if bot_user else "Prometheus",
+                                role="assistant",
+                                content=cleaned,
+                                reply_to_message_id=message.message_id,
+                                media_type="text",
+                                is_bot=1
+                            )
+                        )
     except BadRequest as e:
         logger.warning(f"Telegram BadRequest in response delivery: {e}")
 
@@ -549,7 +565,23 @@ async def _deliver_reply(message, final_text: str):
             plain_fallback = re.sub(r"<[^>]+>", "", cleaned).strip()
             chunks = split_message(plain_fallback, max_len=3900)
             for ch in chunks:
-                await message.reply_text(ch)
+                sent = await message.reply_text(ch)
+                if sent and message.chat:
+                    bot_user = sent.from_user
+                    asyncio.create_task(
+                        database.persist_message(
+                            chat_id=message.chat.id,
+                            message_id=sent.message_id,
+                            user_id=bot_user.id if bot_user else 0,
+                            username=bot_user.username or "" if bot_user else "",
+                            full_name=bot_user.full_name or "Prometheus" if bot_user else "Prometheus",
+                            role="assistant",
+                            content=cleaned,
+                            reply_to_message_id=message.message_id,
+                            media_type="text",
+                            is_bot=1
+                        )
+                    )
         except Exception:
             pass
 
@@ -1955,6 +1987,22 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not await _check_moderation_guard(update, context):
         return
+
+    # Ingest photo message into database
+    asyncio.create_task(
+        database.persist_message(
+            chat_id=chat.id,
+            user_id=user.id,
+            role="user",
+            content=caption or "[Photo]",
+            username=user.username or "",
+            full_name=user.full_name or "",
+            message_id=msg.message_id,
+            reply_to_message_id=msg.reply_to_message.message_id if msg.reply_to_message else 0,
+            media_type="photo",
+            is_bot=1 if user.is_bot else 0
+        )
+    )
 
     is_private = (chat.type == ChatType.PRIVATE)
     bot_id = context.bot.id
@@ -3689,6 +3737,50 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
 # Main Message Handler with Silence-By-Default Trigger Logic
 # =========================================================================
 
+async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Synchronizes edited messages in Telegram directly into the persistent database.
+    Performs UPSERT in-place via UNIQUE(chat_id, message_id) to update content and search index.
+    """
+    msg = update.edited_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user:
+        return
+
+    raw_text = msg.text or msg.caption or ""
+    if not raw_text.strip():
+        return
+
+    media_type = "text"
+    if msg.photo:
+        media_type = "photo"
+    elif msg.document:
+        media_type = "document"
+    elif msg.video:
+        media_type = "video"
+    elif msg.audio:
+        media_type = "audio"
+    elif msg.voice:
+        media_type = "voice"
+    elif msg.sticker:
+        media_type = "sticker"
+
+    reply_id = msg.reply_to_message.message_id if msg.reply_to_message else 0
+    await database.persist_message(
+        chat_id=chat.id,
+        user_id=user.id,
+        role="user",
+        content=raw_text,
+        username=user.username or "",
+        full_name=user.full_name or "",
+        message_id=msg.message_id,
+        reply_to_message_id=reply_id,
+        media_type=media_type,
+        is_bot=1 if user.is_bot else 0
+    )
+
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     user = update.effective_user
@@ -4758,6 +4850,8 @@ def build_application():
     )
 
     async def post_init(application: Application):
+        await database.init_database()
+        logger.info("Prometheus storage & SQLite FTS5 database initialized in post_init.")
         await init_moderation_engine()
         logger.info("Prometheus moderation engine loaded in post_init.")
         await init_permissions_engine()
@@ -4859,6 +4953,14 @@ def build_application():
 
     # Incoming document / file handler (PDF, Word, Excel, CSV, Code, Text, Archives)
     app.add_handler(MessageHandler(filters.Document.ALL, guard(document_handler, is_cmd=False)))
+
+    # Synchronize edited messages into database
+    app.add_handler(
+        MessageHandler(
+            filters.UpdateType.EDITED_MESSAGE,
+            guard(edited_message_handler, is_cmd=False)
+        )
+    )
 
     # All text messages (with silence-by-default logic)
     app.add_handler(

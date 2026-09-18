@@ -2996,6 +2996,84 @@ def test_security_hardenings():
     assert "DATABASE_URL" not in clean_env
 
 
+@pytest.mark.asyncio
+async def test_database_upsert_deduplication_and_search():
+    """Verify database upsert for edited messages, multi-token normalized search, and duplicate synthetic rejection."""
+    import database
+
+    await database.init_database()
+    chat_id = 8877665544
+    await database.clear_session_in_d1(chat_id)
+
+    # 1. Insert message
+    p1 = await database.persist_message(
+        chat_id=chat_id,
+        user_id=123,
+        role="user",
+        content="قیمت لحظه‌ای بیت‌کوین چقدر است؟",
+        username="cryptofan",
+        full_name="Crypto Fan",
+        message_id=7701
+    )
+    assert p1 is True
+
+    # 2. Edit message (UPSERT should not create a new row)
+    p1_edit = await database.persist_message(
+        chat_id=chat_id,
+        user_id=123,
+        role="user",
+        content="قیمت لحظه‌ای بیت‌کوین به ۹۸ هزار دلار رسید",
+        username="cryptofan",
+        full_name="Crypto Fan",
+        message_id=7701
+    )
+    assert p1_edit is True
+    cnt = await database.get_chat_message_count(chat_id)
+    assert cnt == 1, f"Expected exactly 1 row after upsert, got {cnt}"
+
+    # 3. Multi-token normalized search with separated words and ZWNJ
+    results = await database.search_messages_db(chat_id, "قیمت بیت کوین")
+    assert len(results) == 1
+    assert "بیت‌کوین" in results[0]["content"]
+
+    # 4. Arabic character normalization (ك vs ک, ى vs ی)
+    await database.persist_message(
+        chat_id=chat_id,
+        user_id=456,
+        role="user",
+        content="كتابخانه ملّى در تهران",
+        username="reader",
+        message_id=7702
+    )
+    res_norm = await database.search_messages_db(chat_id, "کتابخانه ملی")
+    assert len(res_norm) == 1
+
+    # 5. Duplicate synthetic message rejection
+    s1 = await database.persist_message(chat_id, 999, "assistant", "پاسخ آزمایشی", message_id=0)
+    s2 = await database.persist_message(chat_id, 999, "assistant", "پاسخ آزمایشی", message_id=0)
+    history = await database.get_chat_messages_for_summary(chat_id)
+    synth_matches = [h for h in history if h["content"] == "پاسخ آزمایشی"]
+    assert len(synth_matches) == 1
+
+
+def test_music_query_cleaner_and_detector():
+    """Verify music request detection and conversational query cleaning."""
+    from tools.music import is_music_request, clean_music_query, extract_music_query
+
+    assert is_music_request("دانلود آهنگ تقدیر شادمهر") is True
+    assert is_music_request("آهنگ مرغ سحر شجریان رو بفرست") is True
+    assert is_music_request("میشه این آهنگ رو دانلود کنی؟ هایده سوغاتی") is True
+    assert is_music_request("/music معین همدم") is True
+    assert is_music_request("بیوگرافی شادمهر عقیلی چیه؟") is False
+
+    cleaned = clean_music_query("میشه این آهنگ زیبا از هایده به نام سوغاتی رو برام بفرستی؟")
+    assert "هایده" in cleaned
+    assert "سوغاتی" in cleaned
+    assert "میشه" not in cleaned
+    assert "بفرستی" not in cleaned
+
+
+
 
 
 

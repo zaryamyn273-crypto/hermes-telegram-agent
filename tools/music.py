@@ -68,7 +68,7 @@ def clean_music_query(q: str) -> str:
     """Strips conversational noise, filler words, and punctuation from music queries."""
     cleaned = (q or "").strip()
     cleaned = re.sub(r"^/(?:p|pro|prom|prometheus)?_?(?:music|song|play|ahang)\s*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"[\\/:\*\?\"<>\|!.,،؛]", " ", cleaned)
+    cleaned = re.sub(r"[\\/:\*\?؟\"<>\|!.,،؛\(\)\[\]\{\}]", " ", cleaned)
 
     noise_phrases = [
         "فایل صوتی آهنگ", "فایل صوتی موزیک", "فایل صوتی", "فایل آهنگ", "فایل موزیک", "فایل mp3",
@@ -83,13 +83,14 @@ def clean_music_query(q: str) -> str:
         "آپلود کنید", "اپلود کنید", "دانلود کنید", "پخش کنید", "پلی کنید", "ارسال کنید", "بفرستید",
         "آپلود کنین", "اپلود کنین", "دانلود کنین", "بفرستین", "ارسال کنین",
         "میشه لطفاً", "میشه لطفا", "لطفاً", "لطفا", "بی‌زحمت", "بی زحمت", "میشه", "میتونی", "می‌تونی",
+        "به نام", "بنام", "زیبا", "قشنگ", "قدیمی", "معروف", "محبوب",
         "آهنگ جدید", "اهنگ جدید", "موزیک جدید", "ترانه جدید",
         "آهنگ کامل", "اهنگ کامل", "موزیک کامل", "ترانه کامل",
         "اهنگ", "آهنگ", "موزیک", "ترانه", "دانلود", "آپلود", "اپلود", "upload", "download",
         "remix", "ریمیکس", "320", "128", "full", "mp3", "new", "جدید", "کامل", "کیفیت",
         "اصلی", "original", "بفرست", "پخش", "پلی", "play", "رو بده", "رو بده برام",
         "بذار", "بزار", "بگذار", "بخوان", "بخون", "میخوام", "می‌خوام",
-        "برام", "برامون", "واسم", "واسه من", "به من", "یه", "یک", "رو", "را", "کن", "کنی", "کنید", "کنین", "فایل", "صوتی", "تلگرام"
+        "برام", "برامون", "واسم", "واسه من", "به من", "یه", "یک", "این", "اون", "رو", "را", "کن", "کنی", "کنید", "کنین", "فایل", "صوتی", "تلگرام"
     ]
     for n in noise_phrases:
         cleaned = re.sub(rf"(?<!\w){re.escape(n)}(?!\w)", " ", cleaned, flags=re.IGNORECASE)
@@ -167,52 +168,64 @@ async def _crawl_portal_fast(
     regex_pattern: str,
     clean_q: str,
 ) -> Optional[Dict[str, Any]]:
-    """Crawls a single portal with early exit on first valid MP3."""
+    """Crawls a single portal with resilient HTML parsing and early exit on first valid studio MP3."""
     enc = urllib.parse.quote(clean_q)
     try:
-        r = await client.get(url_pattern.format(q=enc), timeout=4.0)
+        r = await client.get(url_pattern.format(q=enc), timeout=4.5)
         if r.status_code == 200:
-            matches = re.findall(regex_pattern, r.text, re.DOTALL | re.IGNORECASE)
+            soup = BeautifulSoup(r.text, "html.parser")
             q_words = [w.lower() for w in clean_q.split() if len(w) > 1]
-            for m in matches[:3]:
-                href = m[0] if isinstance(m, tuple) and m[0].startswith("http") else (m[1] if isinstance(m, tuple) and len(m) > 1 and m[1].startswith("http") else "")
-                raw_t = m[1] if isinstance(m, tuple) and href == m[0] else (m[0] if isinstance(m, tuple) else "")
 
-                if not href:
-                    continue
+            # Collect candidate links from header tags, article containers, or bookmark anchors
+            candidates_pages = []
+            for el in soup.find_all(["h2", "h3", "article", ".post-title"]):
+                for a in el.find_all("a", href=True):
+                    href = a["href"].strip()
+                    title_text = a.get_text().strip()
+                    if not href.startswith("http") or len(title_text) < 3:
+                        continue
+                    # Ignore taxonomy/category/tag/author/page/comment links
+                    unquoted_href = urllib.parse.unquote(href).lower()
+                    if any(bad in unquoted_href for bad in ["/category/", "/tag/", "/page/", "/author/", "#comment", "/special-music/"]):
+                        continue
+                    clean_t = re.sub(r"(?i)دانلود\s+(?:آهنگ|اهنگ|موزیک|ترانه)?|ریمیکس|mp3|320|128|[|•\-–—]", " ", title_text)
+                    clean_t = " ".join(clean_t.split()).strip()
+                    # Relevance check: query words must match either title or unquoted URL
+                    if q_words and not any(w in clean_t.lower() or w in unquoted_href for w in q_words):
+                        continue
+                    candidates_pages.append((href, clean_t))
+                    if len(candidates_pages) >= 5:
+                        break
+                if len(candidates_pages) >= 5:
+                    break
 
-                clean_title = BeautifulSoup(raw_t, "html.parser").get_text().strip()
-                clean_title = re.sub(r"دانلود آهنگ|دانلود اهنگ|ریمیکس|موزیک|mp3", "", clean_title, flags=re.I).strip(" -—")
+            for href, clean_title in candidates_pages:
+                try:
+                    p_res = await client.get(href, timeout=4.0)
+                    if p_res.status_code == 200:
+                        mp3s = re.findall(r"""href=["\x27](https?://[^\s"\x27]+\.mp3)""", p_res.text, re.IGNORECASE)
+                        valid_mp3s = [
+                            u for u in mp3s
+                            if not any(b in u.lower() for b in ["voice", "advert", "ads", "intro", "teaser", "demo", "sample", "64.mp3"])
+                        ]
+                        if valid_mp3s:
+                            mp3_320 = [u for u in valid_mp3s if "320" in u]
+                            chosen = mp3_320[0] if mp3_320 else valid_mp3s[0]
 
-                # Verify relevance with query words if query has specific keywords
-                if q_words and not any(w in clean_title.lower() or w in href.lower() for w in q_words):
-                    continue
+                            performer = ""
+                            if "–" in clean_title or "-" in clean_title:
+                                performer = re.split(r"[–-]", clean_title)[0].strip()[:50]
+                            else:
+                                performer = clean_q.split()[0] if clean_q else "هنرمند"
 
-                # Track page fetch
-                p_res = await client.get(href, timeout=4.0)
-                if p_res.status_code == 200:
-                    mp3s = re.findall(r"""href=["\x27](https?://[^\s"\x27]+\.mp3)""", p_res.text, re.IGNORECASE)
-                    valid_mp3s = [
-                        u for u in mp3s
-                        if not any(b in u.lower() for b in ["voice", "advert", "ads", "intro", "teaser", "demo", "sample", "64.mp3"])
-                    ]
-                    if valid_mp3s:
-                        mp3_320 = [u for u in valid_mp3s if "320" in u]
-                        chosen = mp3_320[0] if mp3_320 else valid_mp3s[0]
-
-                        # Extract performer
-                        performer = ""
-                        if "–" in clean_title or "-" in clean_title:
-                            performer = re.split(r"[–-]", clean_title)[0].strip()[:50]
-                        else:
-                            performer = clean_q.split()[0] if clean_q else "هنرمند"
-
-                        return {
-                            "title": clean_title or clean_q.title(),
-                            "performer": performer or "هنرمند",
-                            "url": chosen,
-                            "quality": "320kbps Original" if ("320" in chosen) else "128kbps HQ",
-                        }
+                            return {
+                                "title": clean_title or clean_q.title(),
+                                "performer": performer or "هنرمند",
+                                "url": chosen,
+                                "quality": "320kbps Original" if ("320" in chosen) else "128kbps HQ",
+                            }
+                except Exception as sub_err:
+                    logger.debug(f"Candidate page fetch note ({href}): {sub_err}")
     except Exception as e:
         logger.debug(f"Portal crawl error ({url_pattern}): {e}")
 

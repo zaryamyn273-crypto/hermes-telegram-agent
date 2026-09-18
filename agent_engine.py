@@ -744,11 +744,12 @@ def append_to_session(
     message_id: int = 0,
     reply_to_message_id: int = 0,
     media_type: str = "text",
-    is_bot: int = 0
+    is_bot: int = 0,
+    persist_to_db: bool = False
 ):
     """
-    Appends a message to the isolated RAM buffer, enforces per-chat memory quota,
-    and queues non-blocking async persistence to the database.
+    Appends a message to the isolated RAM buffer and enforces per-chat memory quota.
+    DB persistence is managed primarily by Telegram message handlers to prevent duplicate rows.
     """
     if content is None:
         return
@@ -761,25 +762,27 @@ def append_to_session(
             _SESSIONS[chat_id] = history
         _SESSIONS.move_to_end(chat_id)
 
-    # Asynchronously persist to database with rich metadata (non-blocking)
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(
-            database.persist_message(
-                chat_id=chat_id,
-                user_id=user_id,
-                role=role,
-                content=str(content),
-                username=username,
-                full_name=full_name,
-                message_id=message_id,
-                reply_to_message_id=reply_to_message_id,
-                media_type=media_type,
-                is_bot=is_bot
+    # Optional async database persistence when explicitly requested
+    if persist_to_db:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                database.persist_message(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    role=role,
+                    content=str(content),
+                    username=username,
+                    full_name=full_name,
+                    message_id=message_id,
+                    reply_to_message_id=reply_to_message_id,
+                    media_type=media_type,
+                    is_bot=is_bot
+                )
             )
-        )
-    except RuntimeError:
-        pass
+        except RuntimeError:
+            pass
+
 
 
 def clear_session(chat_id: int):

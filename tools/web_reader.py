@@ -248,7 +248,7 @@ async def search_web_live(query: str, max_results: int = 3) -> Optional[str]:
                         "max_results": max_results,
                         "search_depth": "basic",
                     },
-                    timeout=2.8
+                    timeout=4.5
                 )
                 if r.status_code == 200:
                     data = r.json()
