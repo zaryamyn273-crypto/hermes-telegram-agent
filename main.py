@@ -19,7 +19,7 @@ import asyncio
 from typing import Optional, Tuple, List, Dict, Any, Set, Union
 from datetime import datetime, timezone
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, BotCommand
 from telegram.constants import ParseMode, ChatType, ChatAction, ChatMemberStatus
 from telegram.error import BadRequest, TelegramError, Conflict
 from telegram.ext import (
@@ -872,7 +872,7 @@ _PROMETHEUS_TRIGGER_NAMES = ["پرومته", "prometheus", "پرومتئوس", "
 # Base commands registered in Prometheus
 PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "start", "help",
-    "agent", "research", "hermes",
+    "agent", "research", "hermes", "osintagent",
     "fast", "speed",
     "mode", "setting", "settings",
     "osint", "search", "web", "find", "jostojoo",
@@ -887,6 +887,7 @@ PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "email", "mail",
     "phone", "tel", "mobile",
     "time", "saat",
+    "calc", "hesab",
     "clear", "clean",
     "id", "myid", "info", "chatid", "whoami",
     "delete", "del", "pak", "hazf", "remove",
@@ -916,29 +917,39 @@ PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "adminlogs", "audit",
 }
 
-# Supported short prefixes derived from Prometheus (پرومته)
-PROMETHEUS_COMMAND_PREFIXES = ["p", "p_", "pro", "pro_"]
+# Supported short prefixes derived from Prometheus Bot (پرومته بات / AMZ Prometheus Bot)
+# Primary prefix: pb_ / pb (Prometheus + Bot)
+PROMETHEUS_COMMAND_PREFIXES = [
+    "pb_", "pb",
+    "p_b_", "p_b",
+    "p_", "p",
+    "pro_", "pro",
+    "prom_", "prometheus_",
+    "ab_", "ab",
+]
 
 
 def is_prometheus_prefixed_command(cmd_name: str) -> bool:
     """
     Checks whether a command string matches a Prometheus-specific prefixed command.
     Matches:
-    - 'p' + command (e.g. 'pinfo', 'pid', 'phelp', 'pstart', 'pping', 'pstatus', 'prates', 'pfast', 'pagent', ...)
-    - 'p_' + command or arbitrary name (e.g. 'p_info', 'p_id', 'p_help', 'p_ping', ...)
-    - 'pro' + command (e.g. 'proinfo', 'prohelp', 'proping', ...)
-    - 'pro_' + command (e.g. 'pro_info', 'pro_help', ...)
+    - 'pb_' / 'pb' + command (e.g. 'pb_osint', 'pbosint', 'pb_search', 'pb_help', 'pb_start', ...)
+    - 'p_b_' / 'p_b' + command
+    - 'ab_' / 'ab' + command
+    - 'p_' / 'p' + command (e.g. 'p_osint', 'posint', 'phelp', ...)
+    - 'pro_' / 'pro' + command (e.g. 'pro_osint', 'proinfo', ...)
     - 'prom_' / 'prometheus_' + command
     """
     cmd = (cmd_name or "").lower().strip()
     if not cmd:
         return False
-    if cmd in ("p", "pro"):
+    if cmd in ("pb", "p", "pro", "ab"):
         return True
-    if cmd.startswith(("p_", "pro_", "prom_", "prometheus_")):
-        suffix = cmd.split("_", 1)[1]
-        return suffix in PROMETHEUS_BASE_COMMANDS or bool(suffix)
-    for prefix in ("pro", "p"):
+    for prefix in ("pb_", "p_b_", "ab_", "p_", "pro_", "prom_", "prometheus_"):
+        if cmd.startswith(prefix):
+            suffix = cmd[len(prefix):]
+            return suffix in PROMETHEUS_BASE_COMMANDS or bool(suffix)
+    for prefix in ("pb", "p_b", "pro", "ab", "p"):
         if cmd.startswith(prefix):
             remainder = cmd[len(prefix):]
             if remainder in PROMETHEUS_BASE_COMMANDS:
@@ -949,7 +960,7 @@ def is_prometheus_prefixed_command(cmd_name: str) -> bool:
 def make_bot_commands(base_commands: List[str]) -> List[str]:
     """
     Expands base commands with Prometheus-specific prefixes:
-    ['info', 'id'] -> ['info', 'id', 'pinfo', 'p_info', 'proinfo', 'pro_info', 'pid', 'p_id', 'proid', 'pro_id']
+    ['search'] -> ['search', 'pb_search', 'pbsearch', 'p_b_search', 'p_search', 'psearch', ...]
     """
     res = list(base_commands)
     for cmd in base_commands:
@@ -966,7 +977,7 @@ def is_command_addressed_to_bot(update: Update, context: ContextTypes.DEFAULT_TY
     - In Private Chat (DM): Always True (both prefixed and standard commands are accepted).
     - In Group Chats:
       1. Explicitly mentions bot username (@AMZprometheusopenbot)
-      2. Uses personalized Prometheus prefix (e.g. /p..., /p_..., /pro..., /pro_..., /prom_..., /prometheus_...)
+      2. Uses personalized Prometheus prefix (e.g. /pb_..., /pb..., /p..., /p_..., /pro..., /pro_..., /prom_..., /prometheus_...)
       3. Is a direct reply to Prometheus's own message
       4. Explicitly mentions Prometheus by name in text ('پرومته', 'prometheus', ...)
       5. Is an authorized bot administrator executing an administrative command
@@ -1021,18 +1032,10 @@ def is_command_addressed_to_bot(update: Update, context: ContextTypes.DEFAULT_TY
             return False
 
     # Starts with Prometheus personalized prefixes:
-    if cmd_name.startswith(("p_", "pro_", "prom_", "prometheus_")):
-        return True
-
-    # Starts with 'p' or 'pro' followed by a valid command suffix
     if is_prometheus_prefixed_command(cmd_name):
         return True
 
-    # Unique Prometheus AI commands that never collide with moderation bots
-    if cmd_name in ("summarize", "recap", "summary", "kholase"):
-        return True
-
-    # Otherwise in group chats, generic bare commands (like bare /info, /help, /id, /ping) are ignored
+    # Otherwise in group chats, generic bare commands (like bare /search, /help, /id, /ping, /summarize) are ignored
     # to avoid collisions with other bots in the same group!
     logger.info(f"Command collision guard: ignoring generic un-prefixed command '/{cmd_name}' in group {chat.id}")
     return False
@@ -1043,10 +1046,10 @@ def is_direct_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE, ra
     Determines if a message is a DIRECT request to Prometheus:
     - In Private Chat (DM): Always True.
     - In Group Chats: True ONLY if:
-        1. It is a slash command targeted to Prometheus (@username) or prefixed with Prometheus abbreviations (p / p_ / pro)
+        1. It is a direct reply to one of the bot's own messages.
         2. It explicitly mentions the bot (@username)
         3. It explicitly calls the bot by name (پرومته, prometheus, ...)
-        4. It is a direct reply to one of the bot's own messages.
+        4. It is a slash command targeted to Prometheus (@username) or prefixed with Prometheus abbreviations (pb_ / pb / p_ / p / pro)
         5. It is an authorized bot administrator issuing a known bot command
     Returns: (is_direct: bool, cleaned_text: str)
     """
@@ -1106,16 +1109,8 @@ def is_direct_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE, ra
             else:
                 return False, ""
 
-        # Personalized prefix: /p, /p_..., /pro_..., /prom_..., /prometheus_...
-        if cmd_name in ("p", "pro") or cmd_name.startswith(("p_", "pro_", "prom_", "prometheus_")):
-            return True, text
-
-        # Prefixed command name: p[command] or pro[command]
+        # Personalized prefix: pb_..., pb..., p_..., p..., pro..., etc.
         if is_prometheus_prefixed_command(cmd_name):
-            return True, text
-
-        # Unique Prometheus AI commands that never collide with moderation bots
-        if cmd_name in ("summarize", "recap", "summary", "kholase"):
             return True, text
 
         # Authorized bot administrator issuing a known bot command
@@ -1310,21 +1305,25 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"⚡️ <b>درود {html.escape(u_name)}! به سامانه پرومته OSINT خوش آمدید.</b>\n\n"
         "من <b>پرومته</b> هستم؛ دستیار پیشرفته و خودمختار هوش مصنوعی برای <b>پژوهش‌های عمیق، تحلیل اطلاعات وب و هوش سایبری (OSINT)</b>:\n\n"
-        "🔍 <b>مهم‌ترین قابلیت‌های تخصصی پرومته OSINT:</b>\n"
-        "• 🌐 <b>جستجوی چندموتوره وب:</b> <code>/osint [عبارت]</code> یا <code>/search</code>\n"
-        "• 🕷 <b>کاوشگر لایه‌های وب و متاداده:</b> <code>/crawl [لینک]</code> یا <code>/scrape</code> یا <code>/read</code>\n"
-        "• 🔎 <b>دورک‌های هوشمند گوگل:</b> <code>/dork [هدف]</code> (اسناد محرمانه، دایرکتوری باز، لاگین)\n"
-        "• 🐙 <b>کاوشگر امنیتی گیت‌هاب:</b> <code>/github [یوزر/مخزن]</code> (استخراج ایمیل نویسندگان از کامیت‌ها، کلیدهای SSH)\n"
-        "• 💼 <b>هوش سازمانی لینکدین:</b> <code>/linkedin [شخص/شرکت]</code>\n"
-        "• 👤 <b>ردیابی نام‌کاربری:</b> <code>/usercheck [یوزرنیم]</code> در ۲۵+ پلتفرم\n"
-        "• 📡 <b>رکوردهای کامل DNS:</b> <code>/dns [دامنه]</code> (A, AAAA, MX, NS, TXT, SOA)\n"
-        "• 🌐 <b>کشف ساب‌دامین‌ها:</b> <code>/subdomains [دامنه]</code> با Certificate Transparency\n"
-        "• 🌍 <b>شناسایی و مکان‌یابی IP:</b> <code>/ip [آدرس IP یا دامنه]</code>\n"
-        "• 📧 <b>تحلیل ایمیل:</b> <code>/email [ایمیل]</code> (بررسی MX و Gravatar)\n"
-        "• 📞 <b>تحلیل شماره تلفن:</b> <code>/phone [شماره]</code> (تشخیص اپراتور و کشور)\n"
-        "• 🛡️ <b>اسکنر امنیتی VirusTotal:</b> <code>/scan [فایل/لینک/هش]</code> با ۷۰ آنتی‌ویروس\n"
-        "• 🧠 <b>مغز خودمختار OSINT پرومته:</b> <code>/agent [پرسش]</code> یا گفتگوی مستقیم\n\n"
-        "💡 <i>در گروه‌ها کلیه دستورات با پیشوند p یا p_ (مانند <code>/phelp</code>، <code>/posint</code>، <code>/pdork</code>) یا با منشن نام ربات فعال می‌شوند.</i>"
+        "🔍 <b>مهم‌ترین ابزارهای تخصصی پرومته OSINT (پیشوند pb_):</b>\n"
+        "• 🌐 <b>جستجوی چندموتوره وب:</b> <code>/pb_osint [عبارت]</code> یا <code>/pb_search</code>\n"
+        "• 🕷 <b>کاوشگر لایه‌های وب و متاداده:</b> <code>/pb_crawl [لینک]</code>\n"
+        "• 🔎 <b>دورک‌های هوشمند گوگل:</b> <code>/pb_dork [هدف]</code>\n"
+        "• 🐙 <b>کاوشگر امنیتی گیت‌هاب:</b> <code>/pb_github [یوزر/مخزن]</code>\n"
+        "• 💼 <b>هوش سازمانی لینکدین:</b> <code>/pb_linkedin [شخص/شرکت]</code>\n"
+        "• 👤 <b>ردیابی نام‌کاربری:</b> <code>/pb_usercheck [یوزرنیم]</code> در ۲۵+ پلتفرم\n"
+        "• 📡 <b>رکوردهای کامل DNS:</b> <code>/pb_dns [دامنه]</code>\n"
+        "• 🌐 <b>کشف ساب‌دامین‌ها:</b> <code>/pb_subdomains [دامنه]</code>\n"
+        "• 🌍 <b>شناسایی و مکان‌یابی IP:</b> <code>/pb_ip [آدرس IP یا دامنه]</code>\n"
+        "• 📧 <b>تحلیل ایمیل:</b> <code>/pb_email [ایمیل]</code>\n"
+        "• 📞 <b>تحلیل شماره تلفن:</b> <code>/pb_phone [شماره]</code>\n"
+        "• 🛡️ <b>اسکنر امنیتی VirusTotal:</b> <code>/pb_scan [فایل/لینک/هش]</code>\n"
+        "• 🧠 <b>مغز خودمختار پرومته:</b> <code>/pb_agent [پرسش]</code>\n\n"
+        "🔒 <b>قانون پاسخ‌دهی در گروه‌ها:</b>\n"
+        "<i>ربات در گروه‌ها کاملاً سایلنت است و تنها در دو حالت پاسخ می‌دهد:</i>\n"
+        "۱. ریپلای زدن روی پیام ربات\n"
+        "۲. گفتن صریح نام «پرومته» در پیام\n"
+        "<i>(دستورات با پیشوند اختصاصی <code>/pb_...</code> نیز همواره فعال هستند)</i>"
     )
     await msg.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -1339,27 +1338,30 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "📖 <b>راهنمای جامع دستورات سامانه پرومته OSINT:</b>\n\n"
-        "💡 <b>پیشوند اختصاصی در گروه‌ها (p / p_):</b>\n"
-        "جهت جلوگیری از تداخل با سایر ربات‌ها، در گروه‌ها دستورات با پیشوند اختصاصی (مانند <code>/phelp</code>، <code>/posint</code>، <code>/pdork</code>، <code>/pgithub</code>) یا منشن نام ربات عمل می‌کنند.\n\n"
+        "🔒 <b>شرط فعال‌سازی در گروه‌ها:</b>\n"
+        "جهت جلوگیری کامل از تداخل، ربات در گروه‌ها تنها در این شرایط پاسخ می‌دهد:\n"
+        "۱. ریپلای مستقیم روی پیام پرومته\n"
+        "۲. گفتن صریح نام «پرومته» در متن پیام\n"
+        "۳. ارسال دستورات با پیشوند اختصاصی (مخفف کلمه اول و آخر Prometheus Bot: <code>pb_</code>)\n\n"
         "🔍 <b>ابزارهای تخصصی اوسینت و وب:</b>\n"
-        "• <code>/osint [عبارت]</code> یا <code>/search</code> - جستجوی همزمان چندموتوره در وب\n"
-        "• <code>/crawl [لینک]</code> یا <code>/scrape</code> یا <code>/read</code> - کاوش لایه‌های صفحه، کشف ایمیل‌ها، شماره‌ها، ولت‌ها و تکنولوژی‌های وب‌سایت\n"
-        "• <code>/dork [هدف]</code> - تولید و اجرای دورک‌های هدفمند گوگل برای نفوذ، دایرکتوری باز و اسناد\n"
-        "• <code>/github [کاربر]</code> - تحلیل اکانت گیت‌هاب، استخراج ایمیل از کامیت‌ها و کلیدهای SSH\n"
-        "• <code>/linkedin [نام/شرکت]</code> - کشف سوابق و پروفایل‌های لینکدین\n"
-        "• <code>/usercheck [نام کاربری]</code> - استعلام فوری یوزرنیم در ۲۵+ پلتفرم مطرح جهانی\n"
-        "• <code>/dns [دامنه]</code> - تفکیک کلیه رکوردهای DNS دامنه\n"
-        "• <code>/subdomains [دامنه]</code> - استخراج تمامی ساب‌دامین‌ها از لاگ‌های گواهی امنیتی\n"
-        "• <code>/ip [IP/دامنه]</code> - موقعیت جغرافیایی، کشور، شهر، ISP و شماره AS\n"
-        "• <code>/email [ایمیل]</code> - بررسی صحت، رکوردهای میل‌سرور و پروفایل Gravatar\n"
-        "• <code>/phone [شماره]</code> - اعتبارسنجی شماره و تشخیص اپراتور تلفن همراه\n"
-        "• <code>/scan [فایل/لینک/هش]</code> - اسکن امنیتی و تحلیل بدافزار با VirusTotal\n\n"
+        "• <code>/pb_osint [عبارت]</code> یا <code>/pb_search</code> - جستجوی همزمان چندموتوره در وب\n"
+        "• <code>/pb_crawl [لینک]</code> - کاوش لایه‌های صفحه، کشف ایمیل‌ها، شماره‌ها و ساختار وب‌سایت\n"
+        "• <code>/pb_dork [هدف]</code> - تولید و اجرای دورک‌های هدفمند گوگل برای نفوذ، اسناد و دایرکتوری‌ها\n"
+        "• <code>/pb_github [کاربر]</code> - تحلیل اکانت گیت‌هاب، استخراج ایمیل از کامیت‌ها و کلیدهای SSH\n"
+        "• <code>/pb_linkedin [نام/شرکت]</code> - کشف سوابق و پروفایل‌های لینکدین\n"
+        "• <code>/pb_usercheck [نام کاربری]</code> - استعلام فوری یوزرنیم در ۲۵+ پلتفرم مطرح جهانی\n"
+        "• <code>/pb_dns [دامنه]</code> - تفکیک کلیه رکوردهای DNS دامنه\n"
+        "• <code>/pb_subdomains [دامنه]</code> - استخراج تمامی ساب‌دامین‌ها از لاگ‌های گواهی امنیتی\n"
+        "• <code>/pb_ip [IP/دامنه]</code> - موقعیت جغرافیایی، کشور، شهر، ISP و شماره AS\n"
+        "• <code>/pb_email [ایمیل]</code> - بررسی صحت، رکوردهای میل‌سرور و پروفایل Gravatar\n"
+        "• <code>/pb_phone [شماره]</code> - اعتبارسنجی شماره و تشخیص اپراتور تلفن همراه\n"
+        "• <code>/pb_scan [فایل/لینک/هش]</code> - اسکن امنیتی و تحلیل بدافزار با VirusTotal\n\n"
         "⚙️ <b>دستورات عمومی:</b>\n"
-        "• <code>/agent [پرسش]</code> - ارجاع به موتور خودمختار پرومته برای تحلیل و پژوهش‌های چندمرحله‌ای\n"
-        "• <code>/fast [پرسش]</code> - پاسخ‌دهی رعدآسا برای گفتگوهای سریع\n"
-        "• <code>/id</code> یا <code>/pinfo</code> - استخراج آیدی عددی و مشخصات چت\n"
-        "• <code>/ping</code> - تست زنده زمان پاسخگویی سرور\n"
-        "• <code>/clear</code> - پاکسازی حافظه نشست جاری\n"
+        "• <code>/pb_agent [پرسش]</code> - ارجاع به موتور خودمختار پرومته برای تحلیل و پژوهش‌های چندمرحله‌ای\n"
+        "• <code>/pb_fast [پرسش]</code> - پاسخ‌دهی رعدآسا برای گفتگوهای سریع\n"
+        "• <code>/pb_id</code> - استخراج آیدی عددی و مشخصات چت\n"
+        "• <code>/pb_ping</code> - تست زنده زمان پاسخگویی سرور\n"
+        "• <code>/pb_clear</code> - پاکسازی حافظه رم نشست جاری (سقف ۵۰ پیام مجزا برای هر گروه)\n"
         "• <code>/del</code> - حذف پیام ربات (با ریپلای روی پیام ربات)"
     )
 
@@ -2728,11 +2730,11 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(ban_notice, parse_mode=ParseMode.HTML)
                 return
 
-    # In groups: Enforce direct address policy (caption mentions bot, or replies to bot)
+    # In groups: Enforce direct address policy (caption mentions bot, or replies to bot, or pb_ command)
     is_private = (chat.type == ChatType.PRIVATE)
     if not is_private:
         is_direct, _ = is_direct_bot_request(update, context, caption)
-        if not is_direct and not any(caption.startswith(f"/{c}") for c in ["scan", "vt", "file", "createfile", "makefile", "pscan", "pfile"]):
+        if not is_direct:
             return
 
     # Rate limit check
@@ -3776,9 +3778,9 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
         t = re.sub(rf"^(?:{re.escape(name)}[\s,:،-]*)+", "", t, flags=re.IGNORECASE).strip()
         t = re.sub(rf"[\s,:،-]+(?:{re.escape(name)})+$", "", t, flags=re.IGNORECASE).strip()
 
-    # Normalize Prometheus command prefixes: /p_ban -> /ban, /pban -> /ban, etc.
-    t = re.sub(r"^/(?:p_|pro_|prom_|prometheus_)", "/", t, flags=re.IGNORECASE)
-    t = re.sub(r"^/(?:p|pro)(?=(?:ban|mute|groups|pending|approve|reject|set|get|del|admin|directives|rules))", "/", t, flags=re.IGNORECASE)
+    # Normalize Prometheus command prefixes: /pb_ban -> /ban, /pbban -> /ban, /p_ban -> /ban, etc.
+    t = re.sub(r"^/(?:pb_|pb|p_b_|p_b|ab_|ab|p_|pro_|prom_|prometheus_)", "/", t, flags=re.IGNORECASE)
+    t = re.sub(r"^/(?:pb|p_b|ab|p|pro)(?=(?:ban|mute|groups|pending|approve|reject|set|get|del|admin|directives|rules))", "/", t, flags=re.IGNORECASE)
 
     if not t:
         return False
@@ -4946,11 +4948,39 @@ def build_application():
 
     async def post_init(application: Application):
         await database.init_database()
-        logger.info("Prometheus storage & SQLite FTS5 database initialized in post_init.")
+        logger.info("Prometheus storage & in-memory RAM session buffer initialized in post_init.")
         await init_moderation_engine()
         logger.info("Prometheus moderation engine loaded in post_init.")
         await init_permissions_engine()
         logger.info("Prometheus granular permissions engine loaded in post_init.")
+
+        try:
+            bot_commands = [
+                BotCommand("pb_start", "شروع و راهنمای کلی پرومته"),
+                BotCommand("pb_help", "راهنما و دستورات اوسینت و ابزارها"),
+                BotCommand("pb_osint", "جستجوی عمیق اوسینت در وب"),
+                BotCommand("pb_search", "سرچ آنلاین چندموتوره وب"),
+                BotCommand("pb_crawl", "استخراج و تحلیل صفحات وب"),
+                BotCommand("pb_dork", "تولید دورک‌های پیشرفته گوگل"),
+                BotCommand("pb_github", "تحلیل اکانت و ریپوزیتوری گیت‌هاب"),
+                BotCommand("pb_linkedin", "جستجو و بررسی پروفایل‌های لینکدین"),
+                BotCommand("pb_usercheck", "بررسی نام کاربری در ۲۵+ پلتفرم"),
+                BotCommand("pb_dns", "بررسی رکوردهای کامل DNS"),
+                BotCommand("pb_subdomains", "کشف ساب‌دامین‌ها با لاگ گواهی"),
+                BotCommand("pb_ip", "اطلاعات مکانی و شبکه IP"),
+                BotCommand("pb_email", "تحلیل و بررسی اعتبار ایمیل"),
+                BotCommand("pb_phone", "اعتبارسنجی شماره تماس و کشور"),
+                BotCommand("pb_scan", "اسکن امنیتی فایل و لینک با VirusTotal"),
+                BotCommand("pb_agent", "ارجاع به مغز تحلیلگر و خودمختار پرومته"),
+                BotCommand("pb_fast", "پاسخ سریع و سبک"),
+                BotCommand("pb_clear", "پاکسازی حافظه موقت نشست"),
+                BotCommand("pb_id", "شناسه عددی کاربر و گروه"),
+                BotCommand("pb_ping", "تست سرعت و وضعیت آنلاین پرومته"),
+            ]
+            await application.bot.set_my_commands(bot_commands)
+            logger.info("Prometheus Telegram bot menu commands successfully registered with pb_ prefix.")
+        except Exception as e:
+            logger.warning(f"Failed to register Telegram bot commands in post_init: {e}")
 
     app = (
         ApplicationBuilder()

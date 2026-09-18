@@ -730,3 +730,120 @@ async def test_moderation_callback_handler():
     query.answer.assert_called_with("✅ سکوت کاربر با موفقیت لغو شد.", show_alert=False)
     assert is_user_muted(target_uid)[0] is False
 
+
+@pytest.mark.asyncio
+async def test_pb_prefixed_commands_and_group_silence_policy():
+    """Verifies that pb_ prefixed commands are recognized and group silence rules are strictly enforced."""
+    from main import (
+        is_prometheus_prefixed_command,
+        make_bot_commands,
+        is_command_addressed_to_bot,
+        is_direct_bot_request,
+        PROMETHEUS_COMMAND_PREFIXES,
+    )
+    from telegram.constants import ChatType
+
+    # 1. Check prefixes include pb_ and pb
+    assert "pb_" in PROMETHEUS_COMMAND_PREFIXES
+    assert "pb" in PROMETHEUS_COMMAND_PREFIXES
+
+    # 2. Check is_prometheus_prefixed_command
+    assert is_prometheus_prefixed_command("pb_osint") is True
+    assert is_prometheus_prefixed_command("pb_search") is True
+    assert is_prometheus_prefixed_command("pb_crawl") is True
+    assert is_prometheus_prefixed_command("pb_dork") is True
+    assert is_prometheus_prefixed_command("pb_github") is True
+    assert is_prometheus_prefixed_command("pb_help") is True
+    assert is_prometheus_prefixed_command("pb_start") is True
+    assert is_prometheus_prefixed_command("pb_ping") is True
+    assert is_prometheus_prefixed_command("pb_clear") is True
+    assert is_prometheus_prefixed_command("pbosint") is True
+    assert is_prometheus_prefixed_command("pbsearch") is True
+
+    # Bare commands without prefix return False
+    assert is_prometheus_prefixed_command("osint") is False
+    assert is_prometheus_prefixed_command("search") is False
+    assert is_prometheus_prefixed_command("help") is False
+    assert is_prometheus_prefixed_command("ping") is False
+    assert is_prometheus_prefixed_command("summarize") is False
+
+    # 3. make_bot_commands expands base command
+    expanded = make_bot_commands(["search"])
+    assert "search" in expanded
+    assert "pb_search" in expanded
+    assert "pbsearch" in expanded
+
+    # 4. In Group Chat: is_command_addressed_to_bot
+    bot_mock = MagicMock()
+    bot_mock.id = 8939248291
+    bot_mock.username = "AMZprometheusopenbot"
+
+    context = MagicMock()
+    context.bot = bot_mock
+
+    # Group chat update
+    up = MagicMock()
+    up.effective_chat.type = ChatType.SUPERGROUP
+    up.effective_chat.id = -100123456789
+    up.effective_user.id = 11223344  # normal user, not admin
+
+    # Case A: Bare /search or /summarize without mention/reply -> False (silent in group)
+    up.effective_message.text = "/search python"
+    up.effective_message.reply_to_message = None
+    assert is_command_addressed_to_bot(up, context) is False
+
+    up.effective_message.text = "/summarize"
+    assert is_command_addressed_to_bot(up, context) is False
+
+    # Case B: Prefixed /pb_search or /pb_osint -> True
+    up.effective_message.text = "/pb_search python osint"
+    assert is_command_addressed_to_bot(up, context) is True
+
+    up.effective_message.text = "/pb_summarize"
+    assert is_command_addressed_to_bot(up, context) is True
+
+    # Case C: Bare command with reply to bot -> True
+    rep_msg = MagicMock()
+    rep_msg.from_user.id = bot_mock.id
+    rep_msg.from_user.username = bot_mock.username
+    up.effective_message.reply_to_message = rep_msg
+    up.effective_message.text = "/search python"
+    assert is_command_addressed_to_bot(up, context) is True
+
+    # Case D: Text containing 'پرومته' -> True
+    up.effective_message.reply_to_message = None
+    up.effective_message.text = "پرومته /search گزارش بده"
+    assert is_command_addressed_to_bot(up, context) is True
+
+    # Case E: Explicit bot mention @AMZprometheusopenbot -> True
+    up.effective_message.text = "/search@AMZprometheusopenbot python"
+    assert is_command_addressed_to_bot(up, context) is True
+
+    # 5. In Group Chat: is_direct_bot_request
+    # Case A: Regular message without trigger or reply -> False (strictly silent)
+    up.effective_message.reply_to_message = None
+    is_direct, _ = is_direct_bot_request(up, context, "سلام به همه دوستان")
+    assert is_direct is False
+
+    # Case B: Message with "پرومته" -> True
+    is_direct, cleaned = is_direct_bot_request(up, context, "پرومته وضعیت سرور چطوره؟")
+    assert is_direct is True
+    assert "وضعیت سرور چطوره" in cleaned
+
+    # Case C: Reply to bot message -> True
+    up.effective_message.reply_to_message = rep_msg
+    is_direct, _ = is_direct_bot_request(up, context, "تحلیل بیشتری ارائه کن")
+    assert is_direct is True
+
+    # Case D: Prefixed slash command /pb_osint -> True
+    up.effective_message.reply_to_message = None
+    is_direct, _ = is_direct_bot_request(up, context, "/pb_osint iran")
+    assert is_direct is True
+
+    # 6. In Private Chat: Always True
+    up.effective_chat.type = ChatType.PRIVATE
+    up.effective_message.text = "/search python"
+    assert is_command_addressed_to_bot(up, context) is True
+    is_direct, _ = is_direct_bot_request(up, context, "سلام")
+    assert is_direct is True
+
