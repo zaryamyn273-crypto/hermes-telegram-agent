@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ParseMode, ChatType, ChatAction, ChatMemberStatus
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, TelegramError, Conflict
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -5056,10 +5056,28 @@ def build_application():
         )
     )
 
+    async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+        """Global error handler for handling transient Telegram Conflict and network errors."""
+        err = context.error
+        if isinstance(err, Conflict):
+            logger.warning(f"Transient getUpdates conflict detected: {err}")
+            return
+        logger.error(f"Unhandled exception in Telegram update pipeline: {err}", exc_info=err)
+
+    app.add_error_handler(global_error_handler)
     return app
 
 
 if __name__ == "__main__":
-    logger.info("Starting Prometheus Telegram Agent Bot...")
-    app = build_application()
-    app.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
+    logger.info("Starting Prometheus OSINT Telegram Agent Bot...")
+    while True:
+        try:
+            app = build_application()
+            app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+            break
+        except Conflict:
+            logger.warning("Conflict on startup (old deployment terminating). Retrying in 5 seconds...")
+            time.sleep(5)
+        except Exception as e:
+            logger.error(f"Polling loop encountered exception: {e}", exc_info=True)
+            time.sleep(5)
