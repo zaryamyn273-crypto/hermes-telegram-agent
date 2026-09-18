@@ -895,6 +895,8 @@ PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "summarize", "recap", "summary", "kholase",
     "file", "createfile", "makefile",
     "scan", "vt", "virustotal", "antivirus",
+    "tg", "telegram", "tgosint",
+    "db", "intel", "leak", "archive", "cve",
     # Admin commands
     "ban", "block",
     "unban", "unblock",
@@ -904,6 +906,7 @@ PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "unbangroup", "unban_group",
     "mutegroup", "mutebot",
     "unmutegroup", "unmutebot",
+    "leave", "leavegroup", "pbleave", "leave_group",
     "banlist", "bans",
     "mutelist", "mutes",
     "groups", "grouplist", "listgroups", "allgroups",
@@ -1306,6 +1309,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡️ <b>درود {html.escape(u_name)}! به سامانه پرومته OSINT خوش آمدید.</b>\n\n"
         "من <b>پرومته</b> هستم؛ دستیار پیشرفته و خودمختار هوش مصنوعی برای <b>پژوهش‌های عمیق، تحلیل اطلاعات وب و هوش سایبری (OSINT)</b>:\n\n"
         "🔍 <b>مهم‌ترین ابزارهای تخصصی پرومته OSINT (پیشوند pb_):</b>\n"
+        "• 🎯 <b>ردگیری و هوش تلگرام:</b> <code>/pb_tg [یوزرنیم/آیدی/ریپلای]</code> (استخراج آیدی عددی، مشخصات و ردگیری)\n"
+        "• 🌐 <b>پایگاه‌های داده و آرشیو وب:</b> <code>/pb_db [هدف]</code> (آرشیو Wayback Machine، نشت‌های عمومی و CVE)\n"
         "• 🌐 <b>جستجوی چندموتوره وب:</b> <code>/pb_osint [عبارت]</code> یا <code>/pb_search</code>\n"
         "• 🕷 <b>کاوشگر لایه‌های وب و متاداده:</b> <code>/pb_crawl [لینک]</code>\n"
         "• 🔎 <b>دورک‌های هوشمند گوگل:</b> <code>/pb_dork [هدف]</code>\n"
@@ -1323,7 +1328,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<i>ربات در گروه‌ها کاملاً سایلنت است و تنها در دو حالت پاسخ می‌دهد:</i>\n"
         "۱. ریپلای زدن روی پیام ربات\n"
         "۲. گفتن صریح نام «پرومته» در پیام\n"
-        "<i>(دستورات با پیشوند اختصاصی <code>/pb_...</code> نیز همواره فعال هستند)</i>"
+        "<i>(دستورات با پیشوند اختصاصی <code>/pb_...</code> نیز همواره فعال هستند)</i>\n"
+        "⚠️ <i>گفتگوی خصوصی (پیوی) صرفاً برای مدیر سیستم فعال می‌باشد.</i>"
     )
     await msg.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -1344,6 +1350,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "۲. گفتن صریح نام «پرومته» در متن پیام\n"
         "۳. ارسال دستورات با پیشوند اختصاصی (مخفف کلمه اول و آخر Prometheus Bot: <code>pb_</code>)\n\n"
         "🔍 <b>ابزارهای تخصصی اوسینت و وب:</b>\n"
+        "• <code>/pb_tg [یوزر/آیدی/ریپلای]</code> - استخراج آیدی عددی، پروفایل و ردگیری تلگرام\n"
+        "• <code>/pb_db [هدف]</code> - استعلام آرشیو Wayback Machine، نشت‌های عمومی و CVE\n"
         "• <code>/pb_osint [عبارت]</code> یا <code>/pb_search</code> - جستجوی همزمان چندموتوره در وب\n"
         "• <code>/pb_crawl [لینک]</code> - کاوش لایه‌های صفحه، کشف ایمیل‌ها، شماره‌ها و ساختار وب‌سایت\n"
         "• <code>/pb_dork [هدف]</code> - تولید و اجرای دورک‌های هدفمند گوگل برای نفوذ، اسناد و دایرکتوری‌ها\n"
@@ -1368,6 +1376,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user and is_admin(user.id):
         text += (
             "\n\n👮‍♂️ <b>دستورات مدیریت و نظارت ادمین (Admin Governance):</b>\n"
+            "• <code>/pb_groups</code> - استعلام زنده و بی‌درنگ وضعیت تمامی گروه‌های ربات\n"
+            "• <code>/pb_leave [شناسه گروه]</code> - خروج ربات از گروه فعلی یا گروه مشخص\n"
             "• <code>/ban [کاربر/ریپلای]</code> - مسدودسازی دائم کاربر\n"
             "• <code>/unban [کاربر/ریپلای]</code> - رفع مسدودیت کاربر\n"
             "• <code>/mute [کاربر/ریپلای] [مدت]</code> - سکوت موقت کاربر\n"
@@ -1378,7 +1388,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/unmutegroup</code> - لغو سکوت ربات در گروه\n"
             "• <code>/banlist</code> - لیست کاربران و گروه‌های بن‌شده\n"
             "• <code>/mutelist</code> - لیست افراد و گروه‌های میوت‌شده\n"
-            "• <code>/groups</code> - فهرست گروه‌های ثبت‌شده و وضعیت آن‌ها\n"
             "• <code>/pendinggroups</code> - لیست گروه‌های در انتظار تایید\n"
             "• <code>/approvegroup [شناسه]</code> - تایید دستی گروه و فعال‌سازی ربات\n"
             "• <code>/rejectgroup [شناسه]</code> - رد درخواست گروه و خروج ربات\n"
@@ -2662,6 +2671,100 @@ async def virustotal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Error in virustotal_callback: {e}")
         await query.edit_message_text(f"❌ خطا در انجام اسکن امنیتی: {e}")
+
+
+async def telegram_osint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Executes deep Telegram intelligence and entity reconnaissance (/pb_tg, /tg, /tgosint)."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    args = context.args or []
+    target = ""
+    if args:
+        target = " ".join(args).strip()
+    elif msg.reply_to_message:
+        rep = msg.reply_to_message
+        if rep.from_user:
+            target = rep.from_user.username or str(rep.from_user.id)
+        elif rep.forward_from:
+            target = rep.forward_from.username or str(rep.forward_from.id)
+        elif rep.forward_from_chat:
+            target = rep.forward_from_chat.username or str(rep.forward_from_chat.id)
+
+    if not target:
+        guide = (
+            "🎯 <b>کاوشگر و ردگیری پیشرفته تلگرام (Prometheus Telegram OSINT):</b>\n\n"
+            "برای استخراج آیدی عددی، تحلیل پروفایل، کانال‌ها، گروه‌ها و سوابق حضور، دستور را ارسال فرمایید:\n\n"
+            "💡 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_tg [نام‌کاربری یا آیدی یا لینک]</code>\n"
+            "• یا با ریپلای روی پیام یک کاربر: <code>/pb_tg</code>\n\n"
+            "<i>مثال‌ها:</i>\n"
+            "• <code>/pb_tg @durov</code>\n"
+            "• <code>/pb_tg 777000</code>\n"
+            "• <code>/pb_tg https://t.me/telegram</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    progress = await msg.reply_text(
+        f"🔍 <i>در حال کاوش و استخراج اطلاعات تلگرام برای «{html.escape(target)}»...</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+    try:
+        from tools.telegram_osint import investigate_telegram_target, format_telegram_osint_report
+        report = await investigate_telegram_target(target, bot=context.bot)
+        report_text = format_telegram_osint_report(report)
+        chunks = split_message(report_text, max_len=3900)
+        await progress.edit_text(chunks[0], parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        for ch in chunks[1:]:
+            await msg.reply_text(ch, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Telegram OSINT command failed: {e}")
+        await progress.edit_text(f"⚠️ <b>خطا در اجرای اوسینت تلگرام:</b> {html.escape(str(e))}", parse_mode=ParseMode.HTML)
+
+
+async def public_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Queries open public databases (Wayback Machine archives, public breach indicators, CVEs, URLScan)."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    args = context.args or []
+    if not args:
+        guide = (
+            "🌐 <b>کاوشگر پایگاه‌های داده عمومی و اسناد آرشیوی (Public DB Intel):</b>\n\n"
+            "برای استعلام آرشیو نسخه‌های حذف‌شده وب، نشت‌های عمومی، آسیب‌پذیری‌های CVE و سوابق سرورها:\n\n"
+            "💡 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_db [دامنه / ایمیل / نام نرم‌افزار / CVE]</code>\n\n"
+            "<i>مثال‌ها:</i>\n"
+            "• <code>/pb_db example.com</code> (آرشیو Wayback Machine + URLScan)\n"
+            "• <code>/pb_db admin@target.com</code> (بررسی نشت‌های عمومی و درز COMB)\n"
+            "• <code>/pb_db CVE-2024-21626</code> یا <code>/pb_db nginx</code> (پایگاه آسیب‌پذیری‌های CVE)"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    query = " ".join(args).strip()
+    progress = await msg.reply_text(
+        f"🔄 <i>در حال استعلام مراجع و پایگاه‌های اطلاعاتی عمومی برای «{html.escape(query)}»...</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+    try:
+        from tools.public_db_intel import query_public_intel_databases, format_public_intel_report
+        report = await query_public_intel_databases(query)
+        report_text = format_public_intel_report(report)
+        chunks = split_message(report_text, max_len=3900)
+        await progress.edit_text(chunks[0], parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        for ch in chunks[1:]:
+            await msg.reply_text(ch, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Public DB command failed: {e}")
+        await progress.edit_text(f"⚠️ <b>خطا در استعلام پایگاه‌های عمومی:</b> {html.escape(str(e))}", parse_mode=ParseMode.HTML)
 
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4666,6 +4769,7 @@ async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   🤖 وضعیت ربات: {role_badge}\n"
             f"   📊 وضعیت پرومته: {st_text}\n"
             f"   ⚙️ {quick_act}\n"
+            f"   🚪 خروج فوری: <code>/pb_leave {cid}</code>\n"
         )
 
     lines.append("⚡ <i>استعلام زنده وضعیت ربات از سرورهای تلگرام</i>")
@@ -4767,6 +4871,60 @@ async def rejectgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await context.bot.leave_chat(chat_id=cid)
     except Exception as e:
         logger.warning(f"Could not leave chat {cid}: {e}")
+
+
+async def leavegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allows bot administrator to leave the current group or a specified group by ID (/pb_leave)."""
+    user = update.effective_user
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not user or not is_admin(user.id):
+        if msg:
+            await msg.reply_text("⛔️ دسترسی غیرمجاز. این فرمان منحصراً در اختیار مدیران ربات می‌باشد.")
+        return
+
+    args = context.args or []
+    target_cid = None
+    if args:
+        try:
+            target_cid = int(args[0])
+        except ValueError:
+            await msg.reply_text("⚠️ شناسه گروه باید عددی باشد (مثال: <code>/pb_leave -100123456789</code>)", parse_mode=ParseMode.HTML)
+            return
+    elif chat and chat.type != ChatType.PRIVATE:
+        target_cid = chat.id
+    else:
+        await msg.reply_text(
+            "⚠️ <b>نحوه استفاده از دستور خروج از گروه:</b>\n"
+            "• در داخل گروه مورد نظر: <code>/pb_leave</code>\n"
+            "• از راه دور یا در گفتگوی خصوصی: <code>/pb_leave [شناسه_عددی_گروه]</code>\n"
+            "<i>مثال:</i> <code>/pb_leave -100123456789</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    # Send notice to group before leaving
+    try:
+        await context.bot.send_message(
+            chat_id=target_cid,
+            text="👋 <b>به دستور مدیر سیستم، ربات پرومته از این گروه خارج گردید.</b>\n<i>بدرود!</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+    from tools.moderation import mark_group_left
+    await mark_group_left(target_cid)
+
+    try:
+        await context.bot.leave_chat(chat_id=target_cid)
+        if msg and (chat.id != target_cid or chat.type == ChatType.PRIVATE):
+            await msg.reply_text(f"✅ ربات پرومته با موفقیت از گروه <code>{target_cid}</code> خارج شد.", parse_mode=ParseMode.HTML)
+        logger.info(f"Bot successfully left group {target_cid} by instruction of admin {user.id}.")
+    except Exception as e:
+        if msg:
+            await msg.reply_text(f"⚠️ خطا در خروج از گروه <code>{target_cid}</code>: {html.escape(str(e))}", parse_mode=ParseMode.HTML)
+        logger.warning(f"Failed to leave chat {target_cid}: {e}")
 
 
 async def set_setting_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4958,6 +5116,8 @@ def build_application():
             bot_commands = [
                 BotCommand("pb_start", "شروع و راهنمای کلی پرومته"),
                 BotCommand("pb_help", "راهنما و دستورات اوسینت و ابزارها"),
+                BotCommand("pb_tg", "ردگیری و اوسینت تخصصی تلگرام"),
+                BotCommand("pb_db", "استعلام پایگاه‌های داده و آرشیو عمومی"),
                 BotCommand("pb_osint", "جستجوی عمیق اوسینت در وب"),
                 BotCommand("pb_search", "سرچ آنلاین چندموتوره وب"),
                 BotCommand("pb_crawl", "استخراج و تحلیل صفحات وب"),
@@ -4974,6 +5134,8 @@ def build_application():
                 BotCommand("pb_agent", "ارجاع به مغز تحلیلگر و خودمختار پرومته"),
                 BotCommand("pb_fast", "پاسخ سریع و سبک"),
                 BotCommand("pb_clear", "پاکسازی حافظه موقت نشست"),
+                BotCommand("pb_groups", "فهرست زنده گروه‌های فعال (ادمین)"),
+                BotCommand("pb_leave", "خروج ربات از گروه (ادمین)"),
                 BotCommand("pb_id", "شناسه عددی کاربر و گروه"),
                 BotCommand("pb_ping", "تست سرعت و وضعیت آنلاین پرومته"),
             ]
@@ -5009,6 +5171,8 @@ def build_application():
     app.add_handler(CallbackQueryHandler(guard(mode_callback, is_cmd=False), pattern=r"^setmode_"))
 
     # OSINT Reconnaissance Suite
+    app.add_handler(CommandHandler(make_bot_commands(["tg", "telegram", "tgosint"]), guard(telegram_osint_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["db", "intel", "leak", "archive", "cve"]), guard(public_db_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["osint", "search", "web", "find", "jostojoo"]), guard(osint_search_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["crawl", "scrape", "layers", "read", "url"]), guard(crawl_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["dork", "dorks", "googledork"]), guard(dork_command, is_cmd=True)))
@@ -5035,6 +5199,7 @@ def build_application():
 
 
     # Admin Governance & Moderation Commands (Personalized with p / p_ / pro / pro_ prefixes)
+    app.add_handler(CommandHandler(make_bot_commands(["leave", "leavegroup", "pbleave", "leave_group"]), guard(leavegroup_command, is_admin_cmd=True, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["ban", "block"]), guard(ban_command, is_admin_cmd=True, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["unban", "unblock"]), guard(unban_command, is_admin_cmd=True, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["mute", "silence"]), guard(mute_command, is_admin_cmd=True, is_cmd=True)))

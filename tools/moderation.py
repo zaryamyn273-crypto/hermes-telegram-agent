@@ -1101,6 +1101,25 @@ async def get_live_telegram_groups(bot, include_left: bool = False) -> List[Dict
     return live_groups
 
 
+async def mark_group_left(chat_id: int):
+    """Marks a group as left in memory and database."""
+    with _MOD_LOCK:
+        if chat_id in _TRACKED_GROUPS:
+            _TRACKED_GROUPS[chat_id]["status"] = "left"
+        else:
+            _TRACKED_GROUPS[chat_id] = {"chat_id": chat_id, "status": "left"}
+    try:
+        await database.execute_d1_query("UPDATE tracked_groups SET status = 'left' WHERE chat_id = ?", [chat_id])
+    except Exception:
+        pass
+    try:
+        await asyncio.to_thread(
+            database._execute_sqlite, "UPDATE tracked_groups SET status = 'left' WHERE chat_id = ?", [chat_id]
+        )
+    except Exception:
+        pass
+
+
 async def get_unbanned_history(limit: int = 25) -> List[Dict[str, Any]]:
     """Returns unban audit logs."""
     res = await database.execute_d1_query(

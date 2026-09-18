@@ -102,7 +102,17 @@ Operating Directives:
 - Smart Google Dorking (دورکینگ هوشمند): Formulating and executing targeted Google Dorks for sensitive files (.env, .sql, .log, .conf), admin login portals, open directories ("index of /"), confidential documents, exposed credentials, subdomains, and cloud storage buckets.
 - Cross-Platform Username Reconnaissance: Investigating 25+ online platforms (GitHub, Twitter/X, Instagram, Telegram, Reddit, TikTok, LinkedIn, YouTube, etc.).
 - Network Footprinting: DNS records resolution (A, AAAA, MX, NS, TXT, CNAME, SOA), Certificate Transparency logs subdomain discovery (crt.sh), and IP Geolocation/ASN analysis.
-- VirusTotal Security Reputation: Domain, IP, URL, and file hash threat analysis.
+- Telegram Reconnaissance & Entity Tracking (اوسینت و ردگیری تلگرام):
+  • Resolving Telegram usernames (@username), numeric IDs, identifying whether an entity is a channel, group, bot, or user.
+  • Tracking user presence across known groups and finding public channel/message mentions in open sources.
+- Public Databases & Open Archive Intelligence (پایگاه‌های داده و اسناد عمومی):
+  • Wayback Machine snapshots of historical and deleted web pages.
+  • Public breach and leak catalogs (COMB) with confirmed compromised data classes.
+  • Open CVE & vulnerability databases (NVD/CIRCL) for software security flaws.
+  • URLScan.io network infrastructure, recorded IP addresses, ASN, and web server technologies.
+- ABSOLUTE TRUTHFULNESS & ZERO HALLUCINATION (اصل حقیقت‌گویی مطلق و عدم تحریف):
+  • Never fabricate or invent IDs, phone numbers, private messages, or leaks.
+  • If information is unavailable in open public databases, state it honestly and clearly: "موردی در پایگاه‌های عمومی یافت نشد یا دسترسی به آن نیازمند مجوزهای خصوصی است." Always provide real, verified data.
 
 4. Language, Tone & Formatting in Telegram:
 - Always respond naturally, natively, and fluently in Persian (فارسی) unless the user explicitly prompts in English.
@@ -416,6 +426,44 @@ async def augment_osint_prompt(user_prompt: str) -> str:
                 logger.info(f"Auto-injected web search results for '{search_query}'")
         except Exception as err:
             logger.warning(f"Live web search failed: {err}")
+
+    # Check for Telegram OSINT mentions
+    tg_match = re.search(r"(?:t\.me/|telegram\.me/|@)([a-zA-Z0-9_]{4,32})", user_prompt)
+    if tg_match and any(k in user_prompt.lower() for k in ["تلگرام", "telegram", "آیدی", "کانال", "گروه", "پروفایل", "یوزر", "ردگیری"]):
+        tg_target = tg_match.group(1)
+        try:
+            from tools.telegram_osint import investigate_telegram_target
+            tg_info = await investigate_telegram_target(tg_target)
+            if tg_info.get("success"):
+                w = tg_info.get("web_info", {})
+                num_id = tg_info.get("numeric_id")
+                id_str = str(num_id) if num_id else "مشخص‌نشده در پایگاه تعاملات زنده"
+                t_block = (
+                    f"\n\n[داده‌های اطلاعاتی و مستند تلگرام برای @{tg_target}]:\n"
+                    f"• نام / عنوان: {tg_info.get('name') or 'مشخص نشد'}\n"
+                    f"• شناسه عددی (Numeric ID): {id_str}\n"
+                    f"• نوع ماهیت: {w.get('type', 'کاربر')}\n"
+                    f"• اعضا / مخاطبان: {w.get('members_count') or 'نامشخص'}\n"
+                    f"• بیوگرافی / توضیحات: {w.get('description', 'یافت نشد')}\n"
+                )
+                augmented_prompt = f"{augmented_prompt}{t_block}"
+                logger.info(f"Auto-injected Telegram intel for @{tg_target}")
+        except Exception as err:
+            logger.warning(f"Failed to auto-fetch Telegram info: {err}")
+
+    # Check for Public DB / Archive / Breach / CVE mentions
+    if any(k in user_prompt.lower() for k in ["آرشیو", "wayback", "archive", "نشت", "leak", "breach", "cve", "آسیب‌پذیری"]):
+        try:
+            from tools.public_db_intel import query_public_intel_databases
+            target_match = re.search(r'(?:درباره|پایگاه|آرشیو|نشت|بررسی|هدف)\s+([a-zA-Z0-9._@/-]+)', user_prompt)
+            if target_match:
+                i_target = target_match.group(1)
+                i_data = await query_public_intel_databases(i_target)
+                if i_data.get("success"):
+                    augmented_prompt = f"{augmented_prompt}\n\n[استعلام پایگاه‌های داده عمومی و اسناد آرشیوی برای {i_target}]: {json.dumps(i_data, ensure_ascii=False)[:1200]}"
+                    logger.info(f"Auto-injected public DB intel for {i_target}")
+        except Exception as err:
+            logger.warning(f"Failed to auto-query public DB intel: {err}")
 
     return augmented_prompt
 
