@@ -118,6 +118,13 @@ from tools.file_tool import (
     create_document_file,
     detect_file_creation_intent,
 )
+from tools.data_reader import (
+    read_data_file,
+    read_data_file_async,
+    detect_data_format,
+    format_data_inspection_report,
+    format_data_for_llm,
+)
 from tools.virustotal import (
     scan_file_hash,
     upload_and_scan_file,
@@ -980,6 +987,7 @@ PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "ping", "status",
     "summarize", "recap", "summary", "kholase",
     "file", "createfile", "makefile",
+    "data", "readfile", "dataset", "read_data", "inspect_file",
     "scan", "vt", "virustotal", "antivirus",
     "tg", "telegram", "tgosint",
     "db", "intel", "leak", "archive", "cve",
@@ -3725,6 +3733,99 @@ async def public_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await progress.edit_text(f"⚠️ <b>خطا در استعلام پایگاه‌های عمومی:</b> {html.escape(str(e))}", parse_mode=ParseMode.HTML)
 
 
+async def data_reader_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Dedicated Python Data Storage Inspector:
+    Inspects, analyzes, extracts schema, calculates statistics, and samples records for:
+    SQLite (.sqlite, .sqlite3, .db), CSV, TSV, Excel (.xlsx, .xls), JSON, JSONL, YAML, XML, TOML, SQL dumps, Log files.
+    """
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    # Check if there is a document in reply or attached
+    doc = None
+    if msg.reply_to_message and msg.reply_to_message.document:
+        doc = msg.reply_to_message.document
+    elif msg.document:
+        doc = msg.document
+
+    args = context.args or []
+    target = " ".join(args).strip()
+
+    if not doc and not target:
+        guide = (
+            "📊 <b>موتور تخصصی تحلیل و کالبدشکافی فایل‌های داده (Data Storage Engine):</b>\n\n"
+            "خواندن هوشمند، کشف ساختار اسکیما، تحلیل آماری و نمونه‌برداری از انواع فرمت‌های پایگاه‌داده و ذخیره اطلاعات:\n\n"
+            "🗄 <b>فرمت‌های قابل پردازش:</b>\n"
+            "• <b>پایگاه‌داده SQLite</b> (<code>.sqlite</code>, <code>.db</code>, <code>.db3</code>): استخراج لیست جداول، نماها، فیلدها و شمارش رکوردها\n"
+            "• <b>جداول آماری</b> (<code>.csv</code>, <code>.tsv</code>): تشخیص خودکار جداکننده، تحلیل نوع ستون‌ها، فیلدهای خالی و مقادیر میانگین/مینیمم/ماکسیمم\n"
+            "• <b>صفحات اکسل</b> (<code>.xlsx</code>, <code>.xls</code>): استخراج چندشیتی، ساختار ستون‌ها و ردیف‌های نمونه\n"
+            "• <b>داده‌های ساختاریافته</b> (<code>.json</code>, <code>.jsonl</code>, <code>.ndjson</code>): تحلیل آرایه‌ها، فیلدها و استریم‌های داده\n"
+            "• <b>پیکربندی و ترتیبی</b> (<code>.yaml</code>, <code>.yml</code>, <code>.xml</code>, <code>.toml</code>)\n"
+            "• <b>اسکریپت و لاگ</b> (<code>.sql</code>, <code>.log</code>)\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "۱. یک فایل داده را بفرستید یا روی آن ریپلای کرده و دستور <code>/data</code> را بزنید.\n"
+            "۲. همچنین می‌توانید لینک دانلود مستقیم فایل دیتا را بعد از دستور بنویسید:\n"
+            "<code>/data https://example.com/dataset.csv</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text("🔄 <i>در حال دریافت و کالبدشکافی ساختار فایل داده با پایتون...</i>", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+
+    try:
+        file_bytes = None
+        f_name = "data.bin"
+        f_mime = None
+
+        if doc:
+            if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+                await status_msg.edit_text("⚠️ حجم فایل بیش از سقف مجاز دانلود تلگرام (۲۰ مگابایت) است.")
+                return
+            tg_f = await doc.get_file()
+            file_bytes = bytes(await tg_f.download_as_bytearray())
+            f_name = doc.file_name or "data.bin"
+            f_mime = doc.mime_type
+
+        elif target.startswith(("http://", "https://")):
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                res = await client.get(target)
+                if res.status_code != 200:
+                    await status_msg.edit_text(f"❌ خطا در دانلود فایل از آدرس مشخص شده (کد وضعیت: {res.status_code})")
+                    return
+                file_bytes = res.content
+                f_name = target.split("/")[-1].split("?")[0] or "downloaded_data.csv"
+                f_mime = res.headers.get("content-type")
+
+        elif os.path.isfile(target):
+            with open(target, "rb") as lf:
+                file_bytes = lf.read()
+            f_name = os.path.basename(target)
+
+        if not file_bytes:
+            await status_msg.edit_text("❌ محتوای فایلی برای تحلیل یافت نشد.")
+            return
+
+        data_res = await asyncio.to_thread(read_data_file, file_bytes, f_name, mime_type=f_mime)
+        elapsed = time.perf_counter() - t0
+        fmt_label = data_res.get("format", "فایل")
+        record_chat_latency(chat.id, elapsed, f"کالبدشکافی داده‌های {fmt_label} ({f_name})")
+
+        report = format_data_inspection_report(data_res)
+        chunks = split_message(report, max_len=3900)
+        await status_msg.edit_text(chunks[0], parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        for ch in chunks[1:]:
+            await msg.reply_text(ch, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+    except Exception as e:
+        logger.error(f"Error in data_reader_command: {e}")
+        await status_msg.edit_text(f"❌ خطا در کالبدشکافی داده‌ها: {html.escape(str(e))}")
+
+
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles all incoming document files (PDF, Word, Excel, CSV, Code, Text, Archives, etc.).
@@ -3834,10 +3935,11 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _deliver_reply(msg, report)
             return
 
-        # Read & parse the file content
-        parsed = await asyncio.to_thread(extract_file_content, bytes(file_bytes), f_name, mime_type=f_mime)
+        # Read & parse the file content using dedicated Data Reader Suite
+        data_res = await asyncio.to_thread(read_data_file, bytes(file_bytes), f_name, mime_type=f_mime)
         elapsed = time.perf_counter() - t0
-        record_chat_latency(chat.id, elapsed, f"استخراج و تحلیل محتوای فایل ({f_name})")
+        fmt_label = data_res.get("format", "فایل")
+        record_chat_latency(chat.id, elapsed, f"کالبدشکافی داده‌های فایل {fmt_label} ({f_name})")
 
         # Clean caption of bot mentions
         cleaned_caption = caption
@@ -3851,40 +3953,16 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # If user asked a specific instruction/question about this file
         if cleaned_caption and len(cleaned_caption) > 2:
+            llm_ctx = format_data_for_llm(data_res)
             agent_prompt = (
-                f"فایلی با نام «{f_name}» (فرمت: {parsed['file_type']}) توسط کاربر ارسال شده است.\n"
-                f"محتوای استخراج شده از فایل:\n"
-                f"\"\"\"\n{parsed['content']}\n\"\"\"\n\n"
-                f"دستور و خواسته کاربر درباره این فایل:\n{cleaned_caption}"
+                f"{llm_ctx}\n\n"
+                f"دستور و خواسته کاربر درباره این داده‌ها:\n{cleaned_caption}"
             )
             await _process_and_reply(update, context, agent_prompt)
             return
 
-        # Otherwise deliver rich extracted summary with 1-tap VirusTotal scan button
-        size_kb = (doc.file_size or len(file_bytes)) / 1024
-        header = (
-            f"📄 <b>اطلاعات و محتوای فایل دریافت شده:</b>\n"
-            f"• نام فایل: <code>{html.escape(f_name)}</code>\n"
-            f"• نوع: <code>{html.escape(parsed['file_type'])}</code>\n"
-            f"• حجم: <code>{size_kb:.1f} KB</code>\n"
-        )
-        if parsed.get("page_count"):
-            header += f"• تعداد صفحات: <code>{parsed['page_count']}</code>\n"
-        if parsed.get("line_count"):
-            header += f"• تعداد خطوط: <code>{parsed['line_count']}</code>\n"
-
-        preview_text = parsed.get("preview") or parsed.get("content") or ""
-        if preview_text:
-            body = (
-                f"\n👁 <b>پیش‌نمایش محتوا:</b>\n"
-                f"<blockquote>{html.escape(preview_text[:1200])}</blockquote>\n"
-            )
-        else:
-            body = "\n⚠️ محتوای متنی قابل پیش‌نمایش در این فایل یافت نشد.\n"
-
-        footer = "\n💡 <i>می‌توانید روی این پیام ریپلای کنید و بپرسید: «این فایل رو خلاصه کن»، «به پایتون تبدیل کن»، «اشکالات کد رو بگو» و...</i>"
-
-        full_rep = header + body + footer
+        # Deliver rich structured data inspection report
+        full_rep = format_data_inspection_report(data_res)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🛡️ اسکن امنیتی با VirusTotal", callback_data=f"vt_scan:{doc.file_id}")]
         ])
@@ -5520,6 +5598,18 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Process all queries through autonomous agent brain (zero typing animations)
     replied_context = extract_replied_message_context(message)
+    if message.reply_to_message and message.reply_to_message.document:
+        r_doc = message.reply_to_message.document
+        if (r_doc.file_size or 0) <= 20 * 1024 * 1024:
+            try:
+                tg_f = await r_doc.get_file()
+                b = await tg_f.download_as_bytearray()
+                data_res = await asyncio.to_thread(read_data_file, bytes(b), r_doc.file_name or "data.bin", mime_type=r_doc.mime_type)
+                if data_res.get("success"):
+                    replied_context = f"{replied_context}\n\n{format_data_for_llm(data_res)}"
+            except Exception as de:
+                logger.debug(f"Failed to auto-parse replied document: {de}")
+
     if replied_context:
         agent_prompt = f"{replied_context}\n\nدستور یا پرسش کاربر درباره پیام بالا:\n{cleaned_prompt}"
     else:
@@ -6370,6 +6460,7 @@ def build_application():
                 BotCommand("pb_headers", "ارزیابی هدرهای امنیتی وب و OWASP"),
                 BotCommand("pb_hash", "شناسایی انواع هش و کالبدشکافی JWT"),
                 BotCommand("pb_scan", "اسکن امنیتی فایل و لینک با VirusTotal"),
+                BotCommand("pb_data", "کالبدشکافی و تحلیل داده از SQLite, CSV, Excel, JSON"),
                 BotCommand("pb_agent", "ارجاع به مغز تحلیلگر و خودمختار پرومته"),
                 BotCommand("pb_fast", "پاسخ سریع و سبک"),
                 BotCommand("pb_clear", "پاکسازی حافظه موقت نشست"),
@@ -6453,6 +6544,7 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["ping", "status"]), guard(ping_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["summarize", "recap", "summary", "kholase"]), guard(summarize_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["file", "createfile", "makefile"]), guard(file_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["data", "readfile", "dataset", "read_data", "inspect_file"]), guard(data_reader_command, is_cmd=True)))
 
 
     # Admin Governance & Moderation Commands (Personalized with p / p_ / pro / pro_ prefixes)

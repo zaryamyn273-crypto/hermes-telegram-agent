@@ -115,6 +115,9 @@ Operating Directives:
   • Public breach and leak catalogs (COMB) with confirmed compromised data classes.
   • Open CVE & vulnerability databases (NVD/CIRCL) for software security flaws.
   • URLScan.io network infrastructure, recorded IP addresses, ASN, and web server technologies.
+- Data Storage & Dataset Analysis Engine (کالبدشکافی و تحلیل انواع فایل‌های داده):
+  • Deep parsing and schema extraction for SQLite databases (.db, .sqlite, .sqlite3), CSV, TSV, Excel (.xlsx, .xls), JSON, JSONL, XML, YAML, TOML, SQL dumps, and logs.
+  • Automatic statistical profiling (row counts, column data types, min/max/average metrics, null rates, and sample records) for forensic and intelligence analysis.
 - ABSOLUTE TRUTHFULNESS & ZERO HALLUCINATION (اصل حقیقت‌گویی مطلق و عدم تحریف):
   • Never fabricate or invent IDs, phone numbers, private messages, or leaks.
   • If information is unavailable in open public databases, state it honestly and clearly: "موردی در پایگاه‌های عمومی یافت نشد یا دسترسی به آن نیازمند مجوزهای خصوصی است." Always provide real, verified data.
@@ -688,6 +691,35 @@ async def augment_osint_prompt(user_prompt: str) -> str:
                 logger.info(f"Auto-injected Twitter/X intel for @{tw_target}")
             except Exception as err:
                 logger.warning(f"Failed to auto-fetch Twitter info: {err}")
+
+    # Check for Data storage file or dataset path/URL mentions
+    if any(k in user_prompt.lower() for k in ["فایل داده", "دیتابیس", "اکسل", "csv", "sqlite", "دیتاست", "dataset", "خوانش فایل", "کالبدشکافی فایل"]):
+        data_file_match = re.search(r'(https?://[^\s]+\.(?:sqlite\d*|db|csv|tsv|xlsx?|jsonl?|xml|ya?ml|toml|sql|log)|/(?:root|tmp|var|home|app)[^\s]+\.(?:sqlite\d*|db|csv|tsv|xlsx?|jsonl?|xml|ya?ml|toml|sql|log))', user_prompt, re.I)
+        if data_file_match:
+            try:
+                from tools.data_reader import read_data_file, format_data_for_llm
+                target_url_or_path = data_file_match.group(1).strip()
+                f_bytes = b""
+                f_name = target_url_or_path.split("/")[-1].split("?")[0]
+                if target_url_or_path.startswith("http"):
+                    import httpx
+                    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                        r = await client.get(target_url_or_path)
+                        if r.status_code == 200:
+                            f_bytes = r.content
+                else:
+                    import os
+                    if os.path.exists(target_url_or_path) and os.path.isfile(target_url_or_path):
+                        with open(target_url_or_path, "rb") as f:
+                            f_bytes = f.read(15 * 1024 * 1024)
+                if f_bytes:
+                    d_res = read_data_file(f_bytes, f_name)
+                    if d_res.get("success"):
+                        llm_summary = format_data_for_llm(d_res)
+                        augmented_prompt = f"{augmented_prompt}\n\n[تحلیل تخصصی محتوای فایل داده {f_name}]:\n{llm_summary}"
+                        logger.info(f"Auto-injected data file intel for {f_name}")
+            except Exception as d_err:
+                logger.warning(f"Failed to auto-inspect data file: {d_err}")
 
     return augmented_prompt
 

@@ -129,6 +129,13 @@ from .file_tool import (
     extract_file_content,
     extract_file_content_async,
 )
+from .data_reader import (
+    read_data_file,
+    read_data_file_async,
+    detect_data_format,
+    format_data_inspection_report,
+    format_data_for_llm,
+)
 from .system import (
     calculate_math,
     calculate_math_async,
@@ -229,6 +236,11 @@ __all__ = [
     "create_document_file_async",
     "extract_file_content",
     "extract_file_content_async",
+    "read_data_file",
+    "read_data_file_async",
+    "detect_data_format",
+    "format_data_inspection_report",
+    "format_data_for_llm",
     "calculate_math",
     "calculate_math_async",
     "investigate_twitter_profile",

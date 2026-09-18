@@ -1049,6 +1049,234 @@ async def test_github_repo_mock_inspection():
     assert "language-python" in f_rep
 
 
+def test_data_reader_format_detection():
+    from tools.data_reader import detect_data_format
+
+    # Magic bytes detection
+    assert detect_data_format("unknown.bin", b"SQLite format 3\x00\x10\x00...") == "SQLITE"
+    assert detect_data_format("doc.bin", b"%PDF-1.7...") == "PDF"
+    assert detect_data_format("data.bin", b"PAR1...") == "PARQUET"
+
+    # Extension detection
+    assert detect_data_format("database.sqlite", b"") == "SQLITE"
+    assert detect_data_format("records.db", b"") == "SQLITE"
+    assert detect_data_format("users.csv", b"") == "CSV"
+    assert detect_data_format("sales.tsv", b"") == "TSV"
+    assert detect_data_format("metrics.xlsx", b"") == "EXCEL"
+    assert detect_data_format("payload.json", b"") == "JSON"
+    assert detect_data_format("events.jsonl", b"") == "JSONL"
+    assert detect_data_format("config.yaml", b"") == "YAML"
+    assert detect_data_format("feed.xml", b"") == "XML"
+    assert detect_data_format("pyproject.toml", b"") == "TOML"
+    assert detect_data_format("backup.sql", b"") == "SQL"
+    assert detect_data_format("system.log", b"") == "LOG"
+
+
+@pytest.mark.asyncio
+async def test_data_reader_sqlite_comprehensive():
+    import os
+    import sqlite3
+    import tempfile
+    from tools.data_reader import read_data_file, read_data_file_async, format_data_inspection_report, format_data_for_llm
+
+    # Create temporary SQLite database
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+        db_path = tf.name
+
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, balance REAL)")
+        cur.execute("CREATE TABLE audit_logs (log_id INTEGER PRIMARY KEY, action TEXT, timestamp TEXT)")
+        cur.executemany("INSERT INTO users VALUES (?, ?, ?)", [
+            (1, "Alice", 1500.50),
+            (2, "Bob", 2300.00),
+            (3, "Charlie", 950.25),
+        ])
+        cur.executemany("INSERT INTO audit_logs VALUES (?, ?, ?)", [
+            (101, "login", "2026-09-18 10:00:00"),
+            (102, "transfer", "2026-09-18 10:05:00"),
+        ])
+        conn.commit()
+        conn.close()
+
+        with open(db_path, "rb") as f:
+            db_bytes = f.read()
+
+        # Synchronous inspection
+        res = read_data_file(db_bytes, "finance.db")
+        assert res["success"] is True
+        assert res["format"] == "SQLITE"
+        assert res["table_count"] == 2
+        assert any(t["name"] == "users" for t in res["tables"])
+        assert any(t["name"] == "audit_logs" for t in res["tables"])
+
+        users_table = next(t for t in res["tables"] if t["name"] == "users")
+        assert users_table["row_count"] == 3
+        assert len(users_table["columns"]) == 3
+        assert len(users_table["sample_rows"]) == 3
+
+        # Async inspection wrapper
+        async_res = await read_data_file_async(db_bytes, "finance.db")
+        assert async_res["success"] is True
+        assert async_res["table_count"] == 2
+
+        # Format reports
+        report = format_data_inspection_report(res)
+        assert "SQLite" in report
+        assert "users" in report
+        assert "audit_logs" in report
+        assert "blockquote expandable" in report
+
+        llm_text = format_data_for_llm(res)
+        assert "SQLITE" in llm_text
+        assert "users" in llm_text
+    finally:
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+
+def test_data_reader_csv_and_tsv():
+    from tools.data_reader import read_data_file
+
+    # CSV with numeric stats
+    csv_content = (
+        "id,name,age,salary,status\n"
+        "1,Arshia,25,5000,active\n"
+        "2,Sara,30,7000,active\n"
+        "3,Reza,35,9000,inactive\n"
+        "4,Nima,,6000,active\n"
+    )
+    res_csv = read_data_file(csv_content.encode("utf-8"), "employees.csv")
+    assert res_csv["success"] is True
+    assert res_csv["format"] == "CSV"
+    assert res_csv["row_count"] == 4
+    assert res_csv["column_count"] == 5
+
+    age_col = next(c for c in res_csv["columns"] if c["name"] == "age")
+    assert age_col["stats"]["min"] == 25.0
+    assert age_col["stats"]["max"] == 35.0
+    assert age_col["stats"]["avg"] == 30.0
+    assert age_col["null_count"] == 1
+
+    # TSV parsing
+    tsv_content = "code\tcity\tpopulation\nIR\tTehran\t9000000\nFR\tParis\t2200000\n"
+    res_tsv = read_data_file(tsv_content.encode("utf-8"), "cities.tsv")
+    assert res_tsv["success"] is True
+    assert res_tsv["format"] == "TSV"
+    assert res_tsv["row_count"] == 2
+    assert res_tsv["column_count"] == 3
+    assert res_tsv["headers"] == ["code", "city", "population"]
+
+
+def test_data_reader_excel():
+    import io
+    import openpyxl
+    from tools.data_reader import read_data_file
+
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "Revenue"
+    ws1.append(["Quarter", "Amount", "Target"])
+    ws1.append(["Q1", 10000, 9500])
+    ws1.append(["Q2", 15000, 14000])
+
+    ws2 = wb.create_sheet(title="Staff")
+    ws2.append(["ID", "Name", "Department"])
+    ws2.append([101, "Alice", "IT"])
+    ws2.append([102, "Bob", "SecOps"])
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    excel_bytes = bio.getvalue()
+
+    res = read_data_file(excel_bytes, "report.xlsx")
+    assert res["success"] is True
+    assert res["format"] == "EXCEL"
+    assert res["sheet_count"] == 2
+    assert any(s["sheet_name"] == "Revenue" for s in res["sheets"])
+    assert any(s["sheet_name"] == "Staff" for s in res["sheets"])
+
+    rev_sheet = next(s for s in res["sheets"] if s["sheet_name"] == "Revenue")
+    assert rev_sheet["row_count"] == 2
+    assert rev_sheet["headers"] == ["Quarter", "Amount", "Target"]
+
+
+def test_data_reader_json_and_jsonl():
+    import json
+    from tools.data_reader import read_data_file
+
+    # List of records JSON
+    json_data = [
+        {"id": 1, "username": "user1", "is_admin": False},
+        {"id": 2, "username": "user2", "is_admin": True},
+    ]
+    res_json = read_data_file(json.dumps(json_data).encode("utf-8"), "users.json")
+    assert res_json["success"] is True
+    assert res_json["format"] == "JSON"
+    assert res_json["json_type"] == "array_of_objects"
+    assert res_json["record_count"] == 2
+    assert "username" in res_json["fields"]
+
+    # JSONL
+    jsonl_data = '{"event": "click", "ts": 100}\n{"event": "view", "ts": 105}\n'
+    res_jsonl = read_data_file(jsonl_data.encode("utf-8"), "stream.jsonl")
+    assert res_jsonl["success"] is True
+    assert res_jsonl["format"] == "JSONL"
+    assert res_jsonl["record_count"] == 2
+    assert "event" in res_jsonl["fields"]
+
+
+def test_data_reader_xml_yaml_toml():
+    from tools.data_reader import read_data_file
+
+    # XML
+    xml_data = """<?xml version="1.0"?>
+    <catalog>
+        <book id="bk101"><title>OSINT Handbook</title><price>44.95</price></book>
+        <book id="bk102"><title>Cyber Defense</title><price>39.95</price></book>
+    </catalog>
+    """
+    res_xml = read_data_file(xml_data.encode("utf-8"), "books.xml")
+    assert res_xml["success"] is True
+    assert res_xml["format"] == "XML"
+    assert res_xml["root_tag"] == "catalog"
+    assert res_xml["primary_record_tag"] == "book"
+    assert res_xml["child_counts"]["book"] == 2
+
+    # YAML
+    yaml_data = """
+    server:
+      host: 127.0.0.1
+      port: 8080
+    security:
+      ssl: true
+      ciphers:
+        - TLS_AES_128_GCM_SHA256
+        - TLS_AES_256_GCM_SHA384
+    """
+    res_yaml = read_data_file(yaml_data.encode("utf-8"), "config.yaml")
+    assert res_yaml["success"] is True
+    assert res_yaml["format"] == "YAML"
+    assert "server" in res_yaml["keys"]
+    assert "security" in res_yaml["keys"]
+
+    # TOML
+    toml_data = """
+    [package]
+    name = "prometheus"
+    version = "2.0.0"
+
+    [dependencies]
+    httpx = "0.27.0"
+    """
+    res_toml = read_data_file(toml_data.encode("utf-8"), "pyproject.toml")
+    assert res_toml["success"] is True
+    assert res_toml["format"] == "TOML"
+    assert "package" in res_toml["sections"]
+
+
+
 
 
 
