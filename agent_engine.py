@@ -524,6 +524,48 @@ async def augment_osint_prompt(user_prompt: str) -> str:
             except Exception as err:
                 logger.warning(f"Failed to auto-trace redirects: {err}")
 
+    # Check for IP Threat / Tor / Abuse mentions
+    if any(k in user_prompt.lower() for k in ["تور", "tor", "تهدید آی‌پی", "بلک لیست", "dnsbl", "otx", "بدافزار", "abuse", "threat"]):
+        ip_match = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", user_prompt)
+        if ip_match:
+            try:
+                from tools.osint_threat_intel import inspect_ip_threat_reputation
+                t_ip = ip_match.group(0)
+                t_res = await inspect_ip_threat_reputation(t_ip)
+                if t_res.get("success"):
+                    augmented_prompt = f"{augmented_prompt}\n\n[ارزیابی شهرت امنیتی، تور و تهدیدات آی‌پی {t_ip}]: {json.dumps(t_res, ensure_ascii=False)[:1000]}"
+                    logger.info(f"Auto-injected threat intel for {t_ip}")
+            except Exception as err:
+                logger.warning(f"Failed to auto-inspect threat: {err}")
+
+    # Check for BGP / ASN routing mentions
+    if any(k in user_prompt.lower() for k in ["bgp", "asn", "مسیریابی", "سامانه خودمختار"]):
+        asn_match = re.search(r"(?:AS)?(\d{2,10})\b", user_prompt, re.I)
+        if asn_match:
+            try:
+                from tools.osint_bgp import lookup_bgp_asn_intel
+                b_target = asn_match.group(0)
+                b_res = await lookup_bgp_asn_intel(b_target)
+                if b_res.get("success"):
+                    augmented_prompt = f"{augmented_prompt}\n\n[داده‌های مسیریابی جهانی BGP و سامانه خودمختار {b_target}]: {json.dumps(b_res, ensure_ascii=False)[:1000]}"
+                    logger.info(f"Auto-injected BGP intel for {b_target}")
+            except Exception as err:
+                logger.warning(f"Failed to auto-lookup BGP: {err}")
+
+    # Check for Phishing / Scam / Homograph mentions
+    if any(k in user_prompt.lower() for k in ["فیشینگ", "phishing", "جعل سایت", "جعل برند", "homograph", "punycode", "اسکم"]):
+        ph_match = re.search(r"https?://[^\s<>\"']+|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", user_prompt)
+        if ph_match:
+            try:
+                from tools.osint_phish_intel import analyze_phishing_heuristics
+                p_url = ph_match.group(0)
+                p_res = await analyze_phishing_heuristics(p_url)
+                if p_res.get("success"):
+                    augmented_prompt = f"{augmented_prompt}\n\n[تحلیل هیوستیک فیشینگ و جعل هویت برای {p_url}]: {json.dumps(p_res, ensure_ascii=False)[:1000]}"
+                    logger.info(f"Auto-injected phishing heuristics for {p_url}")
+            except Exception as err:
+                logger.warning(f"Failed to auto-analyze phishing: {err}")
+
     return augmented_prompt
 
 

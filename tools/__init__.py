@@ -78,6 +78,27 @@ from .virustotal import (
     scan_file_hash,
     format_virustotal_report,
 )
+from .osint_threat_intel import (
+    inspect_ip_threat_reputation,
+    format_threat_intel_report,
+)
+from .osint_bgp import (
+    lookup_bgp_asn_intel,
+    format_bgp_report,
+)
+from .osint_subnet import (
+    calculate_subnet_and_scan_ptr,
+    format_subnet_report,
+)
+from .osint_exif import (
+    extract_exif_metadata,
+    extract_exif_from_url,
+    format_exif_report,
+)
+from .osint_phish_intel import (
+    analyze_phishing_heuristics,
+    format_phish_report,
+)
 
 __all__ = [
     "search_web_osint",
@@ -124,4 +145,15 @@ __all__ = [
     "scan_url_or_domain",
     "scan_file_hash",
     "format_virustotal_report",
+    "inspect_ip_threat_reputation",
+    "format_threat_intel_report",
+    "lookup_bgp_asn_intel",
+    "format_bgp_report",
+    "calculate_subnet_and_scan_ptr",
+    "format_subnet_report",
+    "extract_exif_metadata",
+    "extract_exif_from_url",
+    "format_exif_report",
+    "analyze_phishing_heuristics",
+    "format_phish_report",
 ]

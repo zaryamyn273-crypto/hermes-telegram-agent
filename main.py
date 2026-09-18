@@ -173,6 +173,11 @@ from tools.osint_email_security import audit_domain_email_security, format_email
 from tools.osint_web_meta import inspect_web_meta, format_web_meta_report
 from tools.osint_redirects import trace_http_redirect_chain, format_redirects_report
 from tools.osint_hardware import lookup_mac_vendor, format_mac_report
+from tools.osint_threat_intel import inspect_ip_threat_reputation, format_threat_intel_report
+from tools.osint_bgp import lookup_bgp_asn_intel, format_bgp_report
+from tools.osint_subnet import calculate_subnet_and_scan_ptr, format_subnet_report
+from tools.osint_exif import extract_exif_metadata, extract_exif_from_url, format_exif_report
+from tools.osint_phish_intel import analyze_phishing_heuristics, format_phish_report
 from tools.telegram_osint import (
     investigate_telegram_target,
     format_telegram_target_report,
@@ -1354,6 +1359,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "من <b>پرومته</b> هستم؛ دستیار پیشرفته و خودمختار هوش مصنوعی برای <b>پژوهش‌های عمیق، تحلیل اطلاعات وب و هوش سایبری (OSINT)</b>:\n\n"
         "🔍 <b>مهم‌ترین ابزارهای تخصصی پرومته OSINT (پیشوند pb_):</b>\n"
         "• 🧰 <b>جعبه‌ابزار جامع اوسینت:</b> <code>/pb_tools</code> (مشاهده کلیه ابزارهای دسته‌بندی‌شده)\n"
+        "• 🚨 <b>هوش تهدیدات و تور آی‌پی:</b> <code>/pb_threat [IP]</code> (شناسایی Tor، دیتاسنتر، بلک‌لیست‌ها و OTX)\n"
+        "• 📡 <b>مسیریابی جهانی اینترنت BGP:</b> <code>/pb_bgp [ASN/IP]</code> (کالبدشکافی ASN، اپراتورها و هم‌پایگان)\n"
+        "• 📐 <b>محاسبات ساب‌نت و کشف سرورها:</b> <code>/pb_cidr [IP/محدوده]</code> (پویش هاست‌ها با Reverse DNS)\n"
+        "• 🎣 <b>کالبدشکافی فیشینگ و جعل برند:</b> <code>/pb_phish [لینک]</code> (تحلیل هیوستیک، Punycode و کلمات فریب)\n"
+        "• 🖼 <b>استخراج فارنزیک EXIF و لوکیشن:</b> <code>/pb_exif [عکس]</code> (مختصات ماهواره‌ای GPS و مشخصات دوربین)\n"
         "• 🎯 <b>ردگیری و هوش تلگرام:</b> <code>/pb_tg [یوزرنیم/آیدی/ریپلای]</code> (استخراج آیدی عددی، مشخصات و ردگیری)\n"
         "• 🏛 <b>استعلام رکوردهای ثبتی WHOIS/RDAP:</b> <code>/pb_whois [دامنه]</code> (ثبت‌کننده، تاریخ‌ها و نیم‌سرورها)\n"
         "• 🛡 <b>ممیزی امنیت ایمیل SPF و DMARC:</b> <code>/pb_dmarc [دامنه]</code> (ارزیابی ریسک جعل و فیشینگ)\n"
@@ -1404,6 +1414,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "۳. ارسال دستورات با پیشوند اختصاصی (مخفف کلمه اول و آخر Prometheus Bot: <code>pb_</code>)\n\n"
         "🔍 <b>ابزارهای تخصصی اوسینت و وب:</b>\n"
         "• <code>/pb_tools</code> - جعبه‌ابزار جامع و تفکیک‌شده ۳۰+ ابزار فوق‌پیشرفته اوسینت\n"
+        "• <code>/pb_threat [IP]</code> - ارزیابی شهرت امنیتی، نودهای Tor، بلک‌لیست‌ها و OTX\n"
+        "• <code>/pb_bgp [ASN/IP]</code> - مسیریابی BGP، اپراتورها، پیشوندهای IP و شرکت‌های بالادستی\n"
+        "• <code>/pb_cidr [IP/محدوده]</code> - محاسبات مهندسی ساب‌نت و پویش هاست‌ها با Reverse DNS\n"
+        "• <code>/pb_phish [لینک/دامنه]</code> - کالبدشکافی فیشینگ، حملات Homograph، جعل برند و Punycode\n"
+        "• <code>/pb_exif [عکس/سند]</code> - استخراج فارنزیک متاداده EXIF و مختصات ماهواره‌ای GPS\n"
         "• <code>/pb_whois [دامنه]</code> - استعلام رسمی WHOIS و پروتکل RDAP دامنه\n"
         "• <code>/pb_dmarc [دامنه]</code> یا <code>/pb_spf</code> - ارزیابی ضدجعل SPF، DMARC و BIMI\n"
         "• <code>/pb_robots [سایت]</code> - کشف مسیرهای پنهان robots.txt، نقشه سایت و security.txt\n"
@@ -2489,6 +2504,242 @@ async def mac_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _deliver_reply(msg, report)
 
 
+async def threat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """IP threat reputation, Tor exit node, cloud hosting, and abuse intelligence lookup."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = args[0].strip() if args else ""
+    if not target and msg.reply_to_message:
+        val = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
+        m = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", val)
+        if m:
+            target = m.group(0)
+
+    if not target:
+        guide = (
+            "🚨 <b>ارزیابی شهرت امنیتی و هوش تهدیدات آی‌پی (IP Threat & Abuse Intel):</b>\n\n"
+            "تشخیص نودهای خروجی شبکه تور (Tor Exit Nodes)، استعلام لیست‌های سیاه هرزنامه/حمله (DNSBL)، "
+            "پویش سوابق بدافزار در AlienVault OTX، تشخیص سرورهای ابری و محاسبه ضریب ریسک.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_threat 185.220.101.5</code>\n"
+            "• <code>/pb_threat 8.8.8.8</code>\n"
+            "• <code>/pb_threat target.com</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🚨 <b>در حال ارزیابی شهرت امنیتی و سوابق تهدید:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    res = await inspect_ip_threat_reputation(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"هوش تهدیدات آی‌پی ({target[:15]})")
+
+    report = format_threat_intel_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def bgp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """BGP routing, Autonomous System (ASN), prefixes, and upstream carrier intelligence."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = args[0].strip() if args else ""
+    if not target and msg.reply_to_message:
+        val = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
+        m = re.search(r"(?:AS)?\d{1,10}\b|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|(?:\d{1,3}\.){3}\d{1,3}", val)
+        if m:
+            target = m.group(0)
+
+    if not target:
+        guide = (
+            "📡 <b>کالبدشکافی مسیریابی جهانی BGP و سامانه خودمختار (ASN Routing Intel):</b>\n\n"
+            "استعلام مالک سامانه خودمختار از مراجع RIR/RIPE، استخراج شرکت‌های بالادستی اینترنت (Upstreams)، "
+            "تعداد بلاک‌های IPv4/IPv6 اعلام‌شده و هم‌پایگان شبکه.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_bgp AS13335</code>\n"
+            "• <code>/pb_bgp 15169</code>\n"
+            "• <code>/pb_bgp google.com</code>\n"
+            "• <code>/pb_bgp 1.1.1.1</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"📡 <b>در حال استعلام جدول جهانی مسیریابی BGP برای:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    res = await lookup_bgp_asn_intel(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"استعلام مسیریابی BGP ({target[:15]})")
+
+    report = format_bgp_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def subnet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Subnet and CIDR calculator with mass reverse DNS PTR discovery."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = args[0].strip() if args else ""
+    if not target and msg.reply_to_message:
+        val = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
+        m = re.search(r"(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?", val)
+        if m:
+            target = m.group(0)
+
+    if not target:
+        guide = (
+            "📐 <b>محاسبات مهندسی ساب‌نت و کشف سرورها با Reverse DNS (Subnet & CIDR Recon):</b>\n\n"
+            "محاسبه آدرس شبکه، برودکست، هاست‌های مفید، نت‌ماسک، و اجرای پویش بلادرنگ PTR روی هاست‌ها جهت کشف دامنه‌ها و نام سرورها.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_cidr 1.1.1.0/28</code>\n"
+            "• <code>/pb_cidr 192.168.1.0/24</code>\n"
+            "• <code>/pb_cidr 8.8.8.8/29</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"📐 <b>در حال محاسبه ساب‌نت و پویش Reverse DNS برای:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    res = await calculate_subnet_and_scan_ptr(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, "محاسبات ساب‌نت و PTR")
+
+    report = format_subnet_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def exif_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Image & media forensic EXIF metadata and GPS coordinate extractor."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    args = context.args or []
+    target_url = args[0].strip() if args else ""
+
+    # Check for direct image attachment or reply
+    img_bytes: Optional[bytes] = None
+    filename = "photo.jpg"
+
+    # 1. Attached photo or document
+    if msg.photo:
+        photo = msg.photo[-1]
+        tg_file = await context.bot.get_file(photo.file_id)
+        img_bytes = bytes(await tg_file.download_as_bytearray())
+        filename = "attached_photo.jpg"
+    elif msg.document and (msg.document.mime_type or "").startswith("image/"):
+        tg_file = await context.bot.get_file(msg.document.file_id)
+        img_bytes = bytes(await tg_file.download_as_bytearray())
+        filename = msg.document.file_name or "document_image.jpg"
+    # 2. Replied message with photo or document
+    elif msg.reply_to_message:
+        r = msg.reply_to_message
+        if r.photo:
+            photo = r.photo[-1]
+            tg_file = await context.bot.get_file(photo.file_id)
+            img_bytes = bytes(await tg_file.download_as_bytearray())
+            filename = "replied_photo.jpg"
+        elif r.document and (r.document.mime_type or "").startswith("image/"):
+            tg_file = await context.bot.get_file(r.document.file_id)
+            img_bytes = bytes(await tg_file.download_as_bytearray())
+            filename = r.document.file_name or "replied_doc.jpg"
+        elif not target_url:
+            r_txt = r.text or r.caption or ""
+            m = re.search(r"https?://\S+\.(?:jpg|jpeg|png|tiff|webp|heic)\b", r_txt, re.I)
+            if m:
+                target_url = m.group(0)
+
+    if not img_bytes and not target_url:
+        guide = (
+            "🖼 <b>استخراج فارنزیک متاداده و لوکیشن تصاویر (Image EXIF & Geolocation):</b>\n\n"
+            "کشف مشخصات دوربین، گوشی، تاریخ دقیق ثبت، نرم‌افزارهای ویرایش، و <b>مختصات جغرافیایی ماهواره‌ای (GPS)</b> با لینک مستقیم Google Maps.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• ارسال عکس به عنوان سند/فایل و ریپلای با دستور <code>/pb_exif</code>\n"
+            "• <code>/pb_exif https://example.com/photo.jpg</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text("🖼 <b>در حال کالبدشکافی متاداده EXIF و تحلیل لوکیشن...</b>", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+
+    if img_bytes:
+        res = extract_exif_metadata(img_bytes, filename=filename)
+    else:
+        res = await extract_exif_from_url(target_url)
+
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, "استخراج متاداده EXIF")
+
+    report = format_exif_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def phish_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Phishing heuristics, typosquatting, IDN homograph, and brand impersonation inspection."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = args[0].strip() if args else ""
+    if not target and msg.reply_to_message:
+        val = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
+        m = re.search(r"https?://\S+|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", val)
+        if m:
+            target = m.group(0)
+
+    if not target:
+        guide = (
+            "🎣 <b>کالبدشکافی هیوستیک فیشینگ و جعل هویت برند (Phishing Heuristics & Homographs):</b>\n\n"
+            "کشف حملات جعل حروف (IDN Homograph/Punycode)، شبیه‌سازی املایی برندهای بزرگ (Google, Telegram, Binance و بانک‌ها)، "
+            "بررسی آنتروپی دامنه‌های DGA و محاسبه درصد احتمال فیشینگ.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_phish https://telegram-login-verify.xyz</code>\n"
+            "• <code>/pb_phish paypal-secure-login.com</code>\n"
+            "• <code>/pb_phish xn--e1afmkfd.xn--p1ai</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🎣 <b>در حال تحلیل هیوستیک فیشینگ و جعل برند برای:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    res = await analyze_phishing_heuristics(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"تحلیل فیشینگ ({target[:15]})")
+
+    report = format_phish_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
 async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Categorized OSINT Master Toolbox menu."""
     msg = update.effective_message
@@ -2503,15 +2754,19 @@ async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/pb_search [عبارت]</code> - جستجوی آنلاین چندموتوره وب\n"
         "• <code>/pb_crawl [لینک]</code> - تحلیل لایه‌های صفحه، کشف ایمیل، تلفن و تکنولوژی‌ها\n"
         "• <code>/pb_robots [سایت]</code> - کشف مسیرهای حساس robots.txt و فایل security.txt\n"
-        "• <code>/pb_trace [لینک]</code> - رهگیری زنجیره ریدایرکت‌ها (Hops) و رمزگشایی لینک‌های کوتاه\n\n"
+        "• <code>/pb_trace [لینک]</code> - رهگیری زنجیره ریدایرکت‌ها (Hops) و رمزگشایی لینک‌های کوتاه\n"
+        "• <code>/pb_phish [لینک]</code> - کالبدشکافی هیوستیک فیشینگ، جعل برند و دامنه‌های Punycode\n\n"
         "🎯 <b>۲. گوگل دورکینگ هوشمند (Google Dorking):</b>\n"
         "• <code>/pb_dork [هدف]</code> - تولید ۲۷ دورک هدفمند در ۱۲ دسته‌بندی نفوذ و اوسینت\n"
         "• <code>/pb_dork git [هدف]</code> - کشف مخازن باز .git و محیط‌های Docker\n"
         "• <code>/pb_dork api [هدف]</code> - کشف اسناد Swagger و پورتال‌های GraphQL\n"
         "• <code>/pb_dork sql [هدف]</code> - کشف بک‌آپ‌ها و دیتابیس‌های لو رفته\n\n"
-        "📡 <b>۳. شبکه، دامنه و زیرساخت (Network & Infrastructure):</b>\n"
+        "📡 <b>۳. شبکه، مسیریابی و زیرساخت (Network & Infrastructure):</b>\n"
+        "• <code>/pb_threat [IP/دامنه]</code> - ارزیابی شهرت امنیتی، نودهای خروجی Tor، بلک‌لیست‌ها و OTX\n"
+        "• <code>/pb_bgp [ASN/IP]</code> - کالبدشکافی جدول BGP، اپراتورها و شرکت‌های بالادستی اینترنت\n"
+        "• <code>/pb_cidr [IP/محدوده]</code> - محاسبات مهندسی ساب‌نت و پویش هاست‌ها با Reverse DNS\n"
         "• <code>/pb_whois [دامنه]</code> - استعلام رسمی WHOIS و پروتکل RDAP دامنه\n"
-        "• <code>/pb_dns [دامنه]</code> - تفکیک جامع کلیه رکوردهای DNS دامنه\n"
+        "• <code>/pb_dns [دامنه]</code> - تفکیک جامع و موازی کلیه رکوردهای DNS دامنه\n"
         "• <code>/pb_subdomains [دامنه]</code> - کشف تمامی ساب‌دامین‌ها از لاگ‌های گواهی امنیتی\n"
         "• <code>/pb_ssl [دامنه]</code> - بازرسی گواهی SSL و استخراج ساب‌دامین‌های پنهان SAN\n"
         "• <code>/pb_headers [سایت]</code> - ممیزی هدرهای امنیتی و محاسبه رتبه OWASP\n"
@@ -2525,7 +2780,8 @@ async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/pb_github [کاربر]</code> - تحلیل اکانت گیت‌هاب، استخراج ایمیل از کامیت‌ها و کلیدها\n"
         "• <code>/pb_linkedin [نام/شرکت]</code> - کشف پروفایل و ساختار سازمانی لینکدین\n"
         "• <code>/pb_usercheck [یوزر]</code> - استعلام فوری نام کاربری در ۲۵+ پلتفرم جهانی\n\n"
-        "🔐 <b>۶. رمزنگاری و فارنزیک (Forensics & Cryptography):</b>\n"
+        "🔐 <b>۶. فارنزیک، رمزنگاری و فایل‌ها (Forensics & Cryptography):</b>\n"
+        "• <code>/pb_exif [عکس/سند]</code> - استخراج فارنزیک متاداده EXIF و مختصات ماهواره‌ای GPS\n"
         "• <code>/pb_hash [هش/توکن/متن]</code> - شناسایی ۱۵+ الگوریتم هش و کالبدشکافی توکن JWT\n"
         "• <code>/pb_mac [مک‌آدرس]</code> - شناسایی شرکت سازنده تجهیزات سخت‌افزاری و کارت شبکه\n"
         "• <code>/pb_scan [لینک/فایل/هش]</code> - اسکن امنیتی و تحلیل بدافزار با VirusTotal\n\n"
@@ -5528,6 +5784,11 @@ def build_application():
                 BotCommand("pb_start", "شروع و راهنمای کلی پرومته"),
                 BotCommand("pb_help", "راهنما و دستورات اوسینت و ابزارها"),
                 BotCommand("pb_tools", "جعبه‌ابزار جامع و تخصصی اوسینت"),
+                BotCommand("pb_threat", "ارزیابی شهرت امنیتی، تور و تهدید آی‌پی"),
+                BotCommand("pb_bgp", "مسیریابی BGP، اپراتورها و رکوردهای ASN"),
+                BotCommand("pb_cidr", "محاسبه ساب‌نت و پویش Reverse DNS"),
+                BotCommand("pb_exif", "استخراج متاداده EXIF و لوکیشن GPS تصویر"),
+                BotCommand("pb_phish", "کالبدشکافی فیشینگ، جعل هویت و Punycode"),
                 BotCommand("pb_whois", "استعلام WHOIS و RDAP دامنه"),
                 BotCommand("pb_dmarc", "ممیزی امنیت ایمیل، SPF و DMARC"),
                 BotCommand("pb_robots", "کاوش robots.txt، sitemap و مسیرها"),
@@ -5613,6 +5874,11 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["robots", "sitemap", "securitytxt", "meta"]), guard(web_meta_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["trace", "redirect", "redirects", "unshorten", "hops"]), guard(redirect_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["mac", "oui", "vendor", "hardware"]), guard(mac_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["threat", "reputation", "tor", "iprep", "abuse"]), guard(threat_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["bgp", "asn", "routing", "peering"]), guard(bgp_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["cidr", "subnet", "ptr", "ipcalc"]), guard(subnet_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["exif", "metadata", "gps", "photo"]), guard(exif_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["phish", "phishing", "scam", "fake", "typo"]), guard(phish_command, is_cmd=True)))
 
     # Threat Intelligence & Utilities
     app.add_handler(CommandHandler(make_bot_commands(["scan", "vt", "virustotal", "antivirus"]), guard(scan_command, is_cmd=True)))

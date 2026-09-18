@@ -12,8 +12,10 @@ import logging
 from typing import Dict, Any, List, Optional
 import httpx
 import dns.resolver
+import asyncio
 
 from utils.formatter import wrap_in_expandable_blockquote
+from utils.cache import dns_cache, ip_intel_cache
 
 logger = logging.getLogger("OSINT_Network")
 
@@ -21,31 +23,45 @@ logger = logging.getLogger("OSINT_Network")
 async def resolve_dns_records(domain: str) -> Dict[str, Any]:
     """
     Resolves comprehensive DNS records: A, AAAA, MX, TXT, NS, CNAME, SOA.
+    Uses concurrent resolution and in-memory TTL caching for maximum performance.
     """
     clean_d = domain.strip().lower().replace("http://", "").replace("https://", "").split("/")[0]
-    records: Dict[str, List[str]] = {}
+    cached = await dns_cache.get(clean_d)
+    if cached:
+        logger.debug(f"DNS cache hit for {clean_d}")
+        return cached
 
+    records: Dict[str, List[str]] = {}
     resolver = dns.resolver.Resolver()
-    resolver.timeout = 4.0
-    resolver.lifetime = 4.0
+    resolver.timeout = 3.5
+    resolver.lifetime = 3.5
 
     record_types = ["A", "AAAA", "MX", "NS", "TXT", "CNAME", "SOA"]
-    for rtype in record_types:
-        try:
-            answers = resolver.resolve(clean_d, rtype)
-            records[rtype] = [str(r.to_text()) for r in answers]
-        except Exception:
-            records[rtype] = []
 
-    # Get Primary IP
+    async def _resolve_single(rtype: str) -> tuple:
+        def _sync_query():
+            try:
+                answers = resolver.resolve(clean_d, rtype)
+                return [str(r.to_text()) for r in answers]
+            except Exception:
+                return []
+        res = await asyncio.to_thread(_sync_query)
+        return rtype, res
+
+    results = await asyncio.gather(*[_resolve_single(rt) for rt in record_types])
+    for rtype, answers in results:
+        records[rtype] = answers
+
     primary_ip = records.get("A", [""])[0] if records.get("A") else ""
 
-    return {
+    result = {
         "success": True,
         "domain": clean_d,
         "primary_ip": primary_ip,
         "records": {k: v for k, v in records.items() if v}
     }
+    await dns_cache.set(clean_d, result, ttl=600.0)
+    return result
 
 
 async def enumerate_subdomains_crtsh(domain: str, max_results: int = 30) -> Dict[str, Any]:
@@ -95,26 +111,22 @@ async def lookup_ip_intel(ip_or_domain: str) -> Dict[str, Any]:
         except Exception as e:
             return {"success": False, "target": target, "error": f"عدم توانایی در یافتن آی‌پی دامنه: {e}"}
 
-    # Query IP Geolocation & ASN
+    cached = await ip_intel_cache.get(ip_addr)
+    if cached:
+        logger.debug(f"IP intel cache hit for {ip_addr}")
+        return cached
+
+    # Query IP Geolocation & ASN with fallback
+    geo_data = {}
     try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             res = await client.get(
                 f"http://ip-api.com/json/{ip_addr}?fields=status,message,country,countryCode,regionName,city,zip,lat,lon,timezone,isp,org,as,query"
             )
             if res.status_code == 200:
                 data = res.json()
                 if data.get("status") == "success":
-                    # Reverse DNS lookup
-                    rdns = ""
-                    try:
-                        rdns = socket.gethostbyaddr(ip_addr)[0]
-                    except Exception:
-                        pass
-
-                    return {
-                        "success": True,
-                        "ip": ip_addr,
-                        "original_target": target,
+                    geo_data = {
                         "country": data.get("country", ""),
                         "country_code": data.get("countryCode", ""),
                         "region": data.get("regionName", ""),
@@ -123,12 +135,57 @@ async def lookup_ip_intel(ip_or_domain: str) -> Dict[str, Any]:
                         "org": data.get("org", ""),
                         "asn": data.get("as", ""),
                         "timezone": data.get("timezone", ""),
-                        "reverse_dns": rdns,
                     }
     except Exception as e:
-        return {"success": False, "ip": ip_addr, "error": f"خطا در دریافت اطلاعات آی‌پی: {e}"}
+        logger.debug(f"ip-api.com query failed for {ip_addr}: {e}")
 
-    return {"success": False, "ip": ip_addr, "error": "اطلاعاتی برای این آی‌پی یافت نشد."}
+    # Fallback to freeipapi if primary failed
+    if not geo_data:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(f"https://freeipapi.com/api/json/{ip_addr}")
+                if res.status_code == 200:
+                    f_data = res.json()
+                    geo_data = {
+                        "country": f_data.get("countryName", ""),
+                        "country_code": f_data.get("countryCode", ""),
+                        "region": f_data.get("regionName", ""),
+                        "city": f_data.get("cityName", ""),
+                        "isp": f_data.get("isp", ""),
+                        "org": "",
+                        "asn": f_data.get("asn", ""),
+                        "timezone": f_data.get("timeZones", [""])[0] if f_data.get("timeZones") else "",
+                    }
+        except Exception:
+            pass
+
+    if not geo_data:
+        return {"success": False, "ip": ip_addr, "error": "اطلاعاتی برای این آی‌پی یافت نشد."}
+
+    # Non-blocking Reverse DNS lookup
+    rdns = ""
+    try:
+        rdns_tuple = await asyncio.to_thread(socket.gethostbyaddr, ip_addr)
+        rdns = rdns_tuple[0]
+    except Exception:
+        pass
+
+    result = {
+        "success": True,
+        "ip": ip_addr,
+        "original_target": target,
+        "country": geo_data.get("country", ""),
+        "country_code": geo_data.get("countryCode", ""),
+        "region": geo_data.get("region", ""),
+        "city": geo_data.get("city", ""),
+        "isp": geo_data.get("isp", ""),
+        "org": geo_data.get("org", ""),
+        "asn": geo_data.get("asn", ""),
+        "timezone": geo_data.get("timezone", ""),
+        "reverse_dns": rdns,
+    }
+    await ip_intel_cache.set(ip_addr, result, ttl=3600.0)
+    return result
 
 
 def inspect_ssl_certificate(domain: str, port: int = 443) -> Dict[str, Any]:

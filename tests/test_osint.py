@@ -56,6 +56,14 @@ from tools.osint_email_security import audit_domain_email_security, format_email
 from tools.osint_web_meta import inspect_web_meta, format_web_meta_report
 from tools.osint_redirects import trace_http_redirect_chain, format_redirects_report
 from tools.osint_hardware import lookup_mac_vendor, format_mac_report
+from utils.cache import AsyncTTLCache
+from tools.osint_threat_intel import inspect_ip_threat_reputation, format_threat_intel_report
+from tools.osint_bgp import lookup_bgp_asn_intel, format_bgp_report
+from tools.osint_subnet import calculate_subnet_and_scan_ptr, format_subnet_report
+from tools.osint_exif import extract_exif_metadata, format_exif_report
+from tools.osint_phish_intel import analyze_phishing_heuristics, format_phish_report
+from PIL import Image
+import io
 from agent_engine import (
     sanitize_identity,
     clean_agent_output,
@@ -417,5 +425,140 @@ async def test_hardware_mac_lookup_and_formatting():
     rand_data = await lookup_mac_vendor("02:00:00:00:00:00")
     assert rand_data["success"] is True
     assert rand_data["is_locally_administered"] is True
+
+
+@pytest.mark.asyncio
+async def test_async_ttl_cache_engine():
+    cache = AsyncTTLCache(maxsize=3, default_ttl=0.2)
+    await cache.set("k1", "v1")
+    assert await cache.get("k1") == "v1"
+
+    # Test eviction
+    await cache.set("k2", "v2")
+    await cache.set("k3", "v3")
+    await cache.set("k4", "v4")  # k1 should be evicted by LRU
+    assert await cache.get("k1") is None
+    assert await cache.get("k4") == "v4"
+
+    # Test TTL expiration
+    await asyncio.sleep(0.25)
+    assert await cache.get("k4") is None
+
+
+@pytest.mark.asyncio
+async def test_ip_threat_reputation_and_formatting():
+    # 1. Google Public DNS (known clean)
+    data = await inspect_ip_threat_reputation("8.8.8.8")
+    assert data["success"] is True
+    assert data["ip"] == "8.8.8.8"
+    assert data["threat_score"] <= 30
+    assert "Google" in data["hosting_provider"] or "GCP" in data["hosting_provider"]
+
+    report = format_threat_intel_report(data)
+    assert "ارزیابی شهرت امنیتی و هوش تهدیدات آی‌پی" in report
+    assert "8.8.8.8" in report
+    assert "ضریب تهدید امنیتی:" in report
+
+    # 2. Private IP check
+    p_data = await inspect_ip_threat_reputation("192.168.1.1")
+    assert p_data["success"] is True
+    assert p_data["is_private"] is True
+    assert p_data["threat_score"] == 0
+
+
+@pytest.mark.asyncio
+async def test_bgp_asn_intel_and_formatting():
+    data = await lookup_bgp_asn_intel("AS13335")
+    assert data["success"] is True
+    assert data["asn"] == "AS13335"
+    assert "Cloudflare" in data["holder"]
+    assert data["is_announced"] is True
+    assert data["total_prefixes_count"] > 0
+    assert data["upstreams_count"] > 0
+
+    report = format_bgp_report(data)
+    assert "کالبدشکافی مسیریابی جهانی اینترنت و سامانه خودمختار" in report
+    assert "AS13335" in report
+    assert "مالک و اپراتور (Holder):" in report
+
+
+@pytest.mark.asyncio
+async def test_subnet_calculator_and_ptr_scanning():
+    data = await calculate_subnet_and_scan_ptr("1.1.1.0/29")
+    assert data["success"] is True
+    assert data["total_addresses"] == 8
+    assert data["usable_hosts"] == 6
+    assert data["network_address"] == "1.1.1.0"
+    assert data["broadcast_address"] == "1.1.1.7"
+    assert data["ptr_discovered_count"] >= 1
+    assert any("one.one.one.one" in p["hostname"] for p in data["ptr_records"])
+
+    report = format_subnet_report(data)
+    assert "کالبدشکافی و محاسبات مهندسی ساب‌نت" in report
+    assert "1.1.1.0/29" in report
+    assert "هاست‌های قابل استفاده" in report
+
+
+def test_exif_metadata_and_geolocation():
+    img = Image.new("RGB", (160, 120), color="green")
+    exif = img.getexif()
+    exif[0x010f] = "Nikon"
+    exif[0x0110] = "Z9"
+
+    # Set GPS IFD
+    gps_ifd = exif.get_ifd(0x8825)
+    gps_ifd[1] = "N"
+    gps_ifd[2] = (35.0, 41.0, 21.12)
+    gps_ifd[3] = "E"
+    gps_ifd[4] = (51.0, 23.0, 20.40)
+    gps_ifd[6] = 1100.0
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", exif=exif)
+    raw = buf.getvalue()
+
+    res = extract_exif_metadata(raw, "sample_field_photo.jpg")
+    assert res["success"] is True
+    assert res["has_exif"] is True
+    assert res["camera_make"] == "Nikon"
+    assert res["camera_model"] == "Z9"
+    assert res["has_gps"] is True
+    assert abs(res["latitude"] - 35.6892) < 0.001
+    assert abs(res["longitude"] - 51.3890) < 0.001
+    assert "google.com/maps" in res["google_maps_url"]
+
+    report = format_exif_report(res)
+    assert "کالبدشکافی فارنزیک و متاداده تصویر" in report
+    assert "Nikon" in report
+    assert "مختصات جغرافیایی دقیق:" in report
+
+
+@pytest.mark.asyncio
+async def test_phishing_heuristics_and_formatting():
+    # 1. Clean domain
+    clean_data = await analyze_phishing_heuristics("google.com")
+    assert clean_data["success"] is True
+    assert clean_data["risk_score"] < 20
+    assert clean_data["impersonated_brand"] is None
+
+    # 2. Typosquatting / Impersonation + High Risk TLD + Keyword
+    fake_data = await analyze_phishing_heuristics("https://telegram-login-verify.xyz/account")
+    assert fake_data["success"] is True
+    assert fake_data["risk_score"] >= 65
+    assert fake_data["impersonated_brand"] == "telegram"
+    assert "login" in fake_data["detected_keywords"]
+
+    # 3. Cyrillic Homograph Spoofing
+    cyrillic_spoof = "teleg" + chr(0x0430) + "m.com"
+    homograph_data = await analyze_phishing_heuristics(cyrillic_spoof)
+    assert homograph_data["success"] is True
+    assert homograph_data["has_homograph"] is True
+    assert homograph_data["risk_score"] >= 45
+
+    report = format_phish_report(fake_data)
+    assert "کالبدشکافی پیشرفته هیوستیک فیشینگ و جعل برند" in report
+    assert "ضریب احتمال فیشینگ:" in report
+    assert "telegram-login-verify.xyz" in report
+
 
 
