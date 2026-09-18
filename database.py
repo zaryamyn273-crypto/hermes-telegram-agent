@@ -245,13 +245,16 @@ def _init_sqlite_tables(conn: sqlite3.Connection):
         logger.warning(f"Error during in-memory SQLite tables initialization: {e}")
 
 
+_DB_PATH = os.environ.get("SQLITE_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "bot.db"))
+
+
 def _get_sqlite_conn() -> sqlite3.Connection:
     global _SQLITE_CONN
     if _SQLITE_CONN is None:
         with _SQLITE_LOCK:
             if _SQLITE_CONN is None:
-                # Strictly In-Memory SQLite with zero disk files
-                _SQLITE_CONN = sqlite3.connect(":memory:", check_same_thread=False)
+                os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+                _SQLITE_CONN = sqlite3.connect(_DB_PATH, check_same_thread=False)
                 _SQLITE_CONN.row_factory = sqlite3.Row
                 _init_sqlite_tables(_SQLITE_CONN)
     return _SQLITE_CONN

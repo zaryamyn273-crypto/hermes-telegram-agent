@@ -236,6 +236,15 @@ async def _check_moderation_guard(update: Update, context: ContextTypes.DEFAULT_
             username=chat.username or ""
         )
 
+        # ⭐️ AUTOMATIC APPROVAL FOR BOT ADMINS:
+        # If an authorized bot administrator is speaking or issuing commands in the group,
+        # the group is automatically verified and permanently marked as approved!
+        if is_admin(uid):
+            if get_group_status(chat.id) != "approved":
+                await approve_group(chat.id, reviewed_by=uid, title=chat.title or "")
+                logger.info(f"Gatekeeper: auto-approved group {chat.id} because bot admin {uid} is active in group.")
+            return True
+
         # Group approval check
         status = get_group_status(chat.id)
         if status == "unknown":
@@ -243,17 +252,15 @@ async def _check_moderation_guard(update: Update, context: ContextTypes.DEFAULT_
                 chat_id=chat.id,
                 title=chat.title or "گروه",
                 chat_type=chat.type,
-                added_by_id=uid if is_admin(uid) else 0,
+                added_by_id=0,
                 username=chat.username or ""
             )
             status = st
-            if is_new and not is_admin(uid):
+            # Only notify if this is genuinely a newly registered pending group that has never notified admins
+            if is_new:
                 await _notify_admin_group_request(context.bot, chat, user)
 
         if status != "approved":
-            # If authorized admin is issuing an administrative command or interacting, permit through
-            if is_admin(uid):
-                return True
             logger.info(f"Gatekeeper: group {chat.id} status is '{status}'; bot remains inactive.")
             return False
 
@@ -4821,31 +4828,46 @@ async def approvegroup_command(update: Update, context: ContextTypes.DEFAULT_TYP
     """Manually approves a group for bot activation."""
     user = update.effective_user
     msg = update.effective_message
+    chat = update.effective_chat
     if not user or not is_admin(user.id):
         if msg:
             await msg.reply_text("⛔️ دسترسی غیرمجاز.")
         return
 
     args = context.args or []
-    if not args or not args[0].lstrip("-+").isdigit():
-        await msg.reply_text("⚠️ نحوه استفاده: <code>/approvegroup -100xxxxxxxxxx [عنوان اختیاری]</code>", parse_mode=ParseMode.HTML)
+    target_cid = None
+    custom_title = ""
+    if args and args[0].lstrip("-+").isdigit():
+        target_cid = int(args[0])
+        custom_title = " ".join(args[1:]).strip() if len(args) > 1 else ""
+    elif chat and chat.type != ChatType.PRIVATE:
+        target_cid = chat.id
+        custom_title = chat.title or ""
+    else:
+        await msg.reply_text(
+            "⚠️ <b>نحوه استفاده از دستور تایید گروه:</b>\n"
+            "• داخل گروه مورد نظر: <code>/approvegroup</code> یا <code>/pb_approvegroup</code>\n"
+            "• از راه دور: <code>/approvegroup [شناسه_عددی] [عنوان_اختیاری]</code>\n"
+            "<i>مثال:</i> <code>/approvegroup -1003949505012</code>",
+            parse_mode=ParseMode.HTML
+        )
         return
 
-    cid = int(args[0])
-    custom_title = " ".join(args[1:]).strip() if len(args) > 1 else ""
-    await approve_group(cid, reviewed_by=user.id, title=custom_title)
-    await msg.reply_text(f"✅ گروه <code>{cid}</code> با موفقیت تایید و فعال شد.", parse_mode=ParseMode.HTML)
+    await approve_group(target_cid, reviewed_by=user.id, title=custom_title)
+    await msg.reply_text(f"✅ گروه <code>{target_cid}</code> با موفقیت تایید و فعال شد.", parse_mode=ParseMode.HTML)
     try:
         await context.bot.send_message(
-            chat_id=cid,
+            chat_id=target_cid,
             text=(
                 "⚡️ <b>پرومته فعال شد!</b>\n\n"
                 "با دستور مستقیم ادمین ارشد، سیستم شناسایی و هوش مصنوعی پرومته در این گروه رسماً تایید و فعال گردید.\n"
                 "هم‌اکنون تمامی قابلیت‌های OSINT، کاوش عمیق وب، تحلیل لایه‌ها و پاسخگویی هوشمند در دسترس شماست.\n\n"
-                "▫️ جهت مشاهده راهنما: <code>/phelp</code> یا منشن نام ربات"
+                "▫️ جهت ارتباط: منشن کردن نام «پرومته» یا ریپلای روی پیام‌های ربات"
             ),
             parse_mode=ParseMode.HTML
         )
+    except Exception:
+        pass
     except Exception:
         pass
 

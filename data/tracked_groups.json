@@ -1,0 +1,31 @@
+{
+  "-10055443322": {
+    "chat_id": -10055443322,
+    "status": "left"
+  },
+  "-1003949505012": {
+    "chat_id": -1003949505012,
+    "title": "OSINT Community",
+    "status": "approved",
+    "added_at": "2026-09-18 12:33:51",
+    "username": "osint_community"
+  },
+  "-3949505012": {
+    "chat_id": -3949505012,
+    "title": "OSINT Community",
+    "status": "approved",
+    "added_at": "2026-09-18 12:33:51"
+  },
+  "-10077889900": {
+    "chat_id": -10077889900,
+    "title": "Admin Testing Group",
+    "status": "approved",
+    "added_at": "2026-09-18 12:33:51"
+  },
+  "-77889900": {
+    "chat_id": -77889900,
+    "title": "Admin Testing Group",
+    "status": "approved",
+    "added_at": "2026-09-18 12:33:51"
+  }
+}

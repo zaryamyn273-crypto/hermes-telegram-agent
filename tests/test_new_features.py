@@ -147,3 +147,71 @@ async def test_leavegroup_command_admin_only():
     await leavegroup_command(update, context)
     context.bot.leave_chat.assert_called_with(chat_id=-10055443322)
     assert _TRACKED_GROUPS.get(-10055443322, {}).get("status") == "left"
+
+
+@pytest.mark.asyncio
+async def test_approved_group_no_duplicate_requests_from_new_users():
+    """
+    Verifies that once a group is approved, ANY user (even a brand new user who has never
+    spoken to the bot) can send messages without triggering an approval request to the admin.
+    """
+    from tools.moderation import approve_group, get_group_status, is_group_approved
+
+    test_cid = -1003949505012
+    admin_id = 8814471014
+    await approve_group(test_cid, reviewed_by=admin_id, title="OSINT Community")
+
+    assert is_group_approved(test_cid) is True
+    assert get_group_status(test_cid) == "approved"
+
+    # Now a completely new user who has never messaged before speaks in the group
+    update = MagicMock()
+    context = MagicMock()
+    context.bot.send_message = AsyncMock()
+
+    update.effective_chat.type = ChatType.SUPERGROUP
+    update.effective_chat.id = test_cid
+    update.effective_chat.title = "OSINT Community"
+    update.effective_chat.username = "osint_community"
+
+    update.effective_user.id = 99887766  # Brand new user
+    update.effective_user.username = "brand_new_user"
+    update.effective_user.full_name = "New User"
+
+    # Moderation guard check
+    res = await _check_moderation_guard(update, context)
+    assert res is True  # Permitted through!
+    # No approval request sent to admin!
+    context.bot.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_admin_interaction_auto_approves_group():
+    """
+    Verifies that if a bot administrator speaks in any group, the group is
+    automatically and permanently approved on the spot.
+    """
+    from tools.moderation import get_group_status, _TRACKED_GROUPS
+
+    new_cid = -10077889900
+    admin_id = 8814471014
+
+    _TRACKED_GROUPS.pop(new_cid, None)
+
+    update = MagicMock()
+    context = MagicMock()
+    context.bot.send_message = AsyncMock()
+
+    update.effective_chat.type = ChatType.SUPERGROUP
+    update.effective_chat.id = new_cid
+    update.effective_chat.title = "Admin Testing Group"
+    update.effective_chat.username = ""
+
+    update.effective_user.id = admin_id
+    update.effective_user.username = "admin"
+    update.effective_user.full_name = "Bot Admin"
+
+    res = await _check_moderation_guard(update, context)
+    assert res is True
+    # Group must now be automatically approved!
+    assert get_group_status(new_cid) == "approved"

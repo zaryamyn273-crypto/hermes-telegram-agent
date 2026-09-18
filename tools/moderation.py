@@ -52,6 +52,71 @@ _TRACKED_GROUPS: Dict[int, Dict[str, Any]] = {}
 # Track pending notification sent to admins so we don't spam them on every message
 _PENDING_NOTIFIED_CHATS: Set[int] = set()
 
+_GROUPS_JSON_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "tracked_groups.json")
+
+
+def _normalize_chat_ids(chat_id: Union[int, str]) -> List[int]:
+    """Generates all standard variations of Telegram chat IDs (e.g. -100123, -123, 123)."""
+    try:
+        cid = int(chat_id)
+    except (ValueError, TypeError):
+        return []
+    variants = [cid]
+    s = str(cid)
+    if s.startswith("-100"):
+        variants.append(int("-" + s[4:]))
+        variants.append(int(s[4:]))
+    elif s.startswith("-"):
+        variants.append(int("-100" + s[1:]))
+        variants.append(int(s[1:]))
+    else:
+        variants.append(int("-" + s))
+        variants.append(int("-100" + s))
+    return list(dict.fromkeys(variants))
+
+
+def _load_groups_from_file():
+    """Loads approved and tracked groups from persistent JSON file."""
+    if not os.path.exists(_GROUPS_JSON_PATH):
+        return
+    try:
+        with open(_GROUPS_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            with _MOD_LOCK:
+                for cid_str, item in data.items():
+                    try:
+                        cid = int(cid_str)
+                        st = item.get("status")
+                        _TRACKED_GROUPS[cid] = item
+                        for var_id in _normalize_chat_ids(cid):
+                            _TRACKED_GROUPS[var_id] = item
+                            if st in ("approved", "active"):
+                                _PENDING_NOTIFIED_CHATS.add(var_id)
+                    except (ValueError, TypeError):
+                        pass
+        logger.info(f"Loaded {len(_TRACKED_GROUPS)} group mappings from {_GROUPS_JSON_PATH}.")
+    except Exception as e:
+        logger.warning(f"Failed to load tracked groups from {_GROUPS_JSON_PATH}: {e}")
+
+
+def _save_groups_to_file():
+    """Persists approved and tracked groups to JSON file."""
+    try:
+        os.makedirs(os.path.dirname(_GROUPS_JSON_PATH), exist_ok=True)
+        save_dict = {}
+        with _MOD_LOCK:
+            for cid, item in _TRACKED_GROUPS.items():
+                if isinstance(cid, int) and cid < 0:
+                    save_dict[str(cid)] = item
+        with open(_GROUPS_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(save_dict, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save tracked groups to {_GROUPS_JSON_PATH}: {e}")
+
+
+# Pre-load persistent groups immediately on module import
+_load_groups_from_file()
+
 # In-memory fast cache for custom settings & directives (key_name -> dict)
 _ADMIN_SETTINGS: Dict[str, Dict[str, Any]] = {}
 
@@ -226,15 +291,22 @@ async def refresh_moderation_caches():
     # 5. Tracked Groups & Approvals
     res_tgroups = await database.execute_d1_query("SELECT * FROM tracked_groups")
     if res_tgroups.get("success"):
-        with _MOD_LOCK:
-            _TRACKED_GROUPS.clear()
-            for r in res_tgroups.get("results", []):
-                cid = r.get("chat_id")
-                if cid:
-                    int_cid = int(cid)
-                    _TRACKED_GROUPS[int_cid] = r
-                    if r.get("status") == "pending":
-                        _PENDING_NOTIFIED_CHATS.add(int_cid)
+        results = res_tgroups.get("results", [])
+        if results:
+            with _MOD_LOCK:
+                for r in results:
+                    cid = r.get("chat_id")
+                    if cid:
+                        int_cid = int(cid)
+                        _TRACKED_GROUPS[int_cid] = r
+                        for vid in _normalize_chat_ids(int_cid):
+                            _TRACKED_GROUPS[vid] = r
+                            if r.get("status") in ("approved", "active"):
+                                _PENDING_NOTIFIED_CHATS.add(vid)
+                            elif r.get("status") == "pending":
+                                _PENDING_NOTIFIED_CHATS.add(vid)
+    # Ensure persistent file groups are hydrated
+    _load_groups_from_file()
 
     # 6. Admin Custom Settings & Directives
     res_settings = await database.execute_d1_query("SELECT key_name, data_value, category, updated_at FROM custom_data_store")
@@ -351,30 +423,28 @@ def is_group_muted(chat_id: int) -> Tuple[bool, float]:
     return False, 0.0
 
 
+def get_group_status(chat_id: int) -> str:
+    """Returns group status: 'approved', 'pending', 'rejected', or 'unknown'."""
+    if not chat_id:
+        return "unknown"
+    variants = _normalize_chat_ids(chat_id)
+    with _MOD_LOCK:
+        for vid in variants:
+            rec = _TRACKED_GROUPS.get(vid)
+            if rec:
+                st = rec.get("status", "pending")
+                if st in ("active", "approved"):
+                    return "approved"
+                return st
+    return "unknown"
+
+
 def is_group_approved(chat_id: int) -> bool:
     """
     Returns True if the group is verified/approved to use the bot.
     New groups added by non-admins require bot admin approval first.
     """
-    if not chat_id:
-        return False
-    with _MOD_LOCK:
-        rec = _TRACKED_GROUPS.get(int(chat_id))
-        if not rec:
-            return False
-        return rec.get("status") in ("active", "approved")
-
-
-def get_group_status(chat_id: int) -> str:
-    """Returns group status: 'approved', 'pending', 'rejected', or 'unknown'."""
-    with _MOD_LOCK:
-        rec = _TRACKED_GROUPS.get(int(chat_id))
-        if not rec:
-            return "unknown"
-        st = rec.get("status", "pending")
-        if st in ("active", "approved"):
-            return "approved"
-        return st
+    return get_group_status(chat_id) == "approved"
 
 
 # =========================================================================
@@ -708,35 +778,45 @@ async def register_group_event(
     """
     cid = int(chat_id)
     clean_username = (username or "").lstrip("@").strip()
+    variants = _normalize_chat_ids(cid)
 
     with _MOD_LOCK:
-        existing = _TRACKED_GROUPS.get(cid)
-        if existing:
-            if title and title != "گروه":
-                existing["title"] = title
-            if clean_username:
-                existing["username"] = clean_username
-            if member_count > 0:
-                existing["member_count"] = member_count
-            if is_admin(added_by_id):
-                existing["status"] = "approved"
-                asyncio.create_task(database.execute_d1_query(
-                    "UPDATE tracked_groups SET status = 'approved', added_by = ?, title = CASE WHEN ? != '' THEN ? ELSE title END WHERE chat_id = ?",
-                    [added_by_id, title or "", title or "", cid]
-                ))
-                return "approved", False
-            current_status = existing.get("status", "pending")
-            # If already active/approved, keep approved
-            if current_status in ("active", "approved"):
-                return "approved", False
-            if current_status == "banned":
-                return "banned", False
-            if current_status == "rejected":
-                return "rejected", False
-            is_new = (cid not in _PENDING_NOTIFIED_CHATS)
-            if is_new:
-                _PENDING_NOTIFIED_CHATS.add(cid)
-            return "pending", is_new
+        for vid in variants:
+            existing = _TRACKED_GROUPS.get(vid)
+            if existing:
+                if title and title != "گروه":
+                    existing["title"] = title
+                if clean_username:
+                    existing["username"] = clean_username
+                if member_count > 0:
+                    existing["member_count"] = member_count
+                if is_admin(added_by_id):
+                    for v in variants:
+                        if v in _TRACKED_GROUPS:
+                            _TRACKED_GROUPS[v]["status"] = "approved"
+                        else:
+                            _TRACKED_GROUPS[v] = dict(existing, chat_id=v, status="approved")
+                        _PENDING_NOTIFIED_CHATS.add(v)
+                    _save_groups_to_file()
+                    for v in variants:
+                        asyncio.create_task(database.execute_d1_query(
+                            "UPDATE tracked_groups SET status = 'approved', added_by = ?, title = CASE WHEN ? != '' THEN ? ELSE title END WHERE chat_id = ?",
+                            [added_by_id, title or "", title or "", v]
+                        ))
+                    return "approved", False
+
+                current_status = existing.get("status", "pending")
+                if current_status in ("active", "approved"):
+                    return "approved", False
+                if current_status == "banned":
+                    return "banned", False
+                if current_status == "rejected":
+                    return "rejected", False
+                is_new = any(v not in _PENDING_NOTIFIED_CHATS for v in variants)
+                if is_new:
+                    for v in variants:
+                        _PENDING_NOTIFIED_CHATS.add(v)
+                return "pending", is_new
 
     # Not existing yet: evaluate who added the bot
     if is_admin(added_by_id):
@@ -744,7 +824,7 @@ async def register_group_event(
         is_new_pending = False
     else:
         new_status = "pending"
-        is_new_pending = True
+        is_new_pending = any(v not in _PENDING_NOTIFIED_CHATS for v in variants)
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     item = {
@@ -760,41 +840,49 @@ async def register_group_event(
     }
 
     with _MOD_LOCK:
-        _TRACKED_GROUPS[cid] = item
-        if is_new_pending:
-            _PENDING_NOTIFIED_CHATS.add(cid)
+        for vid in variants:
+            _TRACKED_GROUPS[vid] = dict(item, chat_id=vid)
+            _PENDING_NOTIFIED_CHATS.add(vid)
+
+    _save_groups_to_file()
 
     sql = """
     INSERT OR REPLACE INTO tracked_groups
     (chat_id, title, chat_type, member_count, added_by, added_at, username, invite_link, status)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
-    await database.execute_d1_query(sql, [
-        cid, title, chat_type, member_count, added_by_id, now_str, clean_username, "", new_status
-    ])
+    for vid in variants:
+        await database.execute_d1_query(sql, [
+            vid, title, chat_type, member_count, added_by_id, now_str, clean_username, "", new_status
+        ])
 
     return new_status, is_new_pending
 
 
 async def approve_group(chat_id: int, reviewed_by: int = 0, title: str = "") -> bool:
-    """Approves a group for bot operation, persisting to RAM and D1."""
+    """Approves a group for bot operation, persisting to RAM, JSON file, and SQLite."""
     cid = int(chat_id)
+    variants = _normalize_chat_ids(cid)
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with _MOD_LOCK:
-        if cid in _TRACKED_GROUPS:
-            _TRACKED_GROUPS[cid]["status"] = "approved"
-            if title and (not _TRACKED_GROUPS[cid].get("title") or _TRACKED_GROUPS[cid].get("title") == "گروه"):
-                _TRACKED_GROUPS[cid]["title"] = title
-        else:
-            _TRACKED_GROUPS[cid] = {"chat_id": cid, "title": title or "گروه", "status": "approved", "added_at": now_str}
-        _PENDING_NOTIFIED_CHATS.discard(cid)
+        for vid in variants:
+            if vid in _TRACKED_GROUPS:
+                _TRACKED_GROUPS[vid]["status"] = "approved"
+                if title and (not _TRACKED_GROUPS[vid].get("title") or _TRACKED_GROUPS[vid].get("title") == "گروه"):
+                    _TRACKED_GROUPS[vid]["title"] = title
+            else:
+                _TRACKED_GROUPS[vid] = {"chat_id": vid, "title": title or "گروه", "status": "approved", "added_at": now_str}
+            _PENDING_NOTIFIED_CHATS.add(vid)
+
+    _save_groups_to_file()
 
     sql = """
     INSERT INTO tracked_groups (chat_id, title, status, added_at)
     VALUES (?, ?, 'approved', ?)
     ON CONFLICT(chat_id) DO UPDATE SET status = 'approved', title = CASE WHEN ? != '' THEN ? ELSE tracked_groups.title END
     """
-    await database.execute_d1_query(sql, [cid, title or "گروه", now_str, title or "", title or ""])
+    for vid in variants:
+        await database.execute_d1_query(sql, [vid, title or "گروه", now_str, title or "", title or ""])
 
     await log_admin_command(
         admin_id=reviewed_by,
@@ -809,20 +897,25 @@ async def approve_group(chat_id: int, reviewed_by: int = 0, title: str = "") -> 
 async def reject_group(chat_id: int, reviewed_by: int = 0) -> bool:
     """Rejects a group and marks as rejected."""
     cid = int(chat_id)
+    variants = _normalize_chat_ids(cid)
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with _MOD_LOCK:
-        if cid in _TRACKED_GROUPS:
-            _TRACKED_GROUPS[cid]["status"] = "rejected"
-        else:
-            _TRACKED_GROUPS[cid] = {"chat_id": cid, "status": "rejected", "added_at": now_str}
-        _PENDING_NOTIFIED_CHATS.discard(cid)
+        for vid in variants:
+            if vid in _TRACKED_GROUPS:
+                _TRACKED_GROUPS[vid]["status"] = "rejected"
+            else:
+                _TRACKED_GROUPS[vid] = {"chat_id": vid, "status": "rejected", "added_at": now_str}
+            _PENDING_NOTIFIED_CHATS.add(vid)
+
+    _save_groups_to_file()
 
     sql = """
     INSERT INTO tracked_groups (chat_id, status, added_at)
     VALUES (?, 'rejected', ?)
     ON CONFLICT(chat_id) DO UPDATE SET status = 'rejected'
     """
-    await database.execute_d1_query(sql, [cid, now_str])
+    for vid in variants:
+        await database.execute_d1_query(sql, [vid, now_str])
 
     await log_admin_command(
         admin_id=reviewed_by,
