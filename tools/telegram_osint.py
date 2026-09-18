@@ -400,3 +400,7 @@ def format_telegram_osint_report(report: Dict[str, Any]) -> str:
 
     lines.append("\n⚡️ <i>داده‌های کاملاً واقعی و تاییدشده - بدون حدس یا خطای اطلاعاتی</i>")
     return "\n".join(lines)
+
+
+# Alias for backward compatibility
+format_telegram_target_report = format_telegram_osint_report

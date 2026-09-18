@@ -413,19 +413,36 @@ async def augment_osint_prompt(user_prompt: str) -> str:
     elif should_search_web(user_prompt):
         try:
             search_query = extract_search_query(user_prompt)
-            search_data = await search_web_osint(search_query, max_results=3)
-            if search_data.get("success") and search_data.get("results"):
+            search_data = await search_web_osint(search_query, max_results=3, search_depth="advanced", include_answer=True)
+            if search_data.get("success"):
+                ans = search_data.get("answer", "")
                 res_lines = []
-                for r in search_data["results"]:
+                if ans:
+                    res_lines.append(f"• سنتز تحلیلی موتور هوش مصنوعی: {ans}")
+                for r in search_data.get("results", []):
                     res_lines.append(f"• {r.get('title')}: {r.get('snippet')} ({r.get('url')})")
-                augmented_prompt = (
-                    f"{user_prompt}\n\n"
-                    f"[نتایج زنده جستجوی اینترنتی ({search_data.get('engine')} برای '{search_query}')]:\n"
-                    + "\n".join(res_lines)
-                )
-                logger.info(f"Auto-injected web search results for '{search_query}'")
+                if res_lines:
+                    augmented_prompt = (
+                        f"{user_prompt}\n\n"
+                        f"[نتایج زنده جستجوی اینترنتی ({search_data.get('engine')} برای '{search_query}')]:\n"
+                        + "\n".join(res_lines)
+                    )
+                    logger.info(f"Auto-injected web search results for '{search_query}'")
         except Exception as err:
             logger.warning(f"Live web search failed: {err}")
+
+    # Check for Hash / JWT Token mentions
+    if any(k in user_prompt.lower() for k in ["هش", "hash", "jwt", "توکن", "md5", "sha256"]):
+        h_match = re.search(r"\b([a-fA-F0-9]{32,128}|ey[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)\b", user_prompt)
+        if h_match:
+            try:
+                from tools.osint_hash import identify_hash_or_token
+                h_res = identify_hash_or_token(h_match.group(0))
+                if h_res.get("success"):
+                    augmented_prompt = f"{augmented_prompt}\n\n[تحلیل کریپتوگرافیک هش/توکن]: {json.dumps(h_res, ensure_ascii=False)[:800]}"
+                    logger.info("Auto-injected hash/JWT cryptographic intel")
+            except Exception:
+                pass
 
     # Check for Telegram OSINT mentions
     tg_match = re.search(r"(?:t\.me/|telegram\.me/|@)([a-zA-Z0-9_]{4,32})", user_prompt)

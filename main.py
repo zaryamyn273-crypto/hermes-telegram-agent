@@ -133,13 +133,45 @@ from tools.permissions import (
     user_tools_command,
     granted_tools_command,
 )
-from tools.osint_search import search_web_osint, crawl_webpage_layers
-from tools.osint_dork import generate_smart_dorks, execute_smart_dork
+from tools.osint_search import (
+    search_web_osint,
+    crawl_webpage_layers,
+    format_osint_search_results,
+    format_crawler_report,
+)
+from tools.osint_dork import (
+    generate_smart_dorks,
+    execute_smart_dork,
+    format_smart_dorks_report,
+    resolve_category_key,
+)
 from tools.osint_linkedin import search_linkedin_profile, search_linkedin_company
 from tools.osint_github import investigate_github_user, search_github
 from tools.osint_username import search_username_across_platforms
-from tools.osint_network import resolve_dns_records, enumerate_subdomains_crtsh, lookup_ip_intel
+from tools.osint_network import (
+    resolve_dns_records,
+    enumerate_subdomains_crtsh,
+    lookup_ip_intel,
+    inspect_ssl_certificate,
+    audit_http_security_headers,
+    format_ssl_report,
+    format_http_headers_report,
+)
+from tools.osint_hash import (
+    identify_hash_or_token,
+    analyze_jwt_token,
+    format_hash_report,
+)
 from tools.osint_email_phone import investigate_email, analyze_phone_number
+from tools.public_db_intel import (
+    query_public_intel_databases,
+    query_wayback_snapshots,
+    format_public_intel_report,
+)
+from tools.telegram_osint import (
+    investigate_telegram_target,
+    format_telegram_target_report,
+)
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -1326,6 +1358,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 👤 <b>ردیابی نام‌کاربری:</b> <code>/pb_usercheck [یوزرنیم]</code> در ۲۵+ پلتفرم\n"
         "• 📡 <b>رکوردهای کامل DNS:</b> <code>/pb_dns [دامنه]</code>\n"
         "• 🌐 <b>کشف ساب‌دامین‌ها:</b> <code>/pb_subdomains [دامنه]</code>\n"
+        "• 🔒 <b>بازرسی گواهی SSL و ساب‌دامین‌های SAN:</b> <code>/pb_ssl [دامنه]</code>\n"
+        "• 🛡 <b>ارزیابی هدرهای امنیتی وب:</b> <code>/pb_headers [سایت]</code>\n"
+        "• 🔐 <b>شناسایی هش و تحلیل توکن:</b> <code>/pb_hash [هش/JWT]</code>\n"
         "• 🌍 <b>شناسایی و مکان‌یابی IP:</b> <code>/pb_ip [آدرس IP یا دامنه]</code>\n"
         "• 📧 <b>تحلیل ایمیل:</b> <code>/pb_email [ایمیل]</code>\n"
         "• 📞 <b>تحلیل شماره تلفن:</b> <code>/pb_phone [شماره]</code>\n"
@@ -1359,14 +1394,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔍 <b>ابزارهای تخصصی اوسینت و وب:</b>\n"
         "• <code>/pb_tg [یوزر/آیدی/ریپلای]</code> - استخراج آیدی عددی، پروفایل و ردگیری تلگرام\n"
         "• <code>/pb_db [هدف]</code> - استعلام آرشیو Wayback Machine، نشت‌های عمومی و CVE\n"
-        "• <code>/pb_osint [عبارت]</code> یا <code>/pb_search</code> - جستجوی همزمان چندموتوره در وب\n"
+        "• <code>/pb_osint [عبارت]</code> یا <code>/pb_search</code> - جستجوی همزمان چندموتوره در وب (مجهز به Tavily AI)\n"
         "• <code>/pb_crawl [لینک]</code> - کاوش لایه‌های صفحه، کشف ایمیل‌ها، شماره‌ها و ساختار وب‌سایت\n"
-        "• <code>/pb_dork [هدف]</code> - تولید و اجرای دورک‌های هدفمند گوگل برای نفوذ، اسناد و دایرکتوری‌ها\n"
+        "• <code>/pb_dork [هدف]</code> - تولید و اجرای دورک‌های هدفمند گوگل برای نفوذ، اسناد، گیت و دایرکتوری‌ها\n"
         "• <code>/pb_github [کاربر]</code> - تحلیل اکانت گیت‌هاب، استخراج ایمیل از کامیت‌ها و کلیدهای SSH\n"
         "• <code>/pb_linkedin [نام/شرکت]</code> - کشف سوابق و پروفایل‌های لینکدین\n"
         "• <code>/pb_usercheck [نام کاربری]</code> - استعلام فوری یوزرنیم در ۲۵+ پلتفرم مطرح جهانی\n"
         "• <code>/pb_dns [دامنه]</code> - تفکیک کلیه رکوردهای DNS دامنه\n"
         "• <code>/pb_subdomains [دامنه]</code> - استخراج تمامی ساب‌دامین‌ها از لاگ‌های گواهی امنیتی\n"
+        "• <code>/pb_ssl [دامنه]</code> - بازرسی گواهی امنیتی SSL/TLS و کشف ساب‌دامین‌های پنهان در SANs\n"
+        "• <code>/pb_headers [سایت]</code> - ارزیابی هدرهای امنیتی وب (HSTS, CSP) و محاسبه رتبه OWASP\n"
+        "• <code>/pb_hash [هش/JWT]</code> - شناسایی بیش از ۱۵ الگوریتم هش، کالبدشکافی JWT و محاسبه چکیده مرجع\n"
         "• <code>/pb_ip [IP/دامنه]</code> - موقعیت جغرافیایی، کشور، شهر، ISP و شماره AS\n"
         "• <code>/pb_email [ایمیل]</code> - بررسی صحت، رکوردهای میل‌سرور و پروفایل Gravatar\n"
         "• <code>/pb_phone [شماره]</code> - اعتبارسنجی شماره و تشخیص اپراتور تلفن همراه\n"
@@ -1549,18 +1587,7 @@ async def osint_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
     elapsed = time.perf_counter() - t0
     record_chat_latency(chat.id, elapsed, f"جستجوی وب OSINT ({query[:15]})")
 
-    if not results:
-        await msg.reply_text(f"🔍 هیچ نتیجه‌ای برای «{html.escape(query)}» یافت نشد.", parse_mode=ParseMode.HTML)
-        return
-
-    lines = [f"🌐 <b>نتایج کاوش وب برای:</b> <code>{html.escape(query)}</code>\n"]
-    for i, r in enumerate(results, 1):
-        title = html.escape(r.get("title") or "بدون عنوان")
-        url = r.get("url") or "#"
-        snippet = html.escape(r.get("snippet") or "")
-        lines.append(f"<b>{i}. <a href=\"{url}\">{title}</a></b>\n{snippet}\n")
-
-    report = "\n".join(lines)
+    report = format_osint_search_results(results)
     await _deliver_reply(msg, report)
 
 
@@ -1672,11 +1699,15 @@ async def dork_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔎 <b>موتور تخصصی دورک‌های گوگل (Smart Google Dorking Engine):</b>\n\n"
             "تولید و اجرای دورک‌های نفوذ و اوسینت برای کشف فایل‌های حساس، اطلاعات محرمانه، پورتال‌های ورود و دایرکتوری‌های باز.\n\n"
             "📌 <b>نحوه استفاده:</b>\n"
-            "• <code>/dork example.com</code> (دورک‌های جامع دامنه)\n"
-            "• <code>/dork admin example.com</code> (پورتال‌های ورود و پنل مدیریت)\n"
-            "• <code>/dork files example.com</code> (دایرکتوری‌های باز و ایندکس‌ها)\n"
-            "• <code>/dork docs example.com</code> (اسناد محرمانه PDF, XLSX, DOCX)\n"
-            "• <code>/dork creds example.com</code> (فایل‌های کانفیگ، پسورد و .env)"
+            "• <code>/pb_dork example.com</code> (دورک‌های جامع ۱۲گانه)\n"
+            "• <code>/pb_dork admin example.com</code> (پورتال‌های ورود و پنل مدیریت)\n"
+            "• <code>/pb_dork git example.com</code> (مخازن .git و محیط Docker)\n"
+            "• <code>/pb_dork api example.com</code> (مستندات Swagger و GraphQL)\n"
+            "• <code>/pb_dork files example.com</code> (دایرکتوری‌های باز و Index of)\n"
+            "• <code>/pb_dork docs example.com</code> (اسناد محرمانه PDF, XLSX, DOCX)\n"
+            "• <code>/pb_dork creds example.com</code> (کلیدهای API، رمز عبور و .env)\n"
+            "• <code>/pb_dork sql example.com</code> (بک‌آپ‌ها و دیتابیس‌های لو رفته)\n"
+            "• <code>/pb_dork iot example.com</code> (دوربین‌ها و تجهیزات شبکه)"
         )
         await msg.reply_text(guide, parse_mode=ParseMode.HTML)
         return
@@ -1688,7 +1719,7 @@ async def dork_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     category = None
     target_clean = target
     parts = target.split(None, 1)
-    if len(parts) == 2 and parts[0].lower() in ("sensitive", "admin", "dirs", "files", "docs", "creds", "subdomains", "cloud"):
+    if len(parts) == 2 and resolve_category_key(parts[0]):
         category = parts[0].lower()
         target_clean = parts[1]
 
@@ -1696,16 +1727,7 @@ async def dork_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elapsed = time.perf_counter() - t0
     record_chat_latency(chat.id, elapsed, "تولید دورک گوگل")
 
-    lines = [
-        f"🎯 <b>دورک‌های هوشمند گوگل برای هدف:</b> <code>{html.escape(target_clean)}</code>\n"
-    ]
-    for i, d in enumerate(dorks[:6], 1):
-        name = html.escape(d.get("category_title", ""))
-        dork_query = html.escape(d.get("query", ""))
-        google_url = d.get("google_url", "")
-        lines.append(f"<b>{i}. {name}</b>\n▫️ <code>{dork_query}</code>\n▫️ <a href=\"{google_url}\">جستجوی مستقیم در Google</a>\n")
-
-    text = "\n".join(lines)
+    text = format_smart_dorks_report(target_clean, dorks)
     try:
         await status_msg.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception:
@@ -2145,6 +2167,117 @@ async def phone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     await _deliver_reply(msg, "\n".join(lines))
+
+
+async def ssl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """SSL/TLS certificate inspection: extracts SAN subdomains, issuer, validity, cipher suite."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = args[0].strip() if args else ""
+    if not target and msg.reply_to_message:
+        r_txt = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+        m = re.search(r"[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", r_txt)
+        if m:
+            target = m.group(0)
+
+    if not target:
+        guide = (
+            "🔒 <b>بازرس گواهی‌های امنیتی SSL/TLS (SSL Inspector & SAN Subdomains):</b>\n\n"
+            "استخراج مشخصات رمزنگاری، شناسایی کلیه ساب‌دامین‌های پنهان در SANs، سازمان صادرکننده، وضعیت اعتبار و انقضا.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_ssl google.com</code>\n"
+            "• <code>/pb_ssl target.com:8443</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🔒 <b>در حال برقراری هندشیک TLS و بازرسی گواهی برای:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    res = inspect_ssl_certificate(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"بازرسی SSL ({target[:15]})")
+
+    report = format_ssl_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def headers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """HTTP Security Headers auditor: evaluates HSTS, CSP, X-Frame-Options, server leaks, OWASP grade."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = args[0].strip() if args else ""
+    if not target and msg.reply_to_message:
+        r_txt = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+        m = re.search(r"https?://\S+", r_txt) or re.search(r"[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", r_txt)
+        if m:
+            target = m.group(0)
+
+    if not target:
+        guide = (
+            "🛡 <b>ارزیاب هدرهای امنیتی وب (Security Headers & Technology Audit):</b>\n\n"
+            "بررسی مکانیزم‌های دفاعی HSTS، CSP، ضد کلیک‌جکینگ، نشت نگارش وب‌سرور و محاسبه رتبه امنیتی بر پایه OWASP.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_headers https://example.com</code>\n"
+            "• <code>/pb_headers target.org</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🛡 <b>در حال ارزیابی هدرهای امنیتی وب:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    res = await audit_http_security_headers(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"ارزیابی هدرهای امنیتی ({target[:15]})")
+
+    report = format_http_headers_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def hash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hash & JWT Token analyzer: detects hash types (MD5, SHA256, bcrypt, NTLM) or decodes JWT claims."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    val = " ".join(args).strip()
+    if not val and msg.reply_to_message:
+        val = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
+
+    if not val:
+        guide = (
+            "🔐 <b>تحلیلگر هش و توکن امنیتی (Hash Identifier & JWT Inspector):</b>\n\n"
+            "شناسایی خودکار بیش از ۱۵ الگوریتم هش رمزنگاری (MD5, SHA, bcrypt, NTLM)، کالبدشکافی توکن‌های JWT و محاسبه هش مرجع.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_hash 5d41402abc4b2a76b9719d911017c592</code>\n"
+            "• <code>/pb_hash eyJhbGciOiJIUzI1Ni...</code>\n"
+            "• <code>/pb_hash Password123</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    t0 = time.perf_counter()
+    res = identify_hash_or_token(val)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, "تحلیل هش/توکن")
+
+    report = format_hash_report(res)
+    await _deliver_reply(msg, report)
 
 
 async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5152,6 +5285,9 @@ def build_application():
                 BotCommand("pb_ip", "اطلاعات مکانی و شبکه IP"),
                 BotCommand("pb_email", "تحلیل و بررسی اعتبار ایمیل"),
                 BotCommand("pb_phone", "اعتبارسنجی شماره تماس و کشور"),
+                BotCommand("pb_ssl", "بازرسی گواهی SSL و کشف ساب‌دامین‌های SAN"),
+                BotCommand("pb_headers", "ارزیابی هدرهای امنیتی وب و OWASP"),
+                BotCommand("pb_hash", "شناسایی انواع هش و کالبدشکافی JWT"),
                 BotCommand("pb_scan", "اسکن امنیتی فایل و لینک با VirusTotal"),
                 BotCommand("pb_agent", "ارجاع به مغز تحلیلگر و خودمختار پرومته"),
                 BotCommand("pb_fast", "پاسخ سریع و سبک"),
@@ -5206,6 +5342,9 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["ip", "geo", "asn"]), guard(ip_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["email", "mail"]), guard(email_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["phone", "tel", "mobile"]), guard(phone_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["ssl", "cert", "tls", "certificate"]), guard(ssl_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["headers", "securityheaders", "audit", "security"]), guard(headers_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["hash", "jwt", "token", "checksum"]), guard(hash_command, is_cmd=True)))
 
     # Threat Intelligence & Utilities
     app.add_handler(CommandHandler(make_bot_commands(["scan", "vt", "virustotal", "antivirus"]), guard(scan_command, is_cmd=True)))

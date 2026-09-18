@@ -14,6 +14,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import get_tavily_api_keys
+from utils.formatter import wrap_in_expandable_blockquote
 
 logger = logging.getLogger("OSINT_Search")
 
@@ -57,33 +58,47 @@ _SOCIAL_DOMAINS = {
 # 1. Multi-Engine Fast Web Search
 # =========================================================================
 
-async def search_web_osint(query: str, max_results: int = 7) -> Dict[str, Any]:
+async def search_web_osint(
+    query: str,
+    max_results: int = 7,
+    search_depth: str = "basic",
+    include_answer: bool = True,
+    include_domains: Optional[List[str]] = None,
+    exclude_domains: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """
     High-speed multi-engine search with Tavily primary and DuckDuckGo fallback.
-    Returns: {"success": bool, "engine": str, "query": str, "results": List[dict], "error": str}
+    Returns: {"success": bool, "engine": str, "query": str, "answer": str, "results": List[dict], "error": str}
     """
     clean_query = query.strip()
     if not clean_query:
-        return {"success": False, "engine": "none", "query": "", "results": [], "error": "کوئری جستجو خالی است."}
+        return {"success": False, "engine": "none", "query": "", "answer": "", "results": [], "error": "کوئری جستجو خالی است."}
 
     # 1. Tavily Search
     tavily_keys = get_tavily_api_keys()
     for api_key in tavily_keys:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            payload: Dict[str, Any] = {
+                "api_key": api_key,
+                "query": clean_query,
+                "search_depth": search_depth,
+                "include_answer": include_answer,
+                "max_results": max_results
+            }
+            if include_domains:
+                payload["include_domains"] = include_domains
+            if exclude_domains:
+                payload["exclude_domains"] = exclude_domains
+
+            async with httpx.AsyncClient(timeout=12.0) as client:
                 res = await client.post(
                     "https://api.tavily.com/search",
-                    json={
-                        "api_key": api_key,
-                        "query": clean_query,
-                        "search_depth": "basic",
-                        "include_answer": False,
-                        "max_results": max_results
-                    },
+                    json=payload,
                     headers={"Content-Type": "application/json"}
                 )
                 if res.status_code == 200:
                     data = res.json()
+                    answer = data.get("answer", "") or ""
                     items = []
                     for r in data.get("results", []):
                         items.append({
@@ -92,11 +107,12 @@ async def search_web_osint(query: str, max_results: int = 7) -> Dict[str, Any]:
                             "snippet": r.get("content", ""),
                             "score": r.get("score", 0.0)
                         })
-                    if items:
+                    if items or answer:
                         return {
                             "success": True,
                             "engine": "Tavily",
                             "query": clean_query,
+                            "answer": answer,
                             "results": items,
                             "error": ""
                         }
@@ -449,3 +465,92 @@ def _detect_technologies(headers: httpx.Headers, html_text: str) -> List[str]:
         techs.add("Shopify Platform")
 
     return sorted(list(techs))
+
+
+def format_osint_search_results(res: Dict[str, Any]) -> str:
+    """Formats multi-engine OSINT search results cleanly into Persian Telegram HTML."""
+    if not res.get("success"):
+        return f"🔍 <b>نتیجه‌ای یافت نشد:</b> {html.escape(res.get('error', 'خطا در ارتباط با موتورهای جستجو'))}"
+
+    q = html.escape(res.get("query", ""))
+    engine = res.get("engine", "Web")
+    engine_badge = "⚡️ Tavily AI OSINT" if engine == "Tavily" else f"🌐 {engine}"
+    lines = [
+        f"🌐 <b>نتایج کاوش وب (OSINT Search)</b> [{engine_badge}]\n"
+        f"🎯 <b>کوئری:</b> <code>{q}</code>\n"
+    ]
+
+    answer = res.get("answer", "")
+    if answer:
+        ans_clean = html.escape(answer.strip())
+        lines.append(f"💡 <b>سنتز و تحلیل هوشمند (Intelligence Synthesis):</b>\n{wrap_in_expandable_blockquote(ans_clean)}\n")
+
+    results = res.get("results", [])
+    if results:
+        lines.append(f"📚 <b>منابع و مستندات کشف‌شده ({len(results)} مورد):</b>")
+        for i, r in enumerate(results, 1):
+            title = html.escape(r.get("title") or "بدون عنوان")
+            url = r.get("url") or "#"
+            snippet = html.escape(r.get("snippet") or "")
+            score_txt = f" [امتیاز: {r['score']:.2f}]" if r.get("score") else ""
+            lines.append(f"<b>{i}. <a href=\"{url}\">{title}</a></b>{score_txt}\n{snippet}\n")
+    else:
+        if not answer:
+            lines.append("موردی برای این جستجو یافت نشد.")
+
+    lines.append("⚡️ <i>جستجوی چندلایه اینترنت و وب تاریک/روشن - ۱۰۰٪ مستند</i>")
+    return "\n".join(lines)
+
+
+def format_crawler_report(data: Dict[str, Any]) -> str:
+    """Formats deep webpage layer crawl results into Persian Telegram HTML."""
+    if not data.get("success"):
+        return f"❌ <b>خطا در کاوش صفحه:</b> {html.escape(str(data.get('error', 'ناشناخته')))}"
+
+    title = html.escape(data.get("title") or "بدون عنوان")
+    url = html.escape(data.get("final_url") or data.get("url") or "")
+    status_code = data.get("status_code", 0)
+    tech = data.get("technologies") or []
+    emails = data.get("emails") or []
+    phones = data.get("phones") or []
+    wallets = data.get("crypto") or {}
+    subdomains = data.get("subdomains") or []
+    internal_links = data.get("internal_links") or []
+    external_links = data.get("external_links") or []
+
+    lines = [
+        "🎯 <b>گزارش کاوش عمیق لایه‌های وب (Webpage Layer Analysis)</b>\n",
+        f"🔗 <b>آدرس:</b> <code>{url}</code>",
+        f"📄 <b>عنوان:</b> {title}",
+        f"📡 <b>کد وضعیت:</b> <code>{status_code}</code>",
+    ]
+
+    if tech:
+        lines.append(f"\n⚙️ <b>فناوری‌ها و سرور شناسایی‌شده:</b> {html.escape(', '.join(tech))}")
+
+    if emails:
+        lines.append(f"\n📧 <b>ایمیل‌های کشف‌شده ({len(emails)}):</b>")
+        for em in emails[:8]:
+            lines.append(f"  • <code>{html.escape(em)}</code>")
+
+    if phones:
+        lines.append(f"\n📞 <b>شماره‌های تماس ({len(phones)}):</b>")
+        for ph in phones[:8]:
+            lines.append(f"  • <code>{html.escape(ph)}</code>")
+
+    active_wallets = {k: v for k, v in wallets.items() if v}
+    if active_wallets:
+        lines.append("\n💰 <b>آدرس‌های کیف‌پول رمزارز:</b>")
+        for wtype, wlist in active_wallets.items():
+            for w in wlist[:3]:
+                lines.append(f"  • {wtype.upper()}: <code>{html.escape(w)}</code>")
+
+    if subdomains:
+        lines.append(f"\n🌐 <b>ساب‌دامین‌های استخراج‌شده ({len(subdomains)}):</b>")
+        for s in subdomains[:6]:
+            lines.append(f"  • <code>{html.escape(s)}</code>")
+
+    lines.append(f"\n🔗 <b>آمار لینک‌ها:</b> داخلی: <code>{len(internal_links)}</code> | خارجی: <code>{len(external_links)}</code>")
+    lines.append("\n⚡️ <i>کاوش بلادرنگ ساختار و متاداده صفحه وب</i>")
+    return "\n".join(lines)
+

@@ -16,12 +16,40 @@ Covers:
 
 import pytest
 import asyncio
-from tools.osint_search import search_web_osint, crawl_webpage_layers
-from tools.osint_dork import generate_smart_dorks, execute_smart_dork
+from tools.osint_search import (
+    search_web_osint,
+    crawl_webpage_layers,
+    format_osint_search_results,
+    format_crawler_report,
+)
+from tools.osint_dork import (
+    generate_smart_dorks,
+    execute_smart_dork,
+    format_smart_dorks_report,
+    resolve_category_key,
+)
 from tools.osint_github import investigate_github_user, search_github
 from tools.osint_linkedin import search_linkedin_profile, search_linkedin_company
 from tools.osint_username import search_username_across_platforms, PLATFORMS
-from tools.osint_network import resolve_dns_records, enumerate_subdomains_crtsh, lookup_ip_intel
+from tools.osint_network import (
+    resolve_dns_records,
+    enumerate_subdomains_crtsh,
+    lookup_ip_intel,
+    inspect_ssl_certificate,
+    audit_http_security_headers,
+    format_ssl_report,
+    format_http_headers_report,
+)
+from tools.osint_hash import (
+    identify_hash_or_token,
+    analyze_jwt_token,
+    format_hash_report,
+)
+from tools.public_db_intel import (
+    query_wayback_snapshots,
+    query_public_intel_databases,
+    format_public_intel_report,
+)
 from tools.osint_email_phone import investigate_email, analyze_phone_number
 from agent_engine import (
     sanitize_identity,
@@ -204,3 +232,106 @@ async def test_group_ram_memory_quota_50():
     clear_session(group2_id)
     assert len(get_session_history(group1_id)) == 0
     assert len(get_session_history(group2_id)) == 0
+
+
+@pytest.mark.asyncio
+async def test_ssl_certificate_inspection():
+    cert = inspect_ssl_certificate("google.com")
+    assert cert["success"] is True
+    assert cert["domain"] == "google.com"
+    assert "sans" in cert
+    assert len(cert["sans"]) > 0
+    assert cert["tls_version"].startswith("TLS")
+    rep = format_ssl_report(cert)
+    assert "گزارش بازرسی گواهی امنیتی SSL/TLS" in rep
+    assert "google.com" in rep
+
+
+@pytest.mark.asyncio
+async def test_audit_http_security_headers():
+    data = await audit_http_security_headers("https://example.com")
+    assert data["success"] is True
+    assert "grade" in data
+    assert "findings" in data
+    assert len(data["findings"]) >= 4
+    rep = format_http_headers_report(data)
+    assert "ارزیابی هدرهای امنیتی وب" in rep
+
+
+def test_hash_and_jwt_analyzer():
+    # 1. MD5 identification
+    r_md5 = identify_hash_or_token("5d41402abc4b2a76b9719d911017c592")
+    assert r_md5["success"] is True
+    names = [m["name"] for m in r_md5["matches"]]
+    assert "MD5" in names
+
+    # 2. SHA-256 identification
+    r_sha = identify_hash_or_token("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    assert r_sha["success"] is True
+    assert any(m["name"] == "SHA-256" for m in r_sha["matches"])
+
+    # 3. bcrypt identification
+    r_bc = identify_hash_or_token("$2a$12$e8AQKp0pTz9L1QZ1fCqSVe3H5O9Uq1bE5k3v2L1J6j5Q4W3E2R1T0")
+    assert r_bc["success"] is True
+    assert any(m["name"] == "bcrypt" for m in r_bc["matches"])
+
+    # 4. JWT Token analysis
+    test_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    r_jwt = identify_hash_or_token(test_jwt)
+    assert r_jwt["success"] is True
+    assert r_jwt["type"] == "JWT"
+    assert r_jwt["jwt_data"]["is_jwt"] is True
+    assert r_jwt["jwt_data"]["subject"] == "1234567890"
+    rep_jwt = format_hash_report(r_jwt)
+    assert "توکن امنیتی JWT" in rep_jwt
+
+    # 5. Plaintext reference computation
+    r_plain = identify_hash_or_token("password123")
+    assert "computed_hashes" in r_plain
+    assert r_plain["computed_hashes"]["md5"] == "482c811da5d5b4bc6d497ffa98491e38"
+
+
+def test_google_dorking_expansion_and_aliases():
+    # 1. Total dorks check across 12 categories
+    all_dorks = generate_smart_dorks("testtarget.com")
+    assert len(all_dorks) >= 25
+
+    # 2. Category aliases resolution
+    assert resolve_category_key("git") == "exposed_git_docker"
+    assert resolve_category_key("docker") == "exposed_git_docker"
+    assert resolve_category_key("api") == "swagger_api_docs"
+    assert resolve_category_key("swagger") == "swagger_api_docs"
+    assert resolve_category_key("iot") == "iot_cameras"
+    assert resolve_category_key("db") == "database_dumps"
+    assert resolve_category_key("sql") == "database_dumps"
+
+    # 3. Targeted generation
+    git_dorks = generate_smart_dorks("testtarget.com", category="git")
+    assert len(git_dorks) >= 2
+    assert all("testtarget.com" in d["query"] for d in git_dorks)
+
+    # 4. Report formatting
+    rep = format_smart_dorks_report("testtarget.com", git_dorks)
+    assert "دورک‌های هوشمند گوگل برای هدف:" in rep
+    assert "testtarget.com" in rep
+
+
+@pytest.mark.asyncio
+async def test_wayback_machine_cdx_prefix():
+    data = await query_wayback_snapshots("example.com", limit=2)
+    if not data.get("success") and "خطا در ارتباط" in str(data.get("error", "")):
+        pytest.skip("Wayback CDX API transient external timeout")
+    assert data["success"] is True
+    assert "snapshots" in data
+    assert len(data["snapshots"]) > 0
+    assert data["snapshots"][0]["status"] == "200"
+
+
+@pytest.mark.asyncio
+async def test_tavily_search_formatting():
+    data = await search_web_osint("python asyncio tutorial", max_results=2)
+    assert data["success"] is True
+    formatted = format_osint_search_results(data)
+    assert "نتایج کاوش وب (OSINT Search)" in formatted
+    assert "python" in formatted.lower() or "asyncio" in formatted.lower()
+

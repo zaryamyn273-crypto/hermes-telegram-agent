@@ -9,6 +9,7 @@ Specialized module for:
 - Zero-hallucination, 100% verified intelligence reporting
 """
 
+import asyncio
 import re
 import html
 import logging
@@ -37,34 +38,42 @@ async def query_wayback_snapshots(target_url: str, limit: int = 5) -> Dict[str, 
 
     cdx_url = (
         f"https://web.archive.org/cdx/search/cdx"
-        f"?url={clean_target}/*&output=json&fl=timestamp,original,mimetype,statuscode,digest"
+        f"?url={clean_target}&matchType=prefix&output=json&fl=timestamp,original,mimetype,statuscode,digest"
         f"&filter=statuscode:200&collapse=digest&limit={limit}"
     )
 
     snapshots: List[Dict[str, Any]] = []
-    try:
-        async with httpx.AsyncClient(headers=_HEADERS, timeout=12.0) as client:
-            resp = await client.get(cdx_url)
-            if resp.status_code == 200:
-                data = resp.json()
-                # First row is headers: ["timestamp", "original", "mimetype", "statuscode", "digest"]
-                if len(data) > 1:
-                    for row in data[1:]:
-                        if len(row) >= 4:
-                            ts, orig, mime, status = row[0], row[1], row[2], row[3]
-                            archive_url = f"https://web.archive.org/web/{ts}/{orig}"
-                            formatted_date = f"{ts[:4]}/{ts[4:6]}/{ts[6:8]} {ts[8:10]}:{ts[10:12]}"
-                            snapshots.append({
-                                "date": formatted_date,
-                                "timestamp": ts,
-                                "original_url": orig,
-                                "archive_url": archive_url,
-                                "mimetype": mime,
-                                "status": status,
-                            })
-    except Exception as e:
-        logger.warning(f"Wayback Machine query failed for {target_url}: {e}")
-        return {"success": False, "error": f"خطا در ارتباط با آرشیو جهانی: {str(e)}"}
+    last_err = ""
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(headers=_HEADERS, timeout=15.0) as client:
+                resp = await client.get(cdx_url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # First row is headers: ["timestamp", "original", "mimetype", "statuscode", "digest"]
+                    if len(data) > 1:
+                        for row in data[1:]:
+                            if len(row) >= 4:
+                                ts, orig, mime, status = row[0], row[1], row[2], row[3]
+                                archive_url = f"https://web.archive.org/web/{ts}/{orig}"
+                                formatted_date = f"{ts[:4]}/{ts[4:6]}/{ts[6:8]} {ts[8:10]}:{ts[10:12]}"
+                                snapshots.append({
+                                    "date": formatted_date,
+                                    "timestamp": ts,
+                                    "original_url": orig,
+                                    "archive_url": archive_url,
+                                    "mimetype": mime,
+                                    "status": status,
+                                })
+                    last_err = ""
+                    break
+        except Exception as e:
+            last_err = str(e)
+            logger.warning(f"Wayback Machine query attempt {attempt+1} failed for {target_url}: {e}")
+            await asyncio.sleep(1.0)
+
+    if last_err and not snapshots:
+        return {"success": False, "error": f"خطا در ارتباط با آرشیو جهانی: {last_err}"}
 
     return {
         "success": True,
