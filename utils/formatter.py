@@ -409,20 +409,13 @@ def markdown_to_telegram_html(text: str) -> str:
         return ""
 
     text = strip_thinking(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
 
     # 1. Convert raw HTML tables to aligned Unicode box tables
     text = convert_html_tables_to_box(text)
 
     # 2. Convert raw markdown tables to aligned Unicode box tables
     text = convert_markdown_tables_to_box(text)
-
-    # 2.5 Protect raw HTML blockquotes (<blockquote ...>...</blockquote>)
-    raw_bqs = []
-    def _save_raw_bq(match):
-        raw_bqs.append(match.group(0))
-        return f"###RBQ{len(raw_bqs)-1}###"
-
-    text = re.sub(r"<blockquote(?:\s+[^>]*)?>[\s\S]*?</blockquote>", _save_raw_bq, text, flags=re.IGNORECASE)
 
     # 3. Protect code blocks (```code```)
     code_blocks = []
@@ -441,7 +434,7 @@ def markdown_to_telegram_html(text: str) -> str:
 
     text = re.sub(r"```([a-zA-Z0-9_\-+]*)\n?([\s\S]*?)```", _save_code_block, text)
 
-    # 3. Protect inline code (`code`)
+    # 4. Protect inline code (`code`)
     inline_codes = []
     def _save_inline_code(match):
         code = match.group(1)
@@ -450,6 +443,17 @@ def markdown_to_telegram_html(text: str) -> str:
         return f"###IC{len(inline_codes)-1}###"
 
     text = re.sub(r"`([^`\n]+)`", _save_inline_code, text)
+
+    # 5. Protect raw HTML blockquotes (<blockquote ...>...</blockquote>) preserving tags while allowing inner markdown formatting
+    raw_bqs = []
+    def _save_raw_bq(match):
+        open_tag = match.group(1)
+        inner_body = match.group(2)
+        idx = len(raw_bqs)
+        raw_bqs.append(open_tag)
+        return f"###RBQ_OPEN_{idx}###\n{inner_body}\n###RBQ_CLOSE_{idx}###"
+
+    text = re.sub(r"(<blockquote(?:\s+[^>]*)?>)([\s\S]*?)(</blockquote>)", _save_raw_bq, text, flags=re.IGNORECASE)
 
     # 4. Protect Blockquotes (> text, >! text for expandable, >> text)
     bqs = []
@@ -516,8 +520,9 @@ def markdown_to_telegram_html(text: str) -> str:
         text = text.replace(f"###BQ{idx}###", f"{tag_open}{escaped_bq}</blockquote>")
 
     # 14.5 Restore raw HTML blockquotes
-    for idx, raw_bq in enumerate(raw_bqs):
-        text = text.replace(f"###RBQ{idx}###", raw_bq)
+    for idx, open_tag in enumerate(raw_bqs):
+        text = text.replace(f"###RBQ_OPEN_{idx}###", open_tag)
+        text = text.replace(f"###RBQ_CLOSE_{idx}###", "</blockquote>")
 
     # 15. Restore inline codes & code blocks
     for idx, tag in enumerate(inline_codes):

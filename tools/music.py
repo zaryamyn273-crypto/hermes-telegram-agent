@@ -199,9 +199,9 @@ async def _crawl_portal_fast(
                 if len(candidates_pages) >= 5:
                     break
 
-            for href, clean_title in candidates_pages:
+            async def _inspect_candidate_page(href: str, clean_title: str) -> Optional[Dict[str, Any]]:
                 try:
-                    p_res = await client.get(href, timeout=4.0)
+                    p_res = await client.get(href, timeout=3.5)
                     if p_res.status_code == 200:
                         mp3s = re.findall(r"""href=["\x27](https?://[^\s"\x27]+\.mp3)""", p_res.text, re.IGNORECASE)
                         valid_mp3s = [
@@ -226,6 +226,14 @@ async def _crawl_portal_fast(
                             }
                 except Exception as sub_err:
                     logger.debug(f"Candidate page fetch note ({href}): {sub_err}")
+                return None
+
+            sub_tasks = [_inspect_candidate_page(h, t) for h, t in candidates_pages[:4]]
+            if sub_tasks:
+                sub_results = await asyncio.gather(*sub_tasks, return_exceptions=True)
+                for cand in sub_results:
+                    if isinstance(cand, dict) and cand.get("url"):
+                        return cand
     except Exception as e:
         logger.debug(f"Portal crawl error ({url_pattern}): {e}")
 
@@ -379,14 +387,33 @@ async def search_and_stream_music(clean_q: str) -> Optional[Tuple[Dict[str, Any]
     # 3. Sort candidates: prioritize 320kbps
     unique_candidates.sort(key=lambda c: 0 if "320" in c.get("quality", "") else 1)
 
-    # 4. Stream download candidate audio with early exit upon first working track
-    for cand in unique_candidates[:4]:
-        url = cand["url"]
-        logger.info(f"Attempting MP3 stream for '{clean_q}' from: {url}")
-        raw = await download_mp3_stream(url, timeout_sec=12.0)
-        if raw and len(raw) >= 80_000:
-            logger.info(f"Successfully streamed {len(raw)} bytes for '{clean_q}'")
-            return cand, raw
+    # 4. Stream download candidate audio concurrently with early exit upon first working track
+    async def _try_download(cand: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], bytes]]:
+        url = cand.get("url", "")
+        try:
+            logger.info(f"Attempting concurrent MP3 stream for '{clean_q}' from: {url}")
+            raw = await download_mp3_stream(url, timeout_sec=10.0)
+            if raw and len(raw) >= 80_000:
+                logger.info(f"Successfully streamed {len(raw)} bytes for '{clean_q}'")
+                return cand, raw
+        except Exception as e:
+            logger.debug(f"Candidate stream failed for {url}: {e}")
+        return None
+
+    top_candidates = unique_candidates[:4]
+    if top_candidates:
+        tasks = [asyncio.create_task(_try_download(c)) for c in top_candidates]
+        try:
+            for completed in asyncio.as_completed(tasks):
+                res = await completed
+                if res:
+                    # Cancel remaining tasks immediately to conserve network bandwidth and memory
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+                    return res
+        except Exception as ex:
+            logger.debug(f"Error during concurrent music downloads: {ex}")
 
     # 5. Fallback to Deezer if available
     deezer_cand = await _search_deezer_fast(client, clean_q)
@@ -445,7 +472,8 @@ async def handle_music_request(
     action_task = asyncio.create_task(_action_loop())
 
     try:
-        cache_key = f"MUSIC_FID_{clean_q.replace(' ', '_')}"
+        norm_q = database.normalize_persian_text(clean_q).lower()
+        cache_key = f"MUSIC_FID_{norm_q.replace(' ', '_')}"
 
         # 2. Check KV Cache for Instant file_id Redelivery
         cached_file_id = await database.kv_get(cache_key)

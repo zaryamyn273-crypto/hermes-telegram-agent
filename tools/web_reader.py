@@ -248,7 +248,7 @@ async def search_web_live(query: str, max_results: int = 3) -> Optional[str]:
                         "max_results": max_results,
                         "search_depth": "basic",
                     },
-                    timeout=4.5
+                    timeout=3.5
                 )
                 if r.status_code == 200:
                     data = r.json()
@@ -264,6 +264,8 @@ async def search_web_live(query: str, max_results: int = 3) -> Optional[str]:
                         summary = "\n\n".join(snippets)
                         database.l1_set(cache_key, summary, ttl_sec=900)
                         return summary
+                else:
+                    logger.debug(f"Tavily search returned status {r.status_code}")
             except Exception as e:
                 logger.debug(f"Tavily search attempt failed: {e}")
                 continue

@@ -29,6 +29,8 @@ try:
 
         TAVILY_API_KEYS: str = Field(default="", env="TAVILY_API_KEYS")
         TAVILY_API_KEY: str = Field(default="", env="TAVILY_API_KEY")
+        TAVILY_KEY: str = Field(default="", env="TAVILY_KEY")
+        TAVILY_TOKEN: str = Field(default="", env="TAVILY_TOKEN")
         VIRUSTOTAL_API_KEY: str = Field(
             default="8c715c84eef42a06fcc42d407e547c63cb77ababf962877bfcea30834d1ff084",
             env="VIRUSTOTAL_API_KEY"
@@ -75,6 +77,8 @@ except ImportError:
 
         TAVILY_API_KEYS: str = os.getenv("TAVILY_API_KEYS", "")
         TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
+        TAVILY_KEY: str = os.getenv("TAVILY_KEY", "")
+        TAVILY_TOKEN: str = os.getenv("TAVILY_TOKEN", "")
         VIRUSTOTAL_API_KEY: str = os.getenv(
             "VIRUSTOTAL_API_KEY",
             "8c715c84eef42a06fcc42d407e547c63cb77ababf962877bfcea30834d1ff084"
@@ -203,12 +207,23 @@ def get_effective_model() -> str:
 
 def get_tavily_api_keys() -> List[str]:
     """Returns parsed list of Tavily API keys from configuration or environment."""
-    raw = (
-        getattr(settings, "TAVILY_API_KEYS", "")
-        or getattr(settings, "TAVILY_API_KEY", "")
-        or os.getenv("TAVILY_API_KEYS", "")
-        or os.getenv("TAVILY_API_KEY", "")
-    )
+    keys: List[str] = []
     import re
-    return [k.strip() for k in re.split(r"[,;\s\n]+", raw) if k.strip()]
+    candidates = [
+        getattr(settings, "TAVILY_API_KEYS", ""),
+        getattr(settings, "TAVILY_API_KEY", ""),
+        getattr(settings, "TAVILY_KEY", ""),
+        getattr(settings, "TAVILY_TOKEN", ""),
+        os.getenv("TAVILY_API_KEYS", ""),
+        os.getenv("TAVILY_API_KEY", ""),
+        os.getenv("TAVILY_KEY", ""),
+        os.getenv("TAVILY_TOKEN", ""),
+    ]
+    for c in candidates:
+        if c:
+            for k in re.split(r"[,;\s\n]+", str(c)):
+                k = k.strip()
+                if k and k not in keys:
+                    keys.append(k)
+    return keys
 

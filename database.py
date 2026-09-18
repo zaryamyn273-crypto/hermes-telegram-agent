@@ -380,6 +380,13 @@ def _get_sqlite_conn():
                 os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
                 _SQLITE_CONN = sqlite3.connect(db_path, check_same_thread=False)
                 _SQLITE_CONN.row_factory = sqlite3.Row
+                try:
+                    _SQLITE_CONN.execute("PRAGMA journal_mode=WAL;")
+                    _SQLITE_CONN.execute("PRAGMA synchronous=NORMAL;")
+                    _SQLITE_CONN.execute("PRAGMA busy_timeout=5000;")
+                    _SQLITE_CONN.execute("PRAGMA cache_size=-64000;")
+                except Exception as pragma_err:
+                    logger.debug(f"SQLite PRAGMA setup note: {pragma_err}")
                 _init_sqlite_tables(_SQLITE_CONN)
     return _SQLITE_CONN
 
@@ -650,8 +657,10 @@ async def search_messages_db(
         params.extend([pat, pat, pat, pat])
 
     base_sql += " AND (" + " AND ".join(token_clauses) + ")"
-    base_sql += " ORDER BY id DESC LIMIT ?"
-    params.append(clean_limit)
+    base_sql += " ORDER BY CASE WHEN normalized_content LIKE ? THEN 0 WHEN content LIKE ? THEN 1 ELSE 2 END, id DESC LIMIT ?"
+    exact_pat = f"%{norm_query}%"
+    raw_exact_pat = f"%{clean_query}%"
+    params.extend([exact_pat, raw_exact_pat, clean_limit])
 
     res = await execute_d1_query(base_sql, params)
     return res.get("results", []) if res.get("success") else []

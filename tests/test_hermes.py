@@ -3255,6 +3255,96 @@ async def test_execute_hermes_agent_summary_interception():
                 assert "گزارش جایگزین خلاصه‌ساز" in res2
 
 
+@pytest.mark.asyncio
+async def test_table_rendering_inside_blockquotes():
+    """Verifies that tables inside blockquotes render correctly without raw backticks or broken tags."""
+    from utils.formatter import markdown_to_telegram_html
+
+    sample = (
+        "<blockquote expandable>\n"
+        "| نام ابزار | وضعیت | سطح دسترسی |\n"
+        "| :--- | :---: | :--- |\n"
+        "| apt | فعال | ادمین |\n"
+        "| music | فعال | عمومی |\n"
+        "</blockquote>"
+    )
+    result = markdown_to_telegram_html(sample)
+    assert "<blockquote expandable>" in result
+    assert "</blockquote>" in result
+    assert "<pre>" in result
+    assert "```" not in result
+    assert "apt" in result
+    assert "music" in result
+
+
+@pytest.mark.asyncio
+async def test_tavily_env_aliases():
+    """Verifies that TAVILY_KEY and TAVILY_TOKEN env aliases are properly resolved."""
+    import os
+    from config import get_tavily_api_keys
+
+    os.environ["TAVILY_KEY"] = "tvly-alias-key-1"
+    os.environ["TAVILY_TOKEN"] = "tvly-alias-token-2"
+    try:
+        keys = get_tavily_api_keys()
+        assert "tvly-alias-key-1" in keys
+        assert "tvly-alias-token-2" in keys
+    finally:
+        os.environ.pop("TAVILY_KEY", None)
+        os.environ.pop("TAVILY_TOKEN", None)
+
+
+@pytest.mark.asyncio
+async def test_natural_persian_search_queries():
+    """Verifies that parse_search_request recognizes diverse Persian natural search phrasing."""
+    from tools.search_tool import parse_search_request
+
+    cases = [
+        ("سرچ کن توی چت پایتون", "پایتون"),
+        ("توی گروه جستجو کن داکر", "داکر"),
+        ("کی توی گروه گفته بود گیت هاب", "گیت هاب"),
+        ("پیام‌های ری‌اکت رو پیدا کن", "ری‌اکت"),
+        ("دنبال سرور در گروه بگرد", "سرور"),
+        ("/search کوبرنتیز", "کوبرنتیز"),
+        ("/جستجو جنگو", "جنگو"),
+    ]
+    for text, expected in cases:
+        is_search, q = parse_search_request(text)
+        assert is_search is True, f"Failed to match: {text}"
+        assert expected in q, f"Expected {expected} in {q}"
+
+
+@pytest.mark.asyncio
+async def test_exact_phrase_priority_search():
+    """Verifies that search_messages_db prioritizes exact phrase matches over scattered tokens."""
+    import database
+    chat_id = 9988776655
+
+    # Insert message 1: contains scattered tokens
+    await database.persist_message(
+        chat_id=chat_id,
+        user_id=1,
+        role="user",
+        content="من دیروز درباره امنیت صحبت کردم و بعداً به هوش مصنوعی هم اشاره شد.",
+        message_id=501
+    )
+    # Insert message 2: contains exact phrase
+    await database.persist_message(
+        chat_id=chat_id,
+        user_id=2,
+        role="user",
+        content="بحث امنیت هوش مصنوعی بسیار حیاتی است.",
+        message_id=502
+    )
+
+    results = await database.search_messages_db(chat_id=chat_id, query="امنیت هوش مصنوعی", limit=10)
+    assert len(results) >= 2
+    # The message with the exact phrase should be ranked first
+    assert results[0]["message_id"] == 502
+    assert "امنیت هوش مصنوعی بسیار حیاتی است" in results[0]["content"]
+
+
+
 
 
 
