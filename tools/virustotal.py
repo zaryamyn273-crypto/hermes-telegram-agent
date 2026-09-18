@@ -410,21 +410,26 @@ def is_virustotal_request(text: str) -> Tuple[bool, Optional[str]]:
         return False, None
 
     # Slash commands: /scan, /pscan, /p_scan, /vt, /pvt, /p_vt, /virustotal, /pvirustotal, /antivirus
-    m_cmd = re.match(r"^(?:/)?(?:p_|pro_|p|pro)?(?:scan|vt|virustotal|antivirus|antivir|virus)(?:\s+(.*))?$", t, re.IGNORECASE)
+    m_cmd = re.match(r"^/(?:p_|pro_|p|pro)?(?:scan|vt|virustotal|antivirus|antivir)(?:\s+(.*))?$", t, re.IGNORECASE)
     if m_cmd:
         target = (m_cmd.group(1) or "").strip()
         return True, target or None
 
     t_low = t.lower()
+    url_m = re.search(r"(https?://\S+|[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/\S*)?|[a-fA-F0-9]{32,64})", t)
+    target = url_m.group(1) if url_m else None
+
     scan_phrases = [
-        "اسکن کن", "ویروس یابی", "ویروسیابی", "ویروسیه", "ویروسی هست", "چک کن ویروسی",
+        "اسکن ویروس", "ویروس یابی", "ویروسیابی", "ویروسیه", "ویروسی هست", "چک کن ویروسی",
         "توی ویروس توتال", "virustotal", "ویروس توتال", "آنتی ویروس", "انتی ویروس",
-        "اسکنش کن", "امنه یا نه", "امنیت این فایل", "بررسی امنیت"
+        "اسکن فایل", "اسکن بد افزار", "اسکن بدافزار", "فایل آلوده", "فایل مشکوک",
+        "اسکنش کن برای ویروس", "چک کن آلوده نباشه"
     ]
     if any(p in t_low for p in scan_phrases):
-        # Extract possible URL from text
-        url_m = re.search(r"(https?://\S+|[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/\S*)?)", t)
-        target = url_m.group(1) if url_m else None
         return True, target
+
+    if "اسکن کن" in t_low or "اسکنش کن" in t_low:
+        if target or any(w in t_low for w in ["فایل", "لینک", "سایت", "ادرس", "آدرس", "هش"]):
+            return True, target
 
     return False, None

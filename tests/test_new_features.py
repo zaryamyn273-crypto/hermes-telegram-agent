@@ -378,3 +378,124 @@ async def test_summarize_group_messages_execution():
     # Cleanup
     await database.clear_session_in_d1(test_cid)
 
+
+@pytest.mark.asyncio
+async def test_categorized_groups_active_vs_inactive():
+    """
+    Verifies that get_live_telegram_groups and grouplist_command accurately
+    categorize groups into Active and Inactive (present but inactive) sections.
+    """
+    import time
+    from tools.moderation import (
+        _TRACKED_GROUPS, _BANNED_GROUPS, _MUTED_GROUPS, _MOD_LOCK,
+        get_live_telegram_groups, mute_group, ban_group, approve_group
+    )
+    from main import grouplist_command
+
+    admin_id = 8814471014
+    cid_active = -10088888801
+    cid_muted = -10088888802
+    cid_banned = -10088888803
+    cid_pending = -10088888804
+
+    with _MOD_LOCK:
+        _TRACKED_GROUPS.clear()
+        _TRACKED_GROUPS[cid_active] = {"chat_id": cid_active, "title": "گروه فعال مهندسی", "status": "approved"}
+        _TRACKED_GROUPS[cid_muted] = {"chat_id": cid_muted, "title": "گروه میوت شده", "status": "approved"}
+        _TRACKED_GROUPS[cid_banned] = {"chat_id": cid_banned, "title": "گروه بن شده", "status": "banned"}
+        _TRACKED_GROUPS[cid_pending] = {"chat_id": cid_pending, "title": "گروه در انتظار تایید", "status": "pending"}
+
+        _MUTED_GROUPS[cid_muted] = {"chat_id": cid_muted, "until_ts": time.time() + 3600}
+        _BANNED_GROUPS[cid_banned] = {"chat_id": cid_banned, "reason": "اسپم"}
+
+    # Mock bot
+    mock_bot = MagicMock()
+    mock_bot.id = 8939248291
+
+    def mock_get_chat(chat_id):
+        chat_mock = MagicMock()
+        chat_mock.id = chat_id
+        chat_mock.type = "supergroup"
+        chat_mock.member_count = 150
+        chat_mock.username = "testgroup"
+        if chat_id == cid_active:
+            chat_mock.title = "گروه فعال مهندسی"
+        elif chat_id == cid_muted:
+            chat_mock.title = "گروه میوت شده"
+        elif chat_id == cid_banned:
+            chat_mock.title = "گروه بن شده"
+        else:
+            chat_mock.title = "گروه در انتظار تایید"
+        return AsyncMock(return_value=chat_mock)()
+
+    def mock_get_chat_member(chat_id, user_id):
+        member_mock = MagicMock()
+        member_mock.status = "administrator"
+        member_mock.can_send_messages = True
+        return AsyncMock(return_value=member_mock)()
+
+    mock_bot.get_chat = mock_get_chat
+    mock_bot.get_chat_member = mock_get_chat_member
+    mock_bot.get_chat_member_count = AsyncMock(return_value=150)
+
+    # 1. Test get_live_telegram_groups categorization
+    groups = await get_live_telegram_groups(mock_bot)
+    g_map = {g["chat_id"]: g for g in groups}
+
+    assert cid_active in g_map
+    assert g_map[cid_active]["is_active"] is True
+    assert len(g_map[cid_active]["inactive_reasons"]) == 0
+
+    assert cid_muted in g_map
+    assert g_map[cid_muted]["is_active"] is False
+    assert any("میوت" in r for r in g_map[cid_muted]["inactive_reasons"])
+
+    assert cid_banned in g_map
+    assert g_map[cid_banned]["is_active"] is False
+    assert any("مسدود" in r for r in g_map[cid_banned]["inactive_reasons"])
+
+    assert cid_pending in g_map
+    assert g_map[cid_pending]["is_active"] is False
+    assert any("انتظار" in r for r in g_map[cid_pending]["inactive_reasons"])
+
+    # 2. Test grouplist_command output rendering
+    update = MagicMock()
+    update.effective_user.id = admin_id
+    update.effective_chat.id = admin_id
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    update.effective_message.reply_text = AsyncMock(return_value=status_msg)
+
+    context = MagicMock()
+    context.bot = mock_bot
+    context.args = []
+
+    await grouplist_command(update, context)
+
+    assert status_msg.edit_text.called
+    texts = [status_msg.edit_text.call_args[0][0]]
+    for call in update.effective_message.reply_text.call_args_list[1:]:
+        texts.append(call[0][0])
+    output_text = "\n".join(texts)
+
+    # Verify both sections exist and are categorized separately
+    assert "گروه‌های فعال و آنلاین" in output_text or "گروه‌های فعال و پاسخگو" in output_text
+    assert "گروه‌های غیرفعال (ربات در گروه هست ولی غیرفعاله)" in output_text
+    assert "گروه فعال مهندسی" in output_text
+    assert "گروه میوت شده" in output_text
+    assert "گروه بن شده" in output_text
+    assert "گروه در انتظار تایید" in output_text
+
+    # Verify quick action hints are rendered for inactive groups
+    assert "/unmutegroup" in output_text
+    assert "/unbangroup" in output_text
+    assert "/approvegroup" in output_text
+
+    # Cleanup
+    with _MOD_LOCK:
+        for cid in [cid_active, cid_muted, cid_banned, cid_pending]:
+            _TRACKED_GROUPS.pop(cid, None)
+            _MUTED_GROUPS.pop(cid, None)
+            _BANNED_GROUPS.pop(cid, None)
+
+

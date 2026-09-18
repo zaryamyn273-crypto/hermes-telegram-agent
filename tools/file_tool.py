@@ -404,7 +404,7 @@ def create_document_file(
 # =========================================================================
 
 _FILE_CREATE_PATTERNS = [
-    r"^(?:/)?(?:p_|pro_|p|pro)?(?:file|createfile|makefile|make_file|create_file|savefile|save_file)(?:\s+(.*))?$",
+    r"^/(?:p_|pro_|p|pro)?(?:file|createfile|makefile|make_file|create_file|savefile|save_file)(?:\s+(.*))?$",
     r"(?:یک\s+)?فایل\s+([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)\s+(?:بساز|ایجاد\s+کن|آماده\s+کن|بفرست)",
     r"(?:به\s+صورت|در\s+قالب|توی)\s+فایل\s+([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)\s*(?:بده|بفرست|دانلود|ارسال\s+کن)",
     r"(?:این\s+رو|متن\s+رو|کد\s+رو)?\s*فایلش\s+کن",
@@ -422,7 +422,7 @@ def detect_file_creation_intent(text: str, reply_text: Optional[str] = None) -> 
         return None
 
     # Check direct command: /file [filename] [content]
-    cmd_m = re.match(r"^(?:/)?(?:p_|pro_|p|pro)?(?:file|createfile|makefile|make_file|create_file|savefile)(?:\s+([a-zA-Z0-9_\-\.]+))?(?:\s+([\s\S]+))?$", t, re.IGNORECASE)
+    cmd_m = re.match(r"^/(?:p_|pro_|p|pro)?(?:file|createfile|makefile|make_file|create_file|savefile)(?:\s+([a-zA-Z0-9_\-\.]+))?(?:\s+([\s\S]+))?$", t, re.IGNORECASE)
     if cmd_m:
         fn = cmd_m.group(1) or "document.txt"
         cnt = cmd_m.group(2) or ""

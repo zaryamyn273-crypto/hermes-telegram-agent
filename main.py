@@ -145,8 +145,19 @@ from tools.osint_dork import (
     format_smart_dorks_report,
     resolve_category_key,
 )
-from tools.osint_linkedin import search_linkedin_profile, search_linkedin_company
-from tools.osint_github import investigate_github_user, search_github
+from tools.osint_github import (
+    investigate_github_user,
+    search_github,
+    inspect_github_repo,
+    read_github_file,
+    search_github_repos,
+    search_github_code,
+    parse_github_target,
+    format_github_repo_report,
+    format_github_file_report,
+    format_github_search_report,
+    format_github_user_report,
+)
 from tools.osint_username import (
     search_username_across_platforms,
     format_username_recon_report,
@@ -925,10 +936,19 @@ def is_group_list_request(text: str) -> bool:
     if _GROUP_LIST_REGEX.match(t):
         return True
     t_clean = t.replace("\u200c", " ")
-    has_list = any(k in t_clean for k in ["لیست", "فهرست", "نمایش", "مشاهده", "کدوم"])
+
+    # Direct matching for active/inactive/inquiry group phrases
+    if any(k in t_clean for k in [
+        "گروه های فعال", "گروه‌های فعال", "گروه های غیرفعال", "گروه‌های غیرفعال",
+        "گروه های غیر فعال", "گروه‌های غیر فعال", "گروه هایی که توشون هستی",
+        "گروه‌هایی که توشون هستی", "گروه هایی که توشونی", "استعلام گروه", "وضعیت گروه"
+    ]):
+        return True
+
+    has_list = any(k in t_clean for k in ["لیست", "فهرست", "نمایش", "مشاهده", "کدوم", "استعلام", "وضعیت", "چک", "بررسی"])
     has_group = any(k in t_clean for k in ["گروه", "گروها", "groups"])
     if has_list and has_group:
-        if not any(k in t_clean for k in ["بن", "بلاک", "میوت", "سکوت", "لاگ", "تنظیم"]):
+        if not any(k in t_clean for k in ["لاگ", "تنظیم", "دستورات ادمین"]):
             return True
     return False
 
@@ -1788,86 +1808,138 @@ async def dork_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def github_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """GitHub OSINT investigator: scans public & commit history for hidden author emails, SSH keys, top repos."""
+    """
+    Supercharged GitHub Intelligence & Deep Repository Suite:
+    - User OSINT: profile, hidden commit emails, SSH keys, top repos
+    - Deep Repo Inspection: metadata, language breakdown, README, structure, releases, commits
+    - File & Code Reader: fetch specific files, line counts, syntax-highlighted source code
+    - Tree Browser: explore directories and key configuration files
+    - Search: top repositories and code search
+    """
     msg = update.effective_message
     chat = update.effective_chat
     if not msg or not chat:
         return
     args = context.args or []
     target = " ".join(args).strip()
-    if not target:
+    parsed = parse_github_target(target)
+
+    if parsed.get("type") == "empty":
         guide = (
-            "🐙 <b>کاوشگر امنیتی گیت‌هاب (GitHub OSINT Suite):</b>\n\n"
-            "شناسایی دقیق هویت توسعه‌دهندگان، تحلیل تاریخچه کامیت‌ها برای **استخراج ایمیل‌های مخفی نویسنده**، کلیدهای عمومی SSH، مخازن برتر و سازمان‌ها.\n\n"
-            "📌 <b>نحوه استفاده:</b>\n"
-            "• <code>/github [نام کاربری]</code> (پروفایل و استخراج ایمیل از کامیت‌ها)\n"
-            "• <code>/github search [عبارت]</code> (جستجوی سورس‌کد و مخازن)\n\n"
-            "مثال: <code>/github torvalds</code>"
+            "🐙 <b>سوئیت پیشرفته اطلاعات و کالبدشکافی سورس‌کد گیت‌هاب (GitHub OSINT Suite):</b>\n\n"
+            "تحلیل عمیق هویت توسعه‌دهندگان، کالبدشکافی کامل ریپازیتوری‌ها، استخراج ایمیل از کامیت‌ها، خواندن فایل‌های پروژه، مرور ساختار درختی و جستجوی کد.\n\n"
+            "📌 <b>راهنمای دستورات و قابلیت‌ها:</b>\n"
+            "• <code>/github [نام کاربری]</code> - تحلیل هویتی کاربر، ایمیل‌های کامیت و کلیدهای SSH\n"
+            "• <code>/github [owner/repo]</code> - کالبدشکافی جامع مخزن، درصد زبان‌ها، ریدیمی، فایل‌ها و نسخه‌ها\n"
+            "• <code>/github file [owner/repo] [مسیر]</code> - خواندن مستقیم سورس‌کد فایل و شمارش خطوط\n"
+            "• <code>/github tree [owner/repo] [مسیر]</code> - مشاهده ساختار پوشه‌ها و محتویات دایرکتوری\n"
+            "• <code>/github readme [owner/repo]</code> - خواندن مستقیم فایل README مخزن\n"
+            "• <code>/github search [عبارت]</code> - جستجوی پیشرفته مخازن گیت‌هاب بر اساس محبوبیت\n"
+            "• <code>/github code [عبارت]</code> - جستجوی سورس‌کد در گیت‌هاب\n\n"
+            "💡 <i>پشتیبانی کامل از لینک‌های مستقیم:</i>\n"
+            "<code>/github https://github.com/torvalds/linux</code>\n"
+            "<code>/github https://github.com/pallets/flask/blob/main/src/flask/app.py</code>"
         )
         await msg.reply_text(guide, parse_mode=ParseMode.HTML)
         return
 
+    p_type = parsed.get("type")
     await chat.send_action(ChatAction.TYPING)
-    status_msg = await msg.reply_text(f"🐙 <b>در حال استخراج اطلاعات OSINT از گیت‌هاب برای «{html.escape(target)}»...</b>", parse_mode=ParseMode.HTML)
+    status_msg = await msg.reply_text(
+        f"🐙 <b>در حال تحلیل و استخراج اطلاعات از سرورهای گیت‌هاب...</b>",
+        parse_mode=ParseMode.HTML
+    )
     t0 = time.perf_counter()
 
-    if target.startswith("search "):
-        q = target[7:].strip()
-        data = await search_github(q)
-        elapsed = time.perf_counter() - t0
-        record_chat_latency(chat.id, elapsed, "جستجوی گیت‌هاب")
-        repos = data.get("repositories", [])
-        if not repos:
-            await status_msg.edit_text(f"🔍 نتیجه‌ای در مخازن گیت‌هاب برای «{html.escape(q)}» یافت نشد.", parse_mode=ParseMode.HTML)
-            return
-        lines = [f"🐙 <b>مخازن یافت شده برای:</b> <code>{html.escape(q)}</code>\n"]
-        for r in repos[:5]:
-            lines.append(f"• <b><a href=\"{r.get('url')}\">{html.escape(r.get('name', ''))}</a></b> (⭐ {r.get('stars')} | {r.get('language') or 'N/A'})\n  {html.escape(r.get('description') or '')}\n")
-        await status_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        return
+    try:
+        if p_type == "search":
+            q = parsed["query"]
+            data = await search_github_repos(q)
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, f"جستجوی مخازن گیت‌هاب ({q[:15]})")
+            text = format_github_search_report(data)
 
-    username = target.replace("https://github.com/", "").strip("/").split()[0]
-    data = await investigate_github_user(username)
-    elapsed = time.perf_counter() - t0
-    record_chat_latency(chat.id, elapsed, f"بررسی OSINT گیت‌هاب (@{username})")
+        elif p_type == "code":
+            q = parsed["query"]
+            repo = parsed.get("repo")
+            data = await search_github_code(q, repo=repo)
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, f"جستجوی کد در گیت‌هاب ({q[:15]})")
+            if not data.get("success"):
+                text = f"❌ <b>خطا در جستجوی کد:</b> {html.escape(data.get('error', 'خطایی رخ داد.'))}"
+            else:
+                items = data.get("results", [])
+                if not items:
+                    text = f"🔍 هیچ سورس‌کدی برای عبارت «<code>{html.escape(q)}</code>» یافت نشد."
+                else:
+                    lines = [
+                        f"💻 <b>نتایج جستجوی کد در گیت‌هاب برای:</b> <code>{html.escape(q)}</code>",
+                        f"<i>تعداد کل: {data.get('total_count', len(items)):,} فایل</i>\n"
+                    ]
+                    for it in items[:6]:
+                        it_name = html.escape(it.get("name", ""))
+                        it_repo = html.escape(it.get("repo", ""))
+                        it_path = html.escape(it.get("path", ""))
+                        it_url = it.get("html_url", "")
+                        lines.append(
+                            f"• <b><a href=\"{it_url}\">{it_name}</a></b> (مخزن: <code>{it_repo}</code>)\n"
+                            f"  مسیر: <code>{it_path}</code>\n"
+                            f"  مشاهده: <code>/github file {it_repo} {it_path}</code>\n"
+                        )
+                    text = "\n".join(lines)
 
-    if not data.get("success"):
-        await status_msg.edit_text(f"❌ کاربر «{html.escape(username)}» در گیت‌هاب یافت نشد.", parse_mode=ParseMode.HTML)
-        return
+        elif p_type in ("file", "tree"):
+            owner = parsed["owner"]
+            repo = parsed["repo"]
+            path = parsed.get("path", "")
+            ref = parsed.get("ref")
+            data = await read_github_file(owner, repo, path, ref=ref)
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, f"مطالعه سورس فایل گیت‌هاب ({path[:15]})")
+            text = format_github_file_report(data)
 
-    name = html.escape(data.get("name") or username)
-    bio = html.escape(data.get("bio") or "ندارد")
-    company = html.escape(data.get("company") or "ندارد")
-    location = html.escape(data.get("location") or "ندارد")
-    created = (data.get("created_at") or "")[:10]
-    followers = data.get("followers", 0)
-    public_repos = data.get("public_repos_count", 0)
-    html_url = data.get("profile_url", f"https://github.com/{username}")
+        elif p_type == "readme":
+            owner = parsed["owner"]
+            repo = parsed["repo"]
+            data = await inspect_github_repo(owner, repo)
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, f"استخراج README گیت‌هاب ({owner}/{repo})")
+            if not data.get("success"):
+                text = f"❌ {html.escape(data.get('error', 'مخزن یافت نشد.'))}"
+            else:
+                rm = data.get("readme")
+                if not rm or not rm.get("content"):
+                    text = f"⚠️ مخزن <code>{owner}/{repo}</code> فاقد فایل README است."
+                else:
+                    clean_text = rm.get("clean") or rm.get("content")
+                    disp = clean_text[:3500]
+                    text = (
+                        f"📖 <b>مستندات README مخزن</b> <a href=\"{data.get('html_url')}\">{owner}/{repo}</a>:\n\n"
+                        f"<blockquote expandable>{html.escape(disp)}</blockquote>"
+                    )
 
-    lines = [
-        f"🐙 <b>اطلاعات OSINT کاربر گیت‌هاب:</b> <a href=\"{html_url}\">@{html.escape(username)}</a>",
-        f"👤 <b>نام:</b> {name}",
-        f"📝 <b>بیو:</b> {bio}",
-        f"🏢 <b>سازمان/شرکت:</b> {company} | 📍 <b>موقعیت:</b> {location}",
-        f"👥 <b>دنبال‌کنندگان:</b> <code>{followers}</code> | 📁 <b>مخازن عمومی:</b> <code>{public_repos}</code>",
-        f"📅 <b>تاریخ عضویت:</b> <code>{created}</code>",
-    ]
+        elif p_type == "repo":
+            owner = parsed["owner"]
+            repo = parsed["repo"]
+            data = await inspect_github_repo(owner, repo)
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, f"کالبدشکافی عمیق مخزن گیت‌هاب ({owner}/{repo})")
+            text = format_github_repo_report(data)
 
-    emails = data.get("discovered_emails") or []
-    if emails:
-        lines.append(f"\n📧 <b>ایمیل‌های استخراج‌شده از تاریخچه کامیت‌ها ({len(emails)}):</b>")
-        for em in emails:
-            lines.append(f"  • <code>{html.escape(em)}</code>")
-    else:
-        lines.append("\n📧 <b>ایمیل کامیت:</b> <i>هیچ ایمیل عمومی در کامیت‌های اخیر یافت نشد.</i>")
+        elif p_type == "user":
+            username = parsed["username"]
+            data = await investigate_github_user(username)
+            elapsed = time.perf_counter() - t0
+            record_chat_latency(chat.id, elapsed, f"شناسایی OSINT کاربر گیت‌هاب (@{username})")
+            text = format_github_user_report(data)
 
-    top_repos = data.get("top_repos") or []
-    if top_repos:
-        lines.append("\n⭐ <b>مخازن برتر:</b>")
-        for r in top_repos[:4]:
-            lines.append(f"  • <a href=\"{r.get('url')}\">{html.escape(r.get('name'))}</a> (⭐ {r.get('stars')} | {r.get('language') or 'N/A'})")
+        else:
+            text = "⚠️ دستور یا آدرس گیت‌هاب نامعتبر است. برای راهنمایی <code>/github</code> را ارسال کنید."
 
-    text = "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Error in github_command: {e}")
+        text = f"❌ خطا در پردازش درخواست گیت‌هاب: {html.escape(str(e))}"
+
     try:
         await status_msg.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception:
@@ -5569,13 +5641,30 @@ async def mutelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays all live, active groups verified in real time directly from Telegram."""
+    """Displays all groups verified in real time, categorized into Active, Inactive, and Left."""
     user = update.effective_user
     msg = update.effective_message
     if not user or not is_admin(user.id):
         if msg:
             await msg.reply_text("⛔️ دسترسی غیرمجاز. این دستور فقط مخصوص مدیران ربات است.")
         return
+
+    # Determine filter mode from args or message text
+    filter_mode = "all"
+    if context and context.args:
+        arg0 = context.args[0].lower().strip()
+        if arg0 in ("active", "فعال", "روشن", "on"):
+            filter_mode = "active"
+        elif arg0 in ("inactive", "غیرفعال", "غیر_فعال", "خاموش", "off", "pending", "banned", "muted"):
+            filter_mode = "inactive"
+        elif arg0 in ("left", "خارج_شده", "سابق"):
+            filter_mode = "left"
+    elif msg and msg.text:
+        txt = msg.text.lower()
+        if any(k in txt for k in ["غیرفعال", "غیر فعال", "inactive", "معلق"]):
+            filter_mode = "inactive"
+        elif any(k in txt for k in ["گروه های فعال", "گروه‌های فعال", "گروه فعال", "فقط فعال", "active"]):
+            filter_mode = "active"
 
     # Send temporary progress notice
     status_msg = None
@@ -5588,14 +5677,55 @@ async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    live_groups = await get_live_telegram_groups(context.bot)
+    # Fetch real-time live groups with left groups included
+    all_groups = await get_live_telegram_groups(context.bot, include_left=True)
     banned_groups = {int(g["chat_id"]): g for g in await get_banned_groups_list() if g.get("chat_id")}
     muted_groups = {int(g["chat_id"]): g for g in await get_muted_groups_list() if g.get("chat_id")}
 
-    if not live_groups:
+    active_groups: List[Dict[str, Any]] = []
+    inactive_present_groups: List[Dict[str, Any]] = []
+    left_groups: List[Dict[str, Any]] = []
+
+    for g in all_groups:
+        cid = int(g.get("chat_id") or 0)
+        is_live = bool(g.get("is_live", True))
+        st = g.get("status", "approved")
+
+        if not is_live or st == "left":
+            left_groups.append(g)
+            continue
+
+        # Bot is present in the group ("توشون هست")
+        is_banned = (cid in banned_groups or st == "banned" or is_group_banned(cid))
+        is_muted = (cid in muted_groups or is_group_muted(cid)[0])
+        is_pending = (st == "pending")
+        is_rejected = (st == "rejected")
+        can_send = g.get("can_send_messages", True)
+
+        reasons = list(g.get("inactive_reasons") or [])
+        if is_banned and not any("مسدود" in r for r in reasons):
+            reasons.append("🚫 مسدود شده (Banned)")
+        if is_muted and not any("میوت" in r for r in reasons):
+            rem = muted_groups.get(cid, {}).get("remaining_seconds", 0) if cid in muted_groups else is_group_muted(cid)[1]
+            reasons.append(f"🔇 میوت شده ({format_duration_persian(rem)} باقیمانده)" if rem > 0 else "🔇 میوت نامحدود (سایلنت)")
+        if is_pending and not any("انتظار" in r for r in reasons):
+            reasons.append("⏳ در انتظار تایید ادمین (Pending)")
+        if is_rejected and not any("رد" in r for r in reasons):
+            reasons.append("❌ رد شده توسط ادمین (Rejected)")
+        if not can_send and not any("محدودیت" in r for r in reasons):
+            reasons.append("🔒 محدودیت دسترسی ارسال پیام در تلگرام (Restricted)")
+
+        if reasons:
+            g_copy = dict(g)
+            g_copy["inactive_reasons"] = reasons
+            inactive_present_groups.append(g_copy)
+        else:
+            active_groups.append(g)
+
+    if not active_groups and not inactive_present_groups and not left_groups:
         no_groups_text = (
-            "📋 <b>فهرست گروه‌های زنده پرومته:</b>\n\n"
-            "<i>در حال حاضر پرومته در هیچ گروه تلگرامی زنده‌ای عضو نیست یا ربات از گروه‌ها خارج شده است.</i>\n\n"
+            "📋 <b>استعلام وضعیت گروه‌های پرومته:</b>\n\n"
+            "<i>در حال حاضر پرومته در هیچ گروه تلگرامی عضو نیست یا ربات از گروه‌ها خارج شده است.</i>\n\n"
             "💡 <b>راهنمای اتصال به گروه جدید:</b>\n"
             "۱. پرومته (@AMZprometheusopenbot) را به گروه تلگرامی خود اضافه فرمایید.\n"
             "۲. جهت عملکرد بهینه و مدیریت کامل، به ربات دسترسی ادمین بدهید.\n"
@@ -5607,48 +5737,123 @@ async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(no_groups_text, parse_mode=ParseMode.HTML)
         return
 
-    lines = [f"👥 <b>فهرست گروه‌های زنده و فعال پرومته ({len(live_groups)} گروه):</b>\n"]
+    total_active_members = sum(g.get("member_count", 0) for g in active_groups)
+    total_inactive_members = sum(g.get("member_count", 0) for g in inactive_present_groups)
 
-    for idx, g in enumerate(live_groups, 1):
-        cid = int(g.get("chat_id") or 0)
-        title = g.get("title") or "گروه بدون نام"
-        uname = f"@{g.get('username')}" if g.get("username") else ""
-        m_count = g.get("member_count") or 0
-        is_admin_in_group = g.get("is_admin", False)
-        st = g.get("status", "approved")
+    lines: List[str] = []
 
-        role_badge = "⭐️ مدیر (Admin)" if is_admin_in_group else "🟢 عضو عادی (Member)"
+    # 1. Dashboard summary header
+    if filter_mode == "active":
+        lines.append(f"🟢 <b>فهرست گروه‌های فعال و پاسخگو ({len(active_groups)} گروه):</b>")
+        lines.append("<i>ربات در این گروه‌ها حضور فعال داشته و به پیام‌ها و دستورات کاربران پاسخ می‌دهد.</i>")
+        lines.append("💡 <i>جهت مشاهده تفکیک کامل همه گروه‌ها، دستور <code>/groups</code> را ارسال فرمایید.</i>\n")
+    elif filter_mode == "inactive":
+        lines.append(f"🔴 <b>فهرست گروه‌های غیرفعال (ربات حضور دارد) ({len(inactive_present_groups)} گروه):</b>")
+        lines.append("<i>ربات در این گروه‌ها عضو است اما به دلیل میوت، مسدودیت، عدم تایید یا محدودیت تلگرام غیرفعال است.</i>")
+        lines.append("💡 <i>جهت مشاهده تفکیک کامل همه گروه‌ها، دستور <code>/groups</code> را ارسال فرمایید.</i>\n")
+    else:
+        lines.extend([
+            "📊 <b>استعلام و تفکیک وضعیت گروه‌های پرومته</b>",
+            "➖➖➖➖➖➖➖➖➖➖",
+            f"🟢 <b>گروه‌های فعال و آنلاین:</b> <code>{len(active_groups)}</code> گروه ({total_active_members:,} مخاطب)",
+            f"🔴 <b>گروه‌های غیرفعال (ربات حضور دارد):</b> <code>{len(inactive_present_groups)}</code> گروه ({total_inactive_members:,} مخاطب)",
+        ])
+        if left_groups:
+            lines.append(f"⚪️ <b>گروه‌های سابق / خارج‌شده:</b> <code>{len(left_groups)}</code> گروه")
+        lines.append("➖➖➖➖➖➖➖➖➖➖\n")
 
-        if cid in banned_groups or st == "banned":
-            st_text = "🚫 مسدود (Banned)"
-            quick_act = f"دستور رفع بن: <code>/unbangroup {cid}</code>"
-        elif cid in muted_groups:
-            rem = muted_groups[cid].get("remaining_seconds", 0)
-            st_text = f"🔇 میوت ({format_duration_persian(rem)})" if rem > 0 else "🔇 میوت نامحدود"
-            quick_act = f"دستور رفع سکوت: <code>/unmutegroup {cid}</code>"
-        elif st in ("approved", "active"):
-            st_text = "✅ تایید شده و فعال (Active)"
-            quick_act = f"بن: <code>/bangroup {cid}</code> | میوت: <code>/mutegroup {cid} 1h</code>"
-        elif st == "pending":
-            st_text = "⏳ در انتظار تایید ادمین (Pending)"
-            quick_act = f"تایید: <code>/approvegroup {cid}</code> | رد: <code>/rejectgroup {cid}</code>"
+    # 2. Active Groups Section
+    if filter_mode in ("all", "active"):
+        lines.append(f"🟢 <b>گروه‌های فعال و پاسخگو ({len(active_groups)} گروه):</b>")
+        lines.append("<i>ربات در این گروه‌ها حضور فعال داشته و بدون هیچ محدودیتی پاسخگوی اعضا است.</i>\n")
+
+        if not active_groups:
+            lines.append("• <i>هیچ گروه فعالی در حال حاضر یافت نشد.</i>\n")
         else:
-            st_text = f"ℹ️ {st}"
-            quick_act = f"مدیریت: <code>/bangroup {cid}</code>"
+            for idx, g in enumerate(active_groups, 1):
+                cid = int(g.get("chat_id") or 0)
+                title = g.get("title") or "گروه بدون نام"
+                uname = f"@{g.get('username')}" if g.get("username") else ""
+                m_count = g.get("member_count") or 0
+                is_admin_in_group = g.get("is_admin", False)
 
-        members_info = f" | 👥 {m_count:,} عضو" if m_count > 0 else ""
-        uname_info = f" ({html.escape(uname)})" if uname else ""
+                role_badge = "⭐️ مدیر (Admin)" if is_admin_in_group else "🟢 عضو عادی (Member)"
+                members_info = f" | 👥 {m_count:,} عضو" if m_count > 0 else ""
+                uname_info = f" ({html.escape(uname)})" if uname else ""
 
-        lines.append(
-            f"{idx}. <b>{html.escape(title)}</b>{uname_info}{members_info}\n"
-            f"   🆔 شناسه عددی: <code>{cid}</code>\n"
-            f"   🤖 وضعیت ربات: {role_badge}\n"
-            f"   📊 وضعیت پرومته: {st_text}\n"
-            f"   ⚙️ {quick_act}\n"
-            f"   🚪 خروج فوری: <code>/pb_leave {cid}</code>\n"
-        )
+                lines.append(
+                    f"{idx}. <b>{html.escape(title)}</b>{uname_info}{members_info}\n"
+                    f"   🆔 شناسه عددی: <code>{cid}</code>\n"
+                    f"   🤖 سمت ربات: {role_badge}\n"
+                    f"   📊 وضعیت: ✅ فعال و آنلاین (Active)\n"
+                    f"   ⚙️ میوت: <code>/mutegroup {cid} 2h</code> | بن: <code>/bangroup {cid}</code>\n"
+                    f"   🚪 خروج فوری: <code>/pb_leave {cid}</code>\n"
+                )
 
-    lines.append("⚡ <i>استعلام زنده وضعیت ربات از سرورهای تلگرام</i>")
+    # 3. Inactive Groups Section (Bot is present, but inactive)
+    if filter_mode in ("all", "inactive"):
+        lines.append(f"\n🔴 <b>گروه‌های غیرفعال (ربات در گروه هست ولی غیرفعاله) ({len(inactive_present_groups)} گروه):</b>")
+        lines.append("<i>ربات در این گروه‌ها عضو است اما بنا به وضعیت مدیریتی یا عدم دسترسی، غیرفعال بوده و پاسخ نمی‌دهد.</i>\n")
+
+        if not inactive_present_groups:
+            lines.append("• <i>هیچ گروه غیرفعالی وجود ندارد (تمامی گروه‌های متصل در وضعیت فعال و پاسخگو هستند).</i>\n")
+        else:
+            for idx, g in enumerate(inactive_present_groups, 1):
+                cid = int(g.get("chat_id") or 0)
+                title = g.get("title") or "گروه بدون نام"
+                uname = f"@{g.get('username')}" if g.get("username") else ""
+                m_count = g.get("member_count") or 0
+                is_admin_in_group = g.get("is_admin", False)
+                st = g.get("status", "approved")
+
+                role_badge = "⭐️ مدیر (Admin)" if is_admin_in_group else "🟢 عضو عادی (Member)"
+                members_info = f" | 👥 {m_count:,} عضو" if m_count > 0 else ""
+                uname_info = f" ({html.escape(uname)})" if uname else ""
+
+                reasons = g.get("inactive_reasons") or ["غیرفعال (Inactive)"]
+                reason_str = "، ".join(reasons)
+
+                # Quick action command for instant reactivation
+                if cid in banned_groups or st == "banned" or is_group_banned(cid):
+                    quick_act = f"🔄 رفع مسدودی و فعال‌سازی: <code>/unbangroup {cid}</code>"
+                elif cid in muted_groups or is_group_muted(cid)[0]:
+                    quick_act = f"🔄 رفع میوت و فعال‌سازی: <code>/unmutegroup {cid}</code>"
+                elif st == "pending":
+                    quick_act = f"✅ تایید و فعال‌سازی: <code>/approvegroup {cid}</code> | ❌ رد: <code>/rejectgroup {cid}</code>"
+                elif st == "rejected":
+                    quick_act = f"✅ تایید و فعال‌سازی مجدد: <code>/approvegroup {cid}</code>"
+                elif not g.get("can_send_messages", True):
+                    quick_act = "💡 نیازمند اعطای مجوز ارسال پیام به ربات در تنظیمات گروه تلگرام"
+                else:
+                    quick_act = f"فعال‌سازی: <code>/approvegroup {cid}</code>"
+
+                lines.append(
+                    f"{idx}. <b>{html.escape(title)}</b>{uname_info}{members_info}\n"
+                    f"   🆔 شناسه عددی: <code>{cid}</code>\n"
+                    f"   🤖 سمت ربات: {role_badge}\n"
+                    f"   ⚠️ علت غیرفعال بودن: {reason_str}\n"
+                    f"   ⚙️ {quick_act}\n"
+                    f"   🚪 خروج فوری: <code>/pb_leave {cid}</code>\n"
+                )
+
+    # 4. Left Groups Section (Optional history if any)
+    if filter_mode in ("all", "left") and left_groups:
+        lines.append(f"\n⚪️ <b>گروه‌های سابق / خارج‌شده ({len(left_groups)} گروه):</b>")
+        lines.append("<i>ربات قبلاً در این گروه‌ها حضور داشته اما از آن‌ها خارج یا اخراج شده است.</i>\n")
+        for idx, g in enumerate(left_groups[:10], 1):
+            cid = int(g.get("chat_id") or 0)
+            title = g.get("title") or "گروه سابق"
+            uname = f"@{g.get('username')}" if g.get("username") else ""
+            uname_info = f" ({html.escape(uname)})" if uname else ""
+            lines.append(
+                f"{idx}. <b>{html.escape(title)}</b>{uname_info}\n"
+                f"   🆔 شناسه: <code>{cid}</code> | وضعیت: 🚪 خارج‌شده\n"
+                f"   🗑 حذف از سوابق: <code>/rejectgroup {cid}</code>\n"
+            )
+        if len(left_groups) > 10:
+            lines.append(f"   <i>...و {len(left_groups) - 10} گروه سابق دیگر.</i>\n")
+
+    lines.append("⚡️ <i>استعلام زنده وضعیت ربات از سرورهای تلگرام در لحظه</i>")
     text = "\n".join(lines)
 
     chunks = split_message(text, max_len=3800)

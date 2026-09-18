@@ -890,6 +890,165 @@ async def test_eternal_directives_and_bans():
     await delete_eternal_directive("test_directive_alpha", admin_id=123)
 
 
+def test_github_target_parsing():
+    from tools.osint_github import parse_github_target
+
+    # Repo URLs
+    r1 = parse_github_target("https://github.com/torvalds/linux")
+    assert r1["type"] == "repo" and r1["owner"] == "torvalds" and r1["repo"] == "linux"
+
+    # Repo slug
+    r2 = parse_github_target("pallets/flask")
+    assert r2["type"] == "repo" and r2["owner"] == "pallets" and r2["repo"] == "flask"
+
+    # File URL
+    f1 = parse_github_target("https://github.com/pallets/flask/blob/main/src/flask/app.py")
+    assert f1["type"] == "file" and f1["owner"] == "pallets" and f1["repo"] == "flask"
+    assert f1["path"] == "src/flask/app.py" and f1["ref"] == "main"
+
+    # Tree URL
+    t1 = parse_github_target("https://github.com/pallets/flask/tree/main/src/flask")
+    assert t1["type"] == "tree" and t1["owner"] == "pallets" and t1["repo"] == "flask"
+    assert t1["path"] == "src/flask" and t1["ref"] == "main"
+
+    # User URL & handle
+    u1 = parse_github_target("https://github.com/octocat")
+    assert u1["type"] == "user" and u1["username"] == "octocat"
+    u2 = parse_github_target("@octocat")
+    assert u2["type"] == "user" and u2["username"] == "octocat"
+
+    # Commands
+    cmd_f = parse_github_target("file pallets/flask src/flask/app.py")
+    assert cmd_f["type"] == "file" and cmd_f["owner"] == "pallets" and cmd_f["path"] == "src/flask/app.py"
+
+    cmd_t = parse_github_target("tree pallets/flask src")
+    assert cmd_t["type"] == "tree" and cmd_t["owner"] == "pallets" and cmd_t["path"] == "src"
+
+    cmd_s = parse_github_target("search fast-api async")
+    assert cmd_s["type"] == "search" and cmd_s["query"] == "fast-api async"
+
+
+def test_intent_misclassification_fixes():
+    from agent_engine import is_architecture_query
+    from tools.search_tool import parse_search_request
+    from tools.virustotal import is_virustotal_request
+    from tools.file_tool import detect_file_creation_intent
+
+    # 1. Architecture queries: general questions must NOT be hijacked
+    assert is_architecture_query("معماری میکروسرویس در داکر چیست؟") is False
+    assert is_architecture_query("امکان‌سنجی یک استارتاپ هوش مصنوعی چگونه است؟") is False
+    assert is_architecture_query("What is the Transformer architecture?") is False
+    assert is_architecture_query("معماری داخلی ربات پرومته چگونه است؟") is True
+    assert is_architecture_query("استک فنی ربات") is True
+    assert is_architecture_query("bot architecture") is True
+
+    # 2. Search queries: general web/AI searches must NOT be hijacked by group message search
+    is_s, _ = parse_search_request("سرچ کن پایتون چیست")
+    assert is_s is False
+    is_s2, _ = parse_search_request("جستجو کن درباره آسیب‌پذیری لینوکس")
+    assert is_s2 is False
+    is_s3, _ = parse_search_request("search about quantum computing")
+    assert is_s3 is False
+    # Explicit group/chat searches MUST be recognized
+    is_s4, q4 = parse_search_request("توی پیام‌ها سرچ کن گزارش هفتگی")
+    assert is_s4 is True and "گزارش هفتگی" in q4
+    is_s5, q5 = parse_search_request("/search_msg پسورد")
+    assert is_s5 is True and "پسورد" in q5
+    is_s6, q6 = parse_search_request("/search پایتون")
+    assert is_s6 is True and "پایتون" in q6
+
+    # 3. VirusTotal queries: general security queries must NOT be hijacked
+    is_vt1, _ = is_virustotal_request("پروتکل HTTPS چقدر امنه یا نه")
+    assert is_vt1 is False
+    is_vt2, _ = is_virustotal_request("بررسی امنیت سرور لینوکس")
+    assert is_vt2 is False
+    is_vt3, _ = is_virustotal_request("scan Corona virus")
+    assert is_vt3 is False
+    # Explicit scan commands or malware requests MUST be recognized
+    is_vt4, t4 = is_virustotal_request("/scan https://malicious-site.com")
+    assert is_vt4 is True and t4 == "https://malicious-site.com"
+    is_vt5, t5 = is_virustotal_request("/vt 44d88612fea8a8f36de82e1278abb02f")
+    assert is_vt5 is True and "44d88612fea8a8f36de82e1278abb02f" in t5
+    is_vt6, _ = is_virustotal_request("این فایل رو اسکن ویروس کن")
+    assert is_vt6 is True
+
+    # 4. File creation queries: general sentences with "file" must NOT be hijacked
+    assert detect_file_creation_intent("file upload failed in my nginx config") is None
+    assert detect_file_creation_intent("makefile tutorial for cpp") is None
+    f_res = detect_file_creation_intent("/file test.py print('hello world')")
+    assert f_res is not None and f_res[0] == "test.py"
+
+
+@pytest.mark.asyncio
+async def test_github_repo_mock_inspection():
+    from tools.osint_github import (
+        format_github_repo_report,
+        format_github_file_report,
+        format_github_search_report,
+    )
+
+    mock_repo_data = {
+        "success": True,
+        "owner": "pallets",
+        "repo": "flask",
+        "full_name": "pallets/flask",
+        "html_url": "https://github.com/pallets/flask",
+        "description": "The Python micro framework for building web applications.",
+        "stars": 65000,
+        "forks": 15000,
+        "open_issues": 12,
+        "watchers": 2200,
+        "default_branch": "main",
+        "license": "BSD-3-Clause",
+        "size_kb": 12400,
+        "pushed_at": "2026-09-15",
+        "languages": [
+            {"name": "Python", "percentage": 98.5},
+            {"name": "HTML", "percentage": 1.5},
+        ],
+        "contents": {
+            "dirs": ["src", "tests", "docs"],
+            "key_files": ["pyproject.toml", "README.md", "LICENSE"],
+        },
+        "latest_release": {
+            "tag_name": "3.1.0",
+            "published_at": "2026-08-01",
+            "html_url": "https://github.com/pallets/flask/releases/tag/3.1.0",
+        },
+        "recent_commits": [
+            {"sha": "a1b2c3d", "message": "Release version 3.1.0", "author": "David", "date": "2026-08-01"}
+        ],
+        "readme": {
+            "clean": "# Flask\nFlask is a lightweight WSGI web application framework in Python."
+        }
+    }
+
+    rep = format_github_repo_report(mock_repo_data)
+    assert "pallets/flask" in rep
+    assert "65,000" in rep
+    assert "Python" in rep
+    assert "pyproject.toml" in rep
+    assert "3.1.0" in rep
+    assert "blockquote expandable" in rep
+
+    mock_file_data = {
+        "success": True,
+        "type": "file",
+        "owner": "pallets",
+        "repo": "flask",
+        "path": "src/flask/__init__.py",
+        "size_bytes": 1024,
+        "line_count": 35,
+        "language": "python",
+        "content": "__version__ = '3.1.0'\nfrom .app import Flask\n",
+        "html_url": "https://github.com/pallets/flask/blob/main/src/flask/__init__.py",
+    }
+    f_rep = format_github_file_report(mock_file_data)
+    assert "src/flask/__init__.py" in f_rep
+    assert "Flask" in f_rep
+    assert "language-python" in f_rep
+
+
 
 
 

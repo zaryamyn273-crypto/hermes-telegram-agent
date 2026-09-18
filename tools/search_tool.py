@@ -46,8 +46,8 @@ def parse_search_request(text: str) -> Tuple[bool, str]:
             if q:
                 return True, q
 
-    # 2. Slash commands: /search <query>, /find <query>, /جستجو <query>, /سرچ <query>
-    m = re.match(r"^(?:/)?(?:search|find|جستجو|سرچ|پیدا)\s+(.+)$", t, re.IGNORECASE)
+    # 2. Explicit slash commands: /search <query>, /find <query>, /search_msg <query>
+    m = re.match(r"^/(?:search_msg|find_msg|search|find|جستجو|سرچ)\s+(.+)$", t, re.IGNORECASE)
     if m:
         q = m.group(1).strip()
         # Clean potential 'در پیام‌ها: ' prefix if present

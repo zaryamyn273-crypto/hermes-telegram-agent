@@ -1092,26 +1092,38 @@ async def get_muted_users_list() -> List[Dict[str, Any]]:
 
 
 async def get_banned_groups_list() -> List[Dict[str, Any]]:
-    """Returns all banned groups."""
+    """Returns all banned groups merged from in-memory cache and database."""
+    banned_map: Dict[int, Dict[str, Any]] = {}
+    with _MOD_LOCK:
+        for cid, r in _BANNED_GROUPS.items():
+            banned_map[cid] = dict(r)
     res = await database.execute_d1_query("SELECT * FROM banned_groups ORDER BY banned_at DESC")
     if res.get("success"):
-        return res.get("results", [])
-    with _MOD_LOCK:
-        return list(_BANNED_GROUPS.values())
+        for r in res.get("results", []):
+            if r.get("chat_id"):
+                banned_map[int(r["chat_id"])] = r
+    return list(banned_map.values())
 
 
 async def get_muted_groups_list() -> List[Dict[str, Any]]:
-    """Returns all currently muted groups."""
+    """Returns all currently muted groups merged from in-memory cache and database."""
     now = time.time()
+    muted_map: Dict[int, Dict[str, Any]] = {}
+    with _MOD_LOCK:
+        for cid, r in _MUTED_GROUPS.items():
+            r_copy = dict(r)
+            uts = float(r_copy.get("until_ts") or 0)
+            if uts == 0 or uts > now:
+                r_copy["remaining_seconds"] = max(0.0, uts - now) if uts > 0 else 0.0
+                muted_map[cid] = r_copy
     res = await database.execute_d1_query("SELECT * FROM muted_groups WHERE until_ts = 0 OR until_ts > ?", [now])
     if res.get("success"):
-        results = res.get("results", [])
-        for r in results:
+        for r in res.get("results", []):
+            cid = int(r.get("chat_id") or 0)
             uts = float(r.get("until_ts") or 0)
             r["remaining_seconds"] = max(0.0, uts - now) if uts > 0 else 0.0
-        return results
-    with _MOD_LOCK:
-        return list(_MUTED_GROUPS.values())
+            muted_map[cid] = r
+    return list(muted_map.values())
 
 
 async def get_pending_groups_list() -> List[Dict[str, Any]]:
@@ -1236,6 +1248,7 @@ async def get_live_telegram_groups(bot, include_left: bool = False) -> List[Dict
 
     sem = asyncio.Semaphore(15)
     live_groups: List[Dict[str, Any]] = []
+    left_groups: List[Dict[str, Any]] = []
 
     # Get current bot user ID
     try:
@@ -1250,10 +1263,16 @@ async def get_live_telegram_groups(bot, include_left: bool = False) -> List[Dict
                 member = await bot.get_chat_member(cid, bot_id)
 
                 status_str = getattr(member, "status", "")
-                is_active = status_str in ("member", "administrator", "creator")
+                is_member_active = status_str in ("member", "administrator", "creator")
 
-                if is_active:
+                if is_member_active:
                     is_admin = status_str in ("administrator", "creator")
+                    can_send = True
+                    if status_str == "restricted":
+                        can_send = bool(getattr(member, "can_send_messages", True))
+                    elif not is_admin and hasattr(tg_chat, "permissions") and tg_chat.permissions:
+                        can_send = bool(getattr(tg_chat.permissions, "can_send_messages", True))
+
                     try:
                         m_count = await bot.get_chat_member_count(cid)
                     except Exception:
@@ -1267,6 +1286,29 @@ async def get_live_telegram_groups(bot, include_left: bool = False) -> List[Dict
                     if existing_st in ("unknown", "left"):
                         existing_st = "approved"
 
+                    # Check detailed moderation state
+                    is_banned = (existing_st == "banned") or is_group_banned(cid)
+                    is_muted, rem_secs = is_group_muted(cid)
+                    is_pending = (existing_st == "pending")
+                    is_rejected = (existing_st == "rejected")
+
+                    inactive_reasons: List[str] = []
+                    if is_banned:
+                        inactive_reasons.append("🚫 مسدود شده (Banned)")
+                    if is_muted:
+                        if rem_secs > 0:
+                            inactive_reasons.append(f"🔇 میوت شده ({format_duration_persian(rem_secs)} باقیمانده)")
+                        else:
+                            inactive_reasons.append("🔇 میوت نامحدود (سایلنت)")
+                    if is_pending:
+                        inactive_reasons.append("⏳ در انتظار تایید ادمین (Pending)")
+                    elif is_rejected:
+                        inactive_reasons.append("❌ رد شده توسط ادمین (Rejected)")
+                    if not can_send:
+                        inactive_reasons.append("🔒 محدودیت دسترسی ارسال پیام در تلگرام (Restricted)")
+
+                    is_bot_active = (len(inactive_reasons) == 0)
+
                     item = {
                         "chat_id": cid,
                         "title": title,
@@ -1275,7 +1317,11 @@ async def get_live_telegram_groups(bot, include_left: bool = False) -> List[Dict
                         "member_count": m_count,
                         "status": existing_st,
                         "is_admin": is_admin,
+                        "can_send_messages": can_send,
                         "is_live": True,
+                        "is_active": is_bot_active,
+                        "inactive_reasons": inactive_reasons,
+                        "remaining_mute_seconds": rem_secs if is_muted else 0.0,
                     }
 
                     with _MOD_LOCK:
@@ -1298,6 +1344,23 @@ async def get_live_telegram_groups(bot, include_left: bool = False) -> List[Dict
                     asyncio.create_task(database.execute_d1_query(
                         "UPDATE tracked_groups SET status = 'left' WHERE chat_id = ?", [cid]
                     ))
+                    if include_left:
+                        t_title = getattr(tg_chat, "title", None) or (_TRACKED_GROUPS.get(cid, {}).get("title") if cid in _TRACKED_GROUPS else "گروه سابق")
+                        t_uname = (getattr(tg_chat, "username", "") or (_TRACKED_GROUPS.get(cid, {}).get("username", "") if cid in _TRACKED_GROUPS else "")).lstrip("@")
+                        left_groups.append({
+                            "chat_id": cid,
+                            "title": t_title or "گروه سابق",
+                            "username": t_uname,
+                            "chat_type": str(getattr(tg_chat, "type", "supergroup")),
+                            "member_count": 0,
+                            "status": "left",
+                            "is_admin": False,
+                            "can_send_messages": False,
+                            "is_live": False,
+                            "is_active": False,
+                            "inactive_reasons": ["ربات از گروه لفت داده یا خارج شده است"],
+                            "remaining_mute_seconds": 0.0,
+                        })
             except Exception as e:
                 err = str(e).lower()
                 if "chat not found" in err:
@@ -1316,11 +1379,53 @@ async def get_live_telegram_groups(bot, include_left: bool = False) -> List[Dict
                     asyncio.create_task(database.execute_d1_query(
                         "UPDATE tracked_groups SET status = 'left' WHERE chat_id = ?", [cid]
                     ))
+                    if include_left:
+                        left_rec = _TRACKED_GROUPS.get(cid, {})
+                        left_groups.append({
+                            "chat_id": cid,
+                            "title": left_rec.get("title") or "گروه سابق (اخراج/بلاک)",
+                            "username": left_rec.get("username", ""),
+                            "chat_type": left_rec.get("chat_type", "supergroup"),
+                            "member_count": left_rec.get("member_count", 0),
+                            "status": "left",
+                            "is_admin": False,
+                            "can_send_messages": False,
+                            "is_live": False,
+                            "is_active": False,
+                            "inactive_reasons": ["ربات توسط ادمین اخراج یا مسدود شده است"],
+                            "remaining_mute_seconds": 0.0,
+                        })
                 else:
                     logger.debug(f"Live group verification notice for {cid}: {e}")
 
     await asyncio.gather(*(verify_chat(cid) for cid in group_cids), return_exceptions=True)
-    live_groups.sort(key=lambda g: (g.get("is_admin", False), g.get("member_count", 0)), reverse=True)
+
+    if include_left:
+        seen_left_ids = {g["chat_id"] for g in left_groups}
+        with _MOD_LOCK:
+            for cid, rec in _TRACKED_GROUPS.items():
+                if cid < 0 and cid not in seen_left_ids and rec.get("status") == "left":
+                    left_groups.append({
+                        "chat_id": cid,
+                        "title": rec.get("title") or "گروه سابق",
+                        "username": rec.get("username", ""),
+                        "chat_type": rec.get("chat_type", "supergroup"),
+                        "member_count": rec.get("member_count", 0),
+                        "status": "left",
+                        "is_admin": False,
+                        "can_send_messages": False,
+                        "is_live": False,
+                        "is_active": False,
+                        "inactive_reasons": ["خارج‌شده از گروه"],
+                        "remaining_mute_seconds": 0.0,
+                    })
+
+    if include_left:
+        all_res = live_groups + left_groups
+        all_res.sort(key=lambda g: (g.get("is_live", False), g.get("is_active", False), g.get("is_admin", False), g.get("member_count", 0)), reverse=True)
+        return all_res
+
+    live_groups.sort(key=lambda g: (g.get("is_active", False), g.get("is_admin", False), g.get("member_count", 0)), reverse=True)
     return live_groups
 
 

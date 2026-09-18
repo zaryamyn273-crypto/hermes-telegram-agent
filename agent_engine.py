@@ -25,7 +25,12 @@ from config import (
 from utils.formatter import strip_thinking
 from tools.osint_search import search_web_osint, crawl_webpage_layers
 from tools.osint_dork import generate_smart_dorks, execute_smart_dork
-from tools.osint_github import investigate_github_user
+from tools.osint_github import (
+    investigate_github_user,
+    inspect_github_repo,
+    read_github_file,
+    parse_github_target,
+)
 from tools.osint_linkedin import search_linkedin_profile
 from tools.system import get_system_time_context
 import database
@@ -317,10 +322,27 @@ async def set_user_mode(user_id: int, mode: str) -> bool:
 
 
 def is_architecture_query(prompt: str) -> bool:
+    """
+    Checks if user is explicitly asking about Prometheus bot's internal technical architecture,
+    stack, or design. Strictly avoids hijacking general software, building, or AI architecture questions.
+    """
     if not prompt:
         return False
-    p = prompt.lower()
-    return any(k in p for k in ["معماری", "امکان‌سنجی", "architecture", "ساختار ربات", "استک فنی"])
+    p = prompt.lower().strip()
+
+    bot_ref = any(b in p for b in ["پرومته", "ربات", "بات", "سیستم شما", "سیستمت", "برنامه شما", "هرمس", "این سیستم", "prometheus", "bot", "hermes"])
+    arch_word = any(a in p for a in ["معماری", "استک فنی", "استک", "ساختار فنی", "معماری فنی", "architecture", "tech stack"])
+
+    if bot_ref and arch_word:
+        return True
+
+    # Standalone direct phrases referencing bot/system structure
+    standalone = {
+        "معماری ربات", "معماری پرومته", "استک فنی ربات", "استک ربات", "ساختار ربات",
+        "معماری سیستم شما", "معماریت چیه", "استک فنی چیست", "معماری فنی ربات",
+        "bot architecture", "prometheus architecture", "tech stack"
+    }
+    return any(s in p for s in standalone)
 
 
 def generate_architecture_analysis(prompt: str) -> str:
@@ -351,9 +373,79 @@ async def augment_osint_prompt(user_prompt: str) -> str:
     and fetches real-time OSINT data to enrich the prompt context.
     """
     augmented_prompt = user_prompt
-    url_match = re.search(r"https?://[^\s<>\"']+", user_prompt)
 
-    if url_match:
+    # Check for GitHub targets first (URL, repository slug, file, or user)
+    has_github_url = bool(re.search(r"https?://github\.com/[^\s<>\"'\)]+", user_prompt))
+    has_github_mention = bool(re.search(r"(?:گیت‌هاب|مخزن|ریپازیتوری|github)\s+([a-zA-Z0-9_\-\.]+/[a-zA-Z0-9_\-\.]+)", user_prompt, re.I))
+
+    if has_github_url or has_github_mention:
+        raw_gh = ""
+        url_m = re.search(r"https?://github\.com/[^\s<>\"'\)]+", user_prompt)
+        if url_m:
+            raw_gh = url_m.group(0)
+        else:
+            mention_m = re.search(r"(?:گیت‌هاب|مخزن|ریپازیتوری|github)\s+([a-zA-Z0-9_\-\.]+/[a-zA-Z0-9_\-\.]+)", user_prompt, re.I)
+            if mention_m:
+                raw_gh = mention_m.group(1)
+
+        if raw_gh:
+            parsed = parse_github_target(raw_gh)
+            p_type = parsed.get("type")
+            if p_type == "repo":
+                try:
+                    repo_info = await inspect_github_repo(parsed["owner"], parsed["repo"])
+                    if repo_info.get("success"):
+                        langs_str = ", ".join([f"{l['name']} ({l['percentage']}%)" for l in repo_info.get("languages", [])[:4]]) or "مشخص نشد"
+                        readme_snip = (repo_info.get("readme", {}) or {}).get("clean", "")[:1200]
+                        gh_block = (
+                            f"\n\n[داده‌های اطلاعاتی و کالبدشکافی مخزن گیت‌هاب {parsed['owner']}/{parsed['repo']}]:\n"
+                            f"• نام کامل: {repo_info.get('full_name')}\n"
+                            f"• آدرس: {repo_info.get('html_url')}\n"
+                            f"• توضیحات: {repo_info.get('description')}\n"
+                            f"• آمار: ⭐ {repo_info.get('stars')} | 🍴 {repo_info.get('forks')} | 🐞 {repo_info.get('open_issues')} ایشو\n"
+                            f"• شاخه اصلی: {repo_info.get('default_branch')} | لایسنس: {repo_info.get('license')}\n"
+                            f"• زبان‌های پروژه: {langs_str}\n"
+                            f"• گزیده مستندات README:\n{readme_snip}"
+                        )
+                        augmented_prompt = f"{user_prompt}{gh_block}"
+                        logger.info(f"Auto-injected GitHub repo intelligence for {parsed['owner']}/{parsed['repo']}")
+                except Exception as err:
+                    logger.warning(f"Failed to auto-inspect GitHub repo: {err}")
+            elif p_type == "file":
+                try:
+                    file_info = await read_github_file(parsed["owner"], parsed["repo"], parsed["path"], ref=parsed.get("ref"))
+                    if file_info.get("success") and file_info.get("type") == "file":
+                        gh_block = (
+                            f"\n\n[سورس‌کد استخراج‌شده از گیت‌هاب {parsed['owner']}/{parsed['repo']}:{parsed['path']}]:\n"
+                            f"• مسیر فایل: {file_info.get('path')} (خطوط: {file_info.get('line_count')}, زبان: {file_info.get('language')})\n"
+                            f"• محتوای فایل:\n{file_info.get('content', '')[:2500]}"
+                        )
+                        augmented_prompt = f"{user_prompt}{gh_block}"
+                        logger.info(f"Auto-injected GitHub file content for {parsed['path']}")
+                except Exception as err:
+                    logger.warning(f"Failed to auto-read GitHub file: {err}")
+            elif p_type == "user":
+                try:
+                    gh_user = parsed["username"]
+                    gh_info = await investigate_github_user(gh_user)
+                    if gh_info.get("success"):
+                        emails_str = ", ".join(gh_info.get("discovered_emails", [])) or "یافت نشد"
+                        gh_block = (
+                            f"\n\n[اطلاعات هویتی استخراج‌شده از گیت‌هاب کاربر {gh_user}]:\n"
+                            f"• نام: {gh_info.get('name')}\n"
+                            f"• ایمیل‌های کشف‌شده از سوابق کامیت: {emails_str}\n"
+                            f"• شرکت: {gh_info.get('company')}\n"
+                            f"• موقعیت مکانی: {gh_info.get('location')}\n"
+                            f"• بیوگرافی: {gh_info.get('bio')}\n"
+                            f"• مخازن عمومی: {gh_info.get('public_repos_count')} مخزن"
+                        )
+                        augmented_prompt = f"{user_prompt}{gh_block}"
+                        logger.info(f"Auto-injected GitHub user intel for {gh_user}")
+                except Exception as err:
+                    logger.warning(f"Failed to auto-fetch GitHub user info: {err}")
+
+    elif re.search(r"https?://[^\s<>\"']+", user_prompt):
+        url_match = re.search(r"https?://[^\s<>\"']+", user_prompt)
         target_url = url_match.group(0)
         try:
             crawl_data = await crawl_webpage_layers(target_url, max_text_len=3000)
@@ -373,28 +465,6 @@ async def augment_osint_prompt(user_prompt: str) -> str:
                 logger.info(f"Auto-crawled layers for URL: {target_url}")
         except Exception as err:
             logger.warning(f"Failed to auto-crawl URL {target_url}: {err}")
-
-    elif "github.com/" in user_prompt.lower():
-        gh_match = re.search(r"github\.com/([a-zA-Z0-9_-]+)", user_prompt, re.I)
-        if gh_match:
-            gh_user = gh_match.group(1)
-            try:
-                gh_info = await investigate_github_user(gh_user)
-                if gh_info.get("success"):
-                    emails_str = ", ".join(gh_info.get("discovered_emails", [])) or "یافت نشد"
-                    gh_block = (
-                        f"\n\n[اطلاعات هویتی استخراج‌شده از گیت‌هاب کاربر {gh_user}]:\n"
-                        f"• نام: {gh_info.get('name')}\n"
-                        f"• ایمیل‌های کشف‌شده از سوابق کامیت: {emails_str}\n"
-                        f"• شرکت: {gh_info.get('company')}\n"
-                        f"• موقعیت مکانی: {gh_info.get('location')}\n"
-                        f"• بیوگرافی: {gh_info.get('bio')}\n"
-                        f"• مخازن عمومی: {gh_info.get('public_repos_count')} مخزن"
-                    )
-                    augmented_prompt = f"{user_prompt}{gh_block}"
-                    logger.info(f"Auto-injected GitHub intel for {gh_user}")
-            except Exception as err:
-                logger.warning(f"Failed to auto-fetch GitHub info: {err}")
 
     elif any(dk in user_prompt.lower() for dk in ["دورک", "dork", "دورکینگ"]):
         target_match = re.search(r'(?:درباره|برای|دامنه|سایت|هدف|دورک)\s+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', user_prompt)

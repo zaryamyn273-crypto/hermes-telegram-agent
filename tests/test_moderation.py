@@ -449,7 +449,14 @@ async def test_group_list_commands_and_interception():
         "/groups",
         "/grouplist",
         "groups",
-        "grouplist"
+        "grouplist",
+        "استعلام گروه‌ها",
+        "استعلام گروه ها",
+        "وضعیت گروه‌ها",
+        "گروه‌های فعال",
+        "گروه‌های غیرفعال",
+        "لیست گروه‌های غیرفعال",
+        "لیست گروه‌هایی که توشون هستی ولی غیرفعاله",
     ]
     for q in test_queries:
         assert is_group_list_request(q) is True, f"Failed for {q}"
@@ -472,7 +479,8 @@ async def test_group_list_commands_and_interception():
     msg.reply_text.assert_called()
     assert status_msg.edit_text.called
     all_text = status_msg.edit_text.call_args[0][0]
-    assert "فهرست گروه‌های زنده" in all_text
+    assert "گروه‌های فعال" in all_text
+    assert "گروه‌های غیرفعال" in all_text
     assert str(cid_test) in all_text
 
     # Admin sending "لیست گروه‌ها"
