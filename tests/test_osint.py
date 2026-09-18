@@ -62,6 +62,21 @@ from tools.osint_bgp import lookup_bgp_asn_intel, format_bgp_report
 from tools.osint_subnet import calculate_subnet_and_scan_ptr, format_subnet_report
 from tools.osint_exif import extract_exif_metadata, format_exif_report
 from tools.osint_phish_intel import analyze_phishing_heuristics, format_phish_report
+from tools.osint_reverse_image import (
+    compute_image_fingerprints,
+    generate_reverse_search_urls,
+    format_reverse_image_report,
+    is_reverse_image_query,
+)
+from tools.vision import detect_vision_mode
+from tools.osint_social import (
+    parse_social_target,
+    generate_social_profile_links,
+    generate_social_dorks,
+    search_social_media_profiles,
+    format_social_search_report,
+)
+from tools.osint_username import format_username_recon_report
 from PIL import Image
 import io
 from agent_engine import (
@@ -559,6 +574,125 @@ async def test_phishing_heuristics_and_formatting():
     assert "کالبدشکافی پیشرفته هیوستیک فیشینگ و جعل برند" in report
     assert "ضریب احتمال فیشینگ:" in report
     assert "telegram-login-verify.xyz" in report
+
+
+def test_reverse_image_fingerprints_and_urls():
+    img = Image.new("RGB", (200, 150), color="blue")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    raw = buf.getvalue()
+
+    fp = compute_image_fingerprints(raw)
+    assert fp["width"] == 200
+    assert fp["height"] == 150
+    assert fp["format"] == "JPEG"
+    assert len(fp["dhash"]) == 16
+    assert len(fp["ahash"]) == 16
+    assert len(fp["sha256"]) == 64
+    assert len(fp["md5"]) == 32
+
+    urls = generate_reverse_search_urls("https://litter.catbox.moe/abc.jpg")
+    assert "lens.google.com" in urls["google_lens"]
+    assert "yandex.com/images/search" in urls["yandex"]
+    assert "bing.com/images/search" in urls["bing"]
+    assert "tineye.com/search" in urls["tineye"]
+    assert "baidu.com" in urls["baidu"]
+    assert "saucenao.com" in urls["saucenao"]
+
+    dummy_data = {
+        "success": True,
+        "filename": "sample_osint.jpg",
+        "fingerprints": fp,
+        "public_url": "https://litter.catbox.moe/abc.jpg",
+        "search_urls": urls,
+        "ai_visual_identification": "سوژه تصویر یک لوگو یا شیء با رنگ آبی تیره است.",
+    }
+    rep = format_reverse_image_report(dummy_data)
+    assert "Reverse Image Search OSINT" in rep
+    assert "Google Lens" in rep
+    assert "Yandex Images" in rep
+    assert fp["dhash"] in rep
+
+
+def test_is_reverse_image_query():
+    assert is_reverse_image_query("لطفاً این عکس رو با گوگل لنز برام سرچ کن") is True
+    assert is_reverse_image_query("جستجوی معکوس این تصویر") is True
+    assert is_reverse_image_query("این عکس کیه؟ پیداش کن") is True
+    assert is_reverse_image_query("منبع این عکس چیه") is True
+    assert is_reverse_image_query("reverse image search") is True
+    assert is_reverse_image_query("سلام پرومته چطوری") is False
+    assert is_reverse_image_query("") is False
+    assert is_reverse_image_query(None) is False
+
+
+def test_vision_task_modes():
+    assert detect_vision_mode("متن این فاکتور یا سند رسمی رو برام رونویسی کن") == "ocr"
+    assert detect_vision_mode("آیا این رسید فیک یا صفحه لاگین فیشینگ و جعل است؟") == "threat"
+    assert detect_vision_mode("این منظره کجاست و کشور یا شهرش رو حدس بزن") == "geoguess"
+    assert detect_vision_mode("پرامپت ساخت این تصویر در میدجرنی یا میدجورنی چی بوده؟") == "reconstruct"
+    assert detect_vision_mode("این عکس رو برای من تحلیل کن") == "general"
+    assert detect_vision_mode(None) == "general"
+
+
+@pytest.mark.asyncio
+async def test_username_reconnaissance_65_platforms():
+    assert len(PLATFORMS) >= 65
+    cats = {p.get("cat") for p in PLATFORMS}
+    assert "social" in cats
+    assert "developer" in cats
+    assert "security" in cats
+    assert "professional" in cats
+    assert "gaming" in cats
+    assert "creative" in cats
+    assert "audio" in cats
+    assert "web3" in cats
+
+    res = await search_username_across_platforms("google")
+    assert res["success"] is True
+    assert res["total_scanned"] >= 65
+    assert res["total_found"] > 0
+    assert "categorized" in res
+
+    report = format_username_recon_report(res)
+    assert "Username OSINT Scanner" in report
+    assert "@google" in report
+    assert "سرویس بررسی‌شده" in report
+
+
+@pytest.mark.asyncio
+async def test_social_media_reconnaissance():
+    p1 = parse_social_target("@satoshi")
+    assert p1["clean_handle"] == "satoshi"
+    assert p1["query_type"] == "username"
+
+    p2 = parse_social_target("Satoshi Nakamoto")
+    assert p2["clean_handle"] == "Satoshi Nakamoto"
+    assert p2["query_type"] == "fullname"
+
+    links = generate_social_profile_links("satoshi")
+    assert "telegram" in links
+    assert "twitter" in links
+    assert "linkedin" in links
+    assert "github" in links
+    assert "youtube" in links
+    assert "reddit" in links
+
+    dorks = generate_social_dorks("satoshi")
+    assert len(dorks) >= 5
+    assert any("site:t.me" in d["query"] for d in dorks)
+    assert any("twitter.com" in d["query"] for d in dorks)
+
+    res = await search_social_media_profiles("satoshi", max_results=3)
+    assert res["success"] is True
+    assert res["clean_target"] == "satoshi"
+    assert "direct_links" in res
+    assert "dorks" in res
+
+    report = format_social_search_report(res)
+    assert "Social Media OSINT" in report
+    assert "Telegram" in report
+    assert "دورک‌های اختصاصی گوگل" in report
+
 
 
 

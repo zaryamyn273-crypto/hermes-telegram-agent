@@ -566,6 +566,38 @@ async def augment_osint_prompt(user_prompt: str) -> str:
             except Exception as err:
                 logger.warning(f"Failed to auto-analyze phishing: {err}")
 
+    # Check for Username / Handle Reconnaissance across platforms
+    if any(k in user_prompt.lower() for k in ["یوزرنیم", "نام کاربری", "username", "پلتفرم‌ها", "usercheck"]):
+        u_match = re.search(r"(?:یوزرنیم|نام\s*کاربری|username|usercheck)\s*[:=]?\s*@?([a-zA-Z0-9_.-]{3,30})", user_prompt, re.I)
+        if not u_match:
+            u_match = re.search(r"@([a-zA-Z0-9_.-]{3,30})", user_prompt)
+        if u_match:
+            try:
+                from tools.osint_username import search_username_across_platforms
+                u_target = u_match.group(1)
+                u_res = await search_username_across_platforms(u_target)
+                if u_res.get("success"):
+                    augmented_prompt = f"{augmented_prompt}\n\n[استعلام و ردیابی نام کاربری {u_target} در پلتفرم‌های جهانی]: {json.dumps(u_res, ensure_ascii=False)[:1200]}"
+                    logger.info(f"Auto-injected username recon for {u_target}")
+            except Exception as err:
+                logger.warning(f"Failed to auto-search username: {err}")
+
+    # Check for Social Media / Cross-Network Reconnaissance mentions
+    if any(k in user_prompt.lower() for k in ["شبکه‌های اجتماعی", "شبکه اجتماعی", "اکانت‌های", "social media", "social recon", "پروفایل‌های"]):
+        s_match = re.search(r"(?:اکانت|پروفایل|حساب|social|یوزر|ردگیری)\s*[:=]?\s*@?([a-zA-Z0-9_.-]{3,30})", user_prompt, re.I)
+        if not s_match:
+            s_match = re.search(r"@([a-zA-Z0-9_.-]{3,30})", user_prompt)
+        if s_match:
+            try:
+                from tools.osint_social import search_social_media_profiles
+                s_target = s_match.group(1)
+                s_res = await search_social_media_profiles(s_target, max_results=5)
+                if s_res.get("success"):
+                    augmented_prompt = f"{augmented_prompt}\n\n[داده‌های اطلاعاتی شبکه‌های اجتماعی برای {s_target}]: {json.dumps(s_res, ensure_ascii=False)[:1200]}"
+                    logger.info(f"Auto-injected social recon for {s_target}")
+            except Exception as err:
+                logger.warning(f"Failed to auto-search social media: {err}")
+
     return augmented_prompt
 
 

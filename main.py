@@ -147,7 +147,19 @@ from tools.osint_dork import (
 )
 from tools.osint_linkedin import search_linkedin_profile, search_linkedin_company
 from tools.osint_github import investigate_github_user, search_github
-from tools.osint_username import search_username_across_platforms
+from tools.osint_username import (
+    search_username_across_platforms,
+    format_username_recon_report,
+)
+from tools.osint_reverse_image import (
+    perform_reverse_image_recon,
+    format_reverse_image_report,
+    is_reverse_image_query,
+)
+from tools.osint_social import (
+    search_social_media_profiles,
+    format_social_search_report,
+)
 from tools.osint_network import (
     resolve_dns_records,
     enumerate_subdomains_crtsh,
@@ -182,7 +194,12 @@ from tools.telegram_osint import (
     investigate_telegram_target,
     format_telegram_target_report,
 )
-from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
+from utils.formatter import (
+    markdown_to_telegram_html,
+    split_message,
+    strip_thinking,
+    wrap_in_expandable_blockquote,
+)
 
 # Setup Logging
 logging.basicConfig(
@@ -1375,8 +1392,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🕷 <b>کاوشگر لایه‌های وب و متاداده:</b> <code>/pb_crawl [لینک]</code>\n"
         "• 🔎 <b>دورک‌های هوشمند گوگل:</b> <code>/pb_dork [هدف]</code>\n"
         "• 🐙 <b>کاوشگر امنیتی گیت‌هاب:</b> <code>/pb_github [یوزر/مخزن]</code>\n"
-        "• 💼 <b>هوش سازمانی لینکدین:</b> <code>/pb_linkedin [شخص/شرکت]</code>\n"
-        "• 👤 <b>ردیابی نام‌کاربری:</b> <code>/pb_usercheck [یوزرنیم]</code> در ۲۵+ پلتفرم\n"
+        "• 👤 <b>ردیابی نام‌کاربری:</b> <code>/pb_usercheck [یوزرنیم]</code> در ۶۵+ پلتفرم جهانی\n"
+        "• 🌐 <b>ردگیری شبکه‌های اجتماعی:</b> <code>/pb_social [یوزر/نام]</code>\n"
+        "• 🔍 <b>جستجوی معکوس تصویر:</b> <code>/pb_lens [عکس]</code> در گوگل لنز و یاندکس\n"
+        "• 📝 <b>استخراج دقیق متن اسناد (OCR):</b> <code>/pb_ocr [سند/عکس]</code>\n"
         "• 📡 <b>رکوردهای کامل DNS:</b> <code>/pb_dns [دامنه]</code>\n"
         "• 🌐 <b>کشف ساب‌دامین‌ها:</b> <code>/pb_subdomains [دامنه]</code>\n"
         "• 🔒 <b>بازرسی گواهی SSL و ساب‌دامین‌های SAN:</b> <code>/pb_ssl [دامنه]</code>\n"
@@ -1430,8 +1449,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/pb_crawl [لینک]</code> - کاوش لایه‌های صفحه، کشف ایمیل‌ها، شماره‌ها و ساختار وب‌سایت\n"
         "• <code>/pb_dork [هدف]</code> - تولید و اجرای دورک‌های هدفمند گوگل برای نفوذ، اسناد، گیت و دایرکتوری‌ها\n"
         "• <code>/pb_github [کاربر]</code> - تحلیل اکانت گیت‌هاب، استخراج ایمیل از کامیت‌ها و کلیدهای SSH\n"
-        "• <code>/pb_linkedin [نام/شرکت]</code> - کشف سوابق و پروفایل‌های لینکدین\n"
-        "• <code>/pb_usercheck [نام کاربری]</code> - استعلام فوری یوزرنیم در ۲۵+ پلتفرم مطرح جهانی\n"
+        "• <code>/pb_usercheck [نام کاربری]</code> - استعلام فوری یوزرنیم در ۶۵+ پلتفرم مطرح جهانی\n"
+        "• <code>/pb_social [یوزر/نام]</code> - ردگیری عمیق در شبکه‌های اجتماعی و کشف پروفایل‌ها\n"
+        "• <code>/pb_lens [عکس/لینک]</code> - جستجوی معکوس چندموتوره تصویر (گوگل لنز، یاندکس، بینگ و تین‌آی)\n"
+        "• <code>/pb_ocr [عکس/سند]</code> - استخراج ۱۰۰٪ متون، ارقام و جداول اسناد با OCR\n"
         "• <code>/pb_dns [دامنه]</code> - تفکیک کلیه رکوردهای DNS دامنه\n"
         "• <code>/pb_subdomains [دامنه]</code> - استخراج تمامی ساب‌دامین‌ها از لاگ‌های گواهی امنیتی\n"
         "• <code>/pb_ssl [دامنه]</code> - بازرسی گواهی امنیتی SSL/TLS و کشف ساب‌دامین‌های پنهان در SANs\n"
@@ -1917,7 +1938,7 @@ async def linkedin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def usercheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Asynchronous 25+ platform username reconnaissance checker."""
+    """Asynchronous 65+ platform Sherlock-grade username reconnaissance scanner."""
     msg = update.effective_message
     chat = update.effective_chat
     if not msg or not chat:
@@ -1926,47 +1947,28 @@ async def usercheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = (args[0] if args else "").lstrip("@").strip()
     if not username:
         guide = (
-            "👤 <b>ردیابی نام‌کاربری در ۲۵+ پلتفرم جهان (Username OSINT):</b>\n\n"
-            "پویش موازی و لحظه‌ای نام‌کاربری در شبکه‌های اجتماعی، پلتفرم‌های توسعه‌دهندگان، هاستینگ کد، پایگاه‌های رمزنگاری و گیمینگ.\n\n"
+            "👤 <b>ردیابی نام‌کاربری در ۶۵+ پلتفرم جهان (Username OSINT Scanner):</b>\n\n"
+            "پویش موازی و لحظه‌ای نام‌کاربری در شبکه‌های اجتماعی، پلتفرم‌های توسعه‌دهندگان، هاستینگ کد، پایگاه‌های امنیت سایبری، باگ‌بانتی، گیمینگ و وب۳.\n\n"
             "📌 <b>نحوه استفاده:</b>\n"
-            "• <code>/usercheck [نام کاربری]</code>\n"
+            "• <code>/pb_usercheck [نام کاربری]</code>\n"
             "• <code>/username [نام کاربری]</code>\n\n"
-            "مثال: <code>/usercheck SatoshiNakamoto</code>"
+            "مثال: <code>/pb_usercheck SatoshiNakamoto</code>"
         )
         await msg.reply_text(guide, parse_mode=ParseMode.HTML)
         return
 
     await chat.send_action(ChatAction.TYPING)
-    status_msg = await msg.reply_text(f"👤 <b>در حال ردیابی نام‌کاربری @{html.escape(username)} در ۲۵+ پلتفرم...</b>", parse_mode=ParseMode.HTML)
+    status_msg = await msg.reply_text(f"👤 <b>در حال ردیابی نام‌کاربری @{html.escape(username)} در ۶۵+ پلتفرم جهانی...</b>", parse_mode=ParseMode.HTML)
     t0 = time.perf_counter()
     data = await search_username_across_platforms(username)
     elapsed = time.perf_counter() - t0
     record_chat_latency(chat.id, elapsed, f"ردیابی نام‌کاربری (@{username})")
 
-    found_count = data.get("total_found", data.get("found_count", 0))
-    total_checked = data.get("total_scanned", data.get("total_checked", 0))
-    found_profiles = data.get("profiles", data.get("found", []))
-
-    lines = [
-        f"🎯 <b>نتایج ردیابی نام‌کاربری:</b> <code>@{html.escape(username)}</code>",
-        f"📊 <b>وضعیت:</b> کشف‌شده در <b>{found_count}</b> از <b>{total_checked}</b> پلتفرم بررسی‌شده (در <code>{elapsed:.2f}s</code>)\n"
-    ]
-
-    if not found_profiles:
-        lines.append("<i>این نام کاربری در پلتفرم‌های اصلی عمومی یافت نشد یا ثبت نگردیده است.</i>")
-    else:
-        for p in found_profiles:
-            pname = html.escape(p.get("platform", ""))
-            cat = html.escape(p.get("category", ""))
-            url = p.get("url", "#")
-            cat_str = f" ({cat})" if cat else ""
-            lines.append(f"  ✅ <b>{pname}</b>{cat_str}: <a href=\"{url}\">مشاهده پروفایل</a>")
-
-    text = "\n".join(lines)
+    report = format_username_recon_report(data)
     try:
-        await status_msg.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception:
-        await _deliver_reply(msg, text)
+        await _deliver_reply(msg, report)
 
 
 async def dns_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2740,6 +2742,196 @@ async def phish_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _deliver_reply(msg, report)
 
 
+async def reverse_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Multi-engine reverse image search (Google Lens, Yandex, Bing Visual, TinEye, Baidu)."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    args = context.args or []
+    target_url = args[0].strip() if args else ""
+
+    img_bytes: Optional[bytes] = None
+    filename = "image.jpg"
+
+    # 1. Attached photo or document
+    if msg.photo:
+        photo = msg.photo[-1]
+        tg_file = await context.bot.get_file(photo.file_id)
+        img_bytes = bytes(await tg_file.download_as_bytearray())
+        filename = "attached_image.jpg"
+    elif msg.document and (msg.document.mime_type or "").startswith("image/"):
+        tg_file = await context.bot.get_file(msg.document.file_id)
+        img_bytes = bytes(await tg_file.download_as_bytearray())
+        filename = msg.document.file_name or "document_image.jpg"
+    # 2. Replied message with photo or document
+    elif msg.reply_to_message:
+        r = msg.reply_to_message
+        if r.photo:
+            photo = r.photo[-1]
+            tg_file = await context.bot.get_file(photo.file_id)
+            img_bytes = bytes(await tg_file.download_as_bytearray())
+            filename = "replied_image.jpg"
+        elif r.document and (r.document.mime_type or "").startswith("image/"):
+            tg_file = await context.bot.get_file(r.document.file_id)
+            img_bytes = bytes(await tg_file.download_as_bytearray())
+            filename = r.document.file_name or "replied_image.jpg"
+        elif not target_url:
+            r_txt = r.text or r.caption or ""
+            m = re.search(r"https?://\S+\.(?:jpg|jpeg|png|tiff|webp|heic)\b", r_txt, re.I)
+            if m:
+                target_url = m.group(0)
+
+    # 3. Direct URL parameter
+    if not img_bytes and target_url:
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                resp = await client.get(target_url)
+                if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
+                    img_bytes = resp.content
+                    filename = target_url.split("/")[-1].split("?")[0] or "web_image.jpg"
+        except Exception as e:
+            logger.warning(f"Error downloading image from URL {target_url}: {e}")
+
+    if not img_bytes:
+        guide = (
+            "🔍 <b>جستجوی معکوس و هوش بصری تصاویر (Reverse Image Search OSINT):</b>\n\n"
+            "ارسال تصویر به قدرتمندترین موتورهای بصری جهان جهت <b>تشخیص چهره، مکان، اولین تاریخ انتشار و تطبیق وب</b>:\n"
+            "• <b>Google Lens:</b> شناسایی کالا، مکان‌ها و وب‌سایت‌های مشابه\n"
+            "• <b>Yandex Images:</b> شماره ۱ تشخیص چهره و سوژه‌ها\n"
+            "• <b>Bing Visual & TinEye:</b> ردگیری تاریخچه و اصالت تصویر\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• ریپلای روی هر عکس با دستور <code>/pb_lens</code> یا <code>/pb_reverse</code>\n"
+            "• ارسال عکس به همراه کپشن <code>/pb_lens</code>\n"
+            "• <code>/pb_lens https://example.com/photo.jpg</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text("🔍 <b>در حال کالبدشکافی ادراکی و استخراج لینک‌های معکوس چندموتوره...</b>", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+
+    res = await perform_reverse_image_recon(img_bytes, filename=filename, extract_ai_intel=True)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, "جستجوی معکوس تصویر (Reverse OSINT)")
+
+    report = format_reverse_image_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Precision multilingual OCR document and image text transcription."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    args = context.args or []
+    custom_instructions = " ".join(args).strip() if args else ""
+
+    img_bytes: Optional[bytes] = None
+
+    # 1. Attached photo or document
+    if msg.photo:
+        photo = msg.photo[-1]
+        tg_file = await context.bot.get_file(photo.file_id)
+        img_bytes = bytes(await tg_file.download_as_bytearray())
+    elif msg.document and (msg.document.mime_type or "").startswith("image/"):
+        tg_file = await context.bot.get_file(msg.document.file_id)
+        img_bytes = bytes(await tg_file.download_as_bytearray())
+    # 2. Replied message
+    elif msg.reply_to_message:
+        r = msg.reply_to_message
+        if r.photo:
+            photo = r.photo[-1]
+            tg_file = await context.bot.get_file(photo.file_id)
+            img_bytes = bytes(await tg_file.download_as_bytearray())
+        elif r.document and (r.document.mime_type or "").startswith("image/"):
+            tg_file = await context.bot.get_file(r.document.file_id)
+            img_bytes = bytes(await tg_file.download_as_bytearray())
+
+    if not img_bytes:
+        guide = (
+            "📝 <b>موتور تخصصی استخراج متن و اسناد (Precision OCR Engine):</b>\n\n"
+            "استخراج دقیق و ۱۰۰٪ کلمه به کلمه متون، ارقام، جدول‌ها، فاکتورها، دست‌نویس‌ها و اسناد رسمی چندزبانه (فارسی، انگلیسی، عربی و...).\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• ریپلای روی هر تصویر یا سند با دستور <code>/pb_ocr</code>\n"
+            "• ارسال عکس با کپشن <code>/pb_ocr</code>\n"
+            "• برای اعمال دستور خاص: <code>/pb_ocr جدول‌ها را استخراج کن</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text("📝 <b>در حال اسکن نوری و استخراج لایه‌های متنی سند (OCR)...</b>", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+
+    ocr_prompt = custom_instructions or "لطفاً تمامی متون، ارقام، عناوین، جدول‌ها و داده‌های نوشتاری موجود در این تصویر را به دقت ۱۰۰٪ و به طور کامل استخراج و بازنویسی کن. ساختار جداول و پاراگراف‌ها را دقیقاً حفظ کن."
+    analysis = await analyze_image_with_vision(
+        images=[img_bytes],
+        prompt=ocr_prompt,
+        chat_id=chat.id,
+        task_mode="ocr",
+    )
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, "استخراج OCR اسناد")
+
+    report = (
+        "📝 <b>نتیجه استخراج هوشمند متن سند (Precision OCR):</b>\n\n"
+        f"{wrap_in_expandable_blockquote(analysis)}\n\n"
+        f"⏱ <i>پردازش با هوش بینایی چندوجهی در <code>{elapsed:.2f}s</code></i>"
+    )
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def social_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cross-platform social media intelligence & deep profile reconnaissance."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    args = context.args or []
+    target = " ".join(args).strip() if args else ""
+    if not target and msg.reply_to_message:
+        target = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
+
+    if not target:
+        guide = (
+            "🌐 <b>ردگیری و جستجوی عمیق شبکه‌های اجتماعی (Social Media OSINT):</b>\n\n"
+            "پویش همزمان ردپای دیجیتال در شبکه‌های اجتماعی بزرگ (تلگرام، توییتر/X، اینستاگرام، لینکدین، گیت‌هاب، ردیت، تیک‌تاک و تردز) "
+            "به همراه دسترسی مستقیم، یافته‌های وب و دورک‌های نفوذ اختصاصی.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_social [نام‌کاربری یا نام کامل]</code>\n"
+            "• <code>/social @handle</code>\n\n"
+            "مثال: <code>/pb_social SatoshiNakamoto</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🌐 <b>در حال ردگیری و پویش شبکه‌های اجتماعی برای:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+
+    data = await search_social_media_profiles(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"ردگیری شبکه‌های اجتماعی ({target[:15]})")
+
+    report = format_social_search_report(data)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
 async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Categorized OSINT Master Toolbox menu."""
     msg = update.effective_message
@@ -2776,16 +2968,20 @@ async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/pb_email [ایمیل]</code> - اعتبارسنجی سینتکس، میل‌سرور و پروفایل Gravatar\n"
         "• <code>/pb_phone [شماره]</code> - اعتبارسنجی ساختار و تشخیص اپراتور تلفن همراه\n\n"
         "👤 <b>۵. هویت و شبکه‌های اجتماعی (Social & Entity Recon):</b>\n"
+        "• <code>/pb_social [یوزر/نام]</code> - ردگیری عمیق و متقابل در شبکه‌های اجتماعی بزرگ جهان\n"
+        "• <code>/pb_usercheck [یوزر]</code> - پویش هویت نام کاربری در ۶۵+ پلتفرم اختصاصی اینترنت\n"
         "• <code>/pb_tg [یوزر/آیدی]</code> - استخراج شناسه عددی، مشخصات و ردگیری تلگرام\n"
         "• <code>/pb_github [کاربر]</code> - تحلیل اکانت گیت‌هاب، استخراج ایمیل از کامیت‌ها و کلیدها\n"
-        "• <code>/pb_linkedin [نام/شرکت]</code> - کشف پروفایل و ساختار سازمانی لینکدین\n"
-        "• <code>/pb_usercheck [یوزر]</code> - استعلام فوری نام کاربری در ۲۵+ پلتفرم جهانی\n\n"
-        "🔐 <b>۶. فارنزیک، رمزنگاری و فایل‌ها (Forensics & Cryptography):</b>\n"
-        "• <code>/pb_exif [عکس/سند]</code> - استخراج فارنزیک متاداده EXIF و مختصات ماهواره‌ای GPS\n"
+        "• <code>/pb_linkedin [نام/شرکت]</code> - کشف پروفایل و ساختار سازمانی لینکدین\n\n"
+        "👁 <b>۶. اوسینت بصری، تصاویر و استخراج متن (Visual OSINT & Vision):</b>\n"
+        "• <code>/pb_lens [عکس/لینک]</code> - جستجوی معکوس چندموتوره تصویر (گوگل لنز، یاندکس، بینگ و تین‌آی)\n"
+        "• <code>/pb_ocr [عکس/سند]</code> - استخراج ۱۰۰٪ متون، ارقام، جدول‌ها و فاکتورها با هوش بینایی پرومته\n"
+        "• <code>/pb_exif [عکس/سند]</code> - استخراج فارنزیک متاداده EXIF و مختصات ماهواره‌ای GPS\n\n"
+        "🔐 <b>۷. فارنزیک، رمزنگاری و فایل‌ها (Forensics & Cryptography):</b>\n"
         "• <code>/pb_hash [هش/توکن/متن]</code> - شناسایی ۱۵+ الگوریتم هش و کالبدشکافی توکن JWT\n"
         "• <code>/pb_mac [مک‌آدرس]</code> - شناسایی شرکت سازنده تجهیزات سخت‌افزاری و کارت شبکه\n"
         "• <code>/pb_scan [لینک/فایل/هش]</code> - اسکن امنیتی و تحلیل بدافزار با VirusTotal\n\n"
-        "🏛 <b>۷. آرشیو اسناد و پایگاه‌های اطلاعاتی (Public Intel & Archives):</b>\n"
+        "🏛 <b>۸. آرشیو اسناد و پایگاه‌های اطلاعاتی (Public Intel & Archives):</b>\n"
         "• <code>/pb_db [هدف]</code> - استعلام آرشیو Wayback Machine، نشت‌های عمومی و CVE\n\n"
         "⚡️ <i>جهت دریافت راهنمای هر ابزار، دستور آن را بدون آرگومان ارسال فرمایید.</i>"
     )
@@ -3051,6 +3247,14 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     preview_url = build_reconstruction_image_url(reconstruct_prompt)
                     analysis += f"\n\n🎨 <b>پیش‌نمایش شبیه‌سازی مجدد تصویر:</b>\n<a href=\"{preview_url}\">مشاهده پیش‌نمایش تصویر بازسازی‌شده</a>"
 
+                if is_reverse_image_query(album_caption) and photos_bytes_list:
+                    try:
+                        rev_res = await perform_reverse_image_recon(photos_bytes_list[0], filename="album_photo.jpg", extract_ai_intel=False)
+                        rev_report = format_reverse_image_report(rev_res)
+                        analysis += f"\n\n{rev_report}"
+                    except Exception as rev_err:
+                        logger.warning(f"Error performing auto reverse image recon on album: {rev_err}")
+
                 elapsed = time.perf_counter() - t0
                 engine_label = f"موتور بینایی چندوجهی پرومته ({len(photos_bytes_list)} تصویر آلبوم)"
                 record_chat_latency(chat.id, elapsed, engine_label)
@@ -3111,6 +3315,14 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reconstruct_prompt = cleaned_caption or "photorealistic detailed visual recreation"
             preview_url = build_reconstruction_image_url(reconstruct_prompt)
             analysis += f"\n\n🎨 <b>پیش‌نمایش شبیه‌سازی مجدد تصویر:</b>\n<a href=\"{preview_url}\">مشاهده پیش‌نمایش تصویر بازسازی‌شده</a>"
+
+        if is_reverse_image_query(caption):
+            try:
+                rev_res = await perform_reverse_image_recon(photos_bytes_list[0], filename="photo.jpg", extract_ai_intel=False)
+                rev_report = format_reverse_image_report(rev_res)
+                analysis += f"\n\n{rev_report}"
+            except Exception as rev_err:
+                logger.warning(f"Error performing auto reverse image recon: {rev_err}")
 
         elapsed = time.perf_counter() - t0
         engine_label = f"موتور بینایی چندوجهی پرومته (1 تصویر)"
@@ -5802,7 +6014,10 @@ def build_application():
                 BotCommand("pb_dork", "تولید دورک‌های پیشرفته گوگل"),
                 BotCommand("pb_github", "تحلیل اکانت و ریپوزیتوری گیت‌هاب"),
                 BotCommand("pb_linkedin", "جستجو و بررسی پروفایل‌های لینکدین"),
-                BotCommand("pb_usercheck", "بررسی نام کاربری در ۲۵+ پلتفرم"),
+                BotCommand("pb_usercheck", "بررسی نام کاربری در ۶۵+ پلتفرم جهانی"),
+                BotCommand("pb_social", "ردگیری و کاوش در شبکه‌های اجتماعی جهانی"),
+                BotCommand("pb_lens", "جستجوی معکوس چندموتوره تصویر (گوگل لنز، یاندکس)"),
+                BotCommand("pb_ocr", "استخراج متون، ارقام و جداول اسناد (OCR)"),
                 BotCommand("pb_dns", "بررسی رکوردهای کامل DNS"),
                 BotCommand("pb_subdomains", "کشف ساب‌دامین‌ها با لاگ گواهی"),
                 BotCommand("pb_ip", "اطلاعات مکانی و شبکه IP"),
@@ -5860,6 +6075,9 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["github", "git", "gh"]), guard(github_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["linkedin", "in"]), guard(linkedin_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["usercheck", "username", "user"]), guard(usercheck_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["social", "socials", "profile", "socialsearch"]), guard(social_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["lens", "reverse", "revimg", "image_search", "imagesearch"]), guard(reverse_image_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["ocr", "readtext", "scan_text", "matn"]), guard(ocr_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["dns", "ns", "mx"]), guard(dns_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["subdomains", "subdomain", "subs", "crtsh"]), guard(subdomains_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["ip", "geo", "asn"]), guard(ip_command, is_cmd=True)))

@@ -24,6 +24,27 @@ from .osint_github import (
 )
 from .osint_username import (
     search_username_across_platforms,
+    format_username_recon_report,
+)
+from .osint_reverse_image import (
+    compute_image_fingerprints,
+    upload_image_for_recon,
+    generate_reverse_search_urls,
+    perform_reverse_image_recon,
+    format_reverse_image_report,
+    is_reverse_image_query,
+)
+from .osint_social import (
+    parse_social_target,
+    generate_social_profile_links,
+    generate_social_dorks,
+    search_social_media_profiles,
+    format_social_search_report,
+)
+from .vision import (
+    detect_vision_mode,
+    analyze_image_with_vision,
+    is_reconstruction_query,
 )
 from .osint_network import (
     resolve_dns_records,
@@ -156,4 +177,19 @@ __all__ = [
     "format_exif_report",
     "analyze_phishing_heuristics",
     "format_phish_report",
+    "format_username_recon_report",
+    "compute_image_fingerprints",
+    "upload_image_for_recon",
+    "generate_reverse_search_urls",
+    "perform_reverse_image_recon",
+    "format_reverse_image_report",
+    "is_reverse_image_query",
+    "parse_social_target",
+    "generate_social_profile_links",
+    "generate_social_dorks",
+    "search_social_media_profiles",
+    "format_social_search_report",
+    "detect_vision_mode",
+    "analyze_image_with_vision",
+    "is_reconstruction_query",
 ]

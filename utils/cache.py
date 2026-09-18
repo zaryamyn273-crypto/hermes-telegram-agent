@@ -63,3 +63,7 @@ threat_intel_cache = AsyncTTLCache(maxsize=2000, default_ttl=900.0)# 15 minutes
 bgp_cache = AsyncTTLCache(maxsize=1000, default_ttl=3600.0)        # 1 hour
 mac_cache = AsyncTTLCache(maxsize=5000, default_ttl=86400.0)       # 24 hours
 phish_cache = AsyncTTLCache(maxsize=2000, default_ttl=600.0)       # 10 minutes
+vision_cache = AsyncTTLCache(maxsize=1000, default_ttl=600.0)      # 10 minutes
+social_cache = AsyncTTLCache(maxsize=1000, default_ttl=900.0)      # 15 minutes
+username_cache = AsyncTTLCache(maxsize=1000, default_ttl=1800.0)   # 30 minutes
+
