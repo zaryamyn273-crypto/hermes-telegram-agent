@@ -147,6 +147,7 @@ def _init_sqlite_tables(conn: sqlite3.Connection):
         );
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages (chat_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id ON messages (chat_id, id DESC);")
 
         # Moderation and administrative tables
         cur.execute("""
@@ -297,9 +298,10 @@ async def execute_d1_query(sql: str, params: Optional[List[Any]] = None) -> Dict
 
 
 # =========================================================================
-# In-Memory Chat History Management (Capped at 50 Messages Per Group)
+# In-Memory Chat History Management (Capped at up to 5,000 Messages Per Group)
 # =========================================================================
 
+_MAX_STORED_MESSAGES_PER_CHAT = 5000
 _MAX_RAM_MESSAGES_PER_CHAT = 50
 
 
@@ -316,7 +318,7 @@ async def persist_message(
     is_bot: int = 0
 ) -> bool:
     """
-    Persists message in in-memory RAM and strictly prunes history to 50 messages per group.
+    Persists message in database and prunes history up to 5,000 messages per group.
     """
     if not content or not content.strip():
         return False
@@ -345,11 +347,11 @@ async def persist_message(
     ]
     res = await execute_d1_query(sql, params)
 
-    # Strictly enforce 50 messages per chat in RAM
+    # Strictly enforce max 5000 messages per chat
     prune_sql = f"""
     DELETE FROM messages
     WHERE chat_id = ? AND id NOT IN (
-        SELECT id FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT {_MAX_RAM_MESSAGES_PER_CHAT}
+        SELECT id FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT {_MAX_STORED_MESSAGES_PER_CHAT}
     )
     """
     await execute_d1_query(prune_sql, [chat_id, chat_id])
@@ -435,12 +437,12 @@ async def search_messages_db(
 
 async def get_chat_messages_for_summary(
     chat_id: int,
-    limit: int = 50
+    limit: int = 100
 ) -> List[Dict[str, Any]]:
     """
-    Retrieves up to 50 messages for a given chat_id in chronological order from in-memory RAM.
+    Retrieves up to 5,000 messages for a given chat_id in chronological order.
     """
-    clean_limit = min(_MAX_RAM_MESSAGES_PER_CHAT, max(1, int(limit)))
+    clean_limit = min(_MAX_STORED_MESSAGES_PER_CHAT, max(1, int(limit)))
     sql = """
     SELECT id, chat_id, message_id, user_id, username, full_name, role, content, media_type, is_bot, created_at
     FROM messages

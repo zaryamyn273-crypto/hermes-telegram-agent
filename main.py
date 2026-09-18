@@ -3059,7 +3059,7 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Summarizes recent chat messages (up to 3000) using lightweight sub-agents."""
+    """Summarizes recent chat messages (1 to 5,000) using lightweight parallel sub-agents."""
     chat = update.effective_chat
     message = update.effective_message
     if not chat or not message:
@@ -3067,10 +3067,26 @@ async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     count = 100
     if context.args:
+        raw_arg = " ".join(context.args).strip()
+        from tools.summary_tool import _extract_count_from_text, _normalize_persian_digits
+        extracted = _extract_count_from_text(_normalize_persian_digits(raw_arg.lower()))
+        if extracted is not None:
+            count = min(5000, max(1, extracted))
+        else:
+            try:
+                val = int(context.args[0])
+                count = min(5000, max(1, val))
+            except ValueError:
+                pass
+
+    status_msg = None
+    if count >= 300:
         try:
-            val = int(context.args[0])
-            count = min(3000, max(10, val))
-        except ValueError:
+            status_msg = await message.reply_text(
+                f"⚡️ <i>در حال بازخوانی فوق‌سریع و تحلیل هوشمند <code>{count:,}</code> پیام با ساب‌اجنت‌های موازی...</i>",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
             pass
 
     t0 = time.perf_counter()
@@ -3079,7 +3095,12 @@ async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count=count,
         chat_title=chat.title or ""
     )
-    record_chat_latency(chat.id, time.perf_counter() - t0, f"ساب‌اجنت‌های خلاصه‌ساز گفتگو ({count} پیام)")
+    record_chat_latency(chat.id, time.perf_counter() - t0, f"ساب‌اجنت‌های خلاصه‌ساز گفتگو ({count:,} پیام)")
+    if status_msg:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
     await message.reply_text(report, parse_mode=ParseMode.HTML)
 
 
@@ -5227,16 +5248,31 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(search_res, parse_mode=ParseMode.HTML)
         return
 
-    # Fast-Path -2.2: Multi-Subagent Conversation Summarization (Up to 3,000 Messages)
+    # Fast-Path -2.2: Multi-Subagent Conversation Summarization (1 to 5,000 Messages)
     is_sum, sum_count = parse_summary_request(cleaned_lower)
     if is_sum:
+        status_msg = None
+        if sum_count >= 300:
+            try:
+                status_msg = await message.reply_text(
+                    f"⚡️ <i>در حال بازخوانی فوق‌سریع و تحلیل هوشمند <code>{sum_count:,}</code> پیام با ساب‌اجنت‌های موازی...</i>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
         t0 = time.perf_counter()
         summary_rep = await summarize_group_messages(
             chat_id=chat.id,
             count=sum_count,
             chat_title=chat.title or ""
         )
-        record_chat_latency(chat.id, time.perf_counter() - t0, f"ساب‌اجنت‌های خلاصه‌ساز گفتگو ({sum_count} پیام)")
+        record_chat_latency(chat.id, time.perf_counter() - t0, f"ساب‌اجنت‌های خلاصه‌ساز گفتگو ({sum_count:,} پیام)")
+        if status_msg:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
         await message.reply_text(summary_rep, parse_mode=ParseMode.HTML)
         return
 

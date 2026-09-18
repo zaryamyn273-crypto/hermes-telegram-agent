@@ -243,21 +243,25 @@ async def test_group_ram_memory_quota_50():
 
     clear_session(group1_id)
     clear_session(group2_id)
+    await database.clear_session_in_d1(group1_id)
+    await database.clear_session_in_d1(group2_id)
 
-    # 1. Add 60 messages to group 1 in RAM
+    # 1. Add 60 messages to group 1 in RAM & DB
     for i in range(1, 61):
         append_to_session(group1_id, "user" if i % 2 != 0 else "assistant", f"Message {i}")
         await database.persist_message(group1_id, 1000 + i, "user", f"Message {i}")
 
-    # Verify group 1 RAM is capped at exactly 50
+    # Verify group 1 RAM session buffer is capped at exactly 50
     h1 = get_session_history(group1_id)
     assert len(h1) == 50
     assert h1[0]["content"] == "Message 11"
     assert h1[-1]["content"] == "Message 60"
 
-    # Verify database in-memory summary reads at most 50
-    summary_msgs = await database.get_chat_messages_for_summary(group1_id, limit=100)
-    assert len(summary_msgs) <= 50
+    # Verify database summary reads exact requested limit (up to 5000 messages)
+    summary_msgs_50 = await database.get_chat_messages_for_summary(group1_id, limit=50)
+    assert len(summary_msgs_50) == 50
+    summary_msgs_all = await database.get_chat_messages_for_summary(group1_id, limit=100)
+    assert len(summary_msgs_all) == 60
 
     # 2. Add 10 messages to group 2 and verify isolation
     for j in range(1, 11):
