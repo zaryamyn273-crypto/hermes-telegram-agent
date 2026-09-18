@@ -51,6 +51,11 @@ from tools.public_db_intel import (
     format_public_intel_report,
 )
 from tools.osint_email_phone import investigate_email, analyze_phone_number
+from tools.osint_whois import lookup_domain_whois, format_whois_report
+from tools.osint_email_security import audit_domain_email_security, format_email_security_report
+from tools.osint_web_meta import inspect_web_meta, format_web_meta_report
+from tools.osint_redirects import trace_http_redirect_chain, format_redirects_report
+from tools.osint_hardware import lookup_mac_vendor, format_mac_report
 from agent_engine import (
     sanitize_identity,
     clean_agent_output,
@@ -334,4 +339,83 @@ async def test_tavily_search_formatting():
     formatted = format_osint_search_results(data)
     assert "نتایج کاوش وب (OSINT Search)" in formatted
     assert "python" in formatted.lower() or "asyncio" in formatted.lower()
+
+
+@pytest.mark.asyncio
+async def test_whois_lookup_and_formatting():
+    data = await lookup_domain_whois("google.com")
+    assert data["success"] is True
+    assert data["domain"] == "google.com"
+    assert data["registrar"] != ""
+    assert data["created_at"] != ""
+    assert len(data.get("nameservers", [])) > 0
+
+    report = format_whois_report(data)
+    assert "اطلاعات ثبتی و هویتی دامنه (Domain WHOIS / RDAP)" in report
+    assert "google.com" in report
+    assert "ثبت‌کننده (Registrar):" in report
+
+
+def test_email_security_audit_and_formatting():
+    data = audit_domain_email_security("google.com")
+    assert data["success"] is True
+    assert data["domain"] == "google.com"
+    assert data["spf"]["has_spf"] is True
+    assert data["dmarc"]["has_dmarc"] is True
+    assert data["dmarc"]["policy"] in ["reject", "quarantine"]
+
+    report = format_email_security_report(data)
+    assert "ارزیابی امنیت ایمیل و ضدجعل دامنه" in report
+    assert "google.com" in report
+    assert "سیاست اعمالی (Policy):" in report
+
+
+@pytest.mark.asyncio
+async def test_web_meta_inspection_and_formatting():
+    data = await inspect_web_meta("github.com")
+    assert data["success"] is True
+    assert data["robots"]["found"] is True
+    assert len(data["robots"]["disallowed"]) > 0
+    assert data["security_txt"]["found"] is True
+
+    report = format_web_meta_report(data)
+    assert "کالبدشکافی مسیرهای مخفی و متاداده وب" in report
+    assert "github.com" in report
+    assert "robots.txt" in report
+
+
+@pytest.mark.asyncio
+async def test_redirect_tracer_and_formatting():
+    data = await trace_http_redirect_chain("http://google.com")
+    assert data["success"] is True
+    assert data["total_hops"] >= 1
+    assert data["final_url"].startswith("https://")
+
+    report = format_redirects_report(data)
+    assert "رهگیری زنجیره ریدایرکت و مقصد نهایی لینک" in report
+    assert "مقصد نهایی" in report
+
+
+@pytest.mark.asyncio
+async def test_hardware_mac_lookup_and_formatting():
+    # 1. VMware virtual MAC
+    vm_data = await lookup_mac_vendor("00:50:56:AB:CD:EF")
+    assert vm_data["success"] is True
+    assert "VMware" in vm_data["company"]
+    assert vm_data["is_virtual_machine"] is True
+
+    vm_rep = format_mac_report(vm_data)
+    assert "شناسایی مشخصات سخت‌افزاری و کارت شبکه" in vm_rep
+    assert "VMware" in vm_rep
+
+    # 2. Raspberry Pi hardware MAC
+    rpi_data = await lookup_mac_vendor("B8-27-EB-12-34-56")
+    assert rpi_data["success"] is True
+    assert "Raspberry Pi" in rpi_data["company"]
+
+    # 3. Randomized MAC address (Locally Administered)
+    rand_data = await lookup_mac_vendor("02:00:00:00:00:00")
+    assert rand_data["success"] is True
+    assert rand_data["is_locally_administered"] is True
+
 

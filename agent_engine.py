@@ -482,6 +482,48 @@ async def augment_osint_prompt(user_prompt: str) -> str:
         except Exception as err:
             logger.warning(f"Failed to auto-query public DB intel: {err}")
 
+    # Check for WHOIS / RDAP domain registration mentions
+    if any(k in user_prompt.lower() for k in ["whois", "هویز", "ثبت دامنه", "مالک دامنه", "rdap", "registrar"]):
+        d_match = re.search(r"\b([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b", user_prompt)
+        if d_match:
+            try:
+                from tools.osint_whois import lookup_domain_whois
+                w_target = d_match.group(1)
+                w_res = await lookup_domain_whois(w_target)
+                if w_res.get("success"):
+                    augmented_prompt = f"{augmented_prompt}\n\n[استعلام رسمی رکوردهای ثبتی WHOIS/RDAP برای {w_target}]: {json.dumps(w_res, ensure_ascii=False)[:1000]}"
+                    logger.info(f"Auto-injected WHOIS intel for {w_target}")
+            except Exception as err:
+                logger.warning(f"Failed to auto-lookup WHOIS: {err}")
+
+    # Check for Email Security (SPF / DMARC) mentions
+    if any(k in user_prompt.lower() for k in ["dmarc", "spf", "جعل ایمیل", "اسپوفینگ", "امنیت ایمیل", "mailsec"]):
+        em_match = re.search(r"(?:@|\b)([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b", user_prompt)
+        if em_match:
+            try:
+                from tools.osint_email_security import audit_domain_email_security
+                em_domain = em_match.group(1)
+                em_res = audit_domain_email_security(em_domain)
+                if em_res.get("success"):
+                    augmented_prompt = f"{augmented_prompt}\n\n[ارزیابی امنیتی رکوردهای SPF و DMARC برای {em_domain}]: {json.dumps(em_res, ensure_ascii=False)[:1000]}"
+                    logger.info(f"Auto-injected email security audit for {em_domain}")
+            except Exception as err:
+                logger.warning(f"Failed to auto-audit email security: {err}")
+
+    # Check for Redirect / Link unshortener mentions
+    if any(k in user_prompt.lower() for k in ["ریدایرکت", "redirect", "لینک کوتاه", "کوتاه‌کننده", "unshorten"]):
+        r_match = re.search(r"https?://[^\s<>\"']+", user_prompt)
+        if r_match:
+            try:
+                from tools.osint_redirects import trace_http_redirect_chain
+                r_url = r_match.group(0)
+                r_res = await trace_http_redirect_chain(r_url)
+                if r_res.get("success"):
+                    augmented_prompt = f"{augmented_prompt}\n\n[رهگیری زنجیره ریدایرکت و مقصد نهایی {r_url}]: {json.dumps(r_res, ensure_ascii=False)[:1000]}"
+                    logger.info(f"Auto-injected redirect chain intel for {r_url}")
+            except Exception as err:
+                logger.warning(f"Failed to auto-trace redirects: {err}")
+
     return augmented_prompt
 
 

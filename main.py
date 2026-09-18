@@ -168,6 +168,11 @@ from tools.public_db_intel import (
     query_wayback_snapshots,
     format_public_intel_report,
 )
+from tools.osint_whois import lookup_domain_whois, format_whois_report
+from tools.osint_email_security import audit_domain_email_security, format_email_security_report
+from tools.osint_web_meta import inspect_web_meta, format_web_meta_report
+from tools.osint_redirects import trace_http_redirect_chain, format_redirects_report
+from tools.osint_hardware import lookup_mac_vendor, format_mac_report
 from tools.telegram_osint import (
     investigate_telegram_target,
     format_telegram_target_report,
@@ -1348,7 +1353,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡️ <b>درود {html.escape(u_name)}! به سامانه پرومته OSINT خوش آمدید.</b>\n\n"
         "من <b>پرومته</b> هستم؛ دستیار پیشرفته و خودمختار هوش مصنوعی برای <b>پژوهش‌های عمیق، تحلیل اطلاعات وب و هوش سایبری (OSINT)</b>:\n\n"
         "🔍 <b>مهم‌ترین ابزارهای تخصصی پرومته OSINT (پیشوند pb_):</b>\n"
+        "• 🧰 <b>جعبه‌ابزار جامع اوسینت:</b> <code>/pb_tools</code> (مشاهده کلیه ابزارهای دسته‌بندی‌شده)\n"
         "• 🎯 <b>ردگیری و هوش تلگرام:</b> <code>/pb_tg [یوزرنیم/آیدی/ریپلای]</code> (استخراج آیدی عددی، مشخصات و ردگیری)\n"
+        "• 🏛 <b>استعلام رکوردهای ثبتی WHOIS/RDAP:</b> <code>/pb_whois [دامنه]</code> (ثبت‌کننده، تاریخ‌ها و نیم‌سرورها)\n"
+        "• 🛡 <b>ممیزی امنیت ایمیل SPF و DMARC:</b> <code>/pb_dmarc [دامنه]</code> (ارزیابی ریسک جعل و فیشینگ)\n"
+        "• 🕷 <b>کاوشگر مسیرهای پنهان وب:</b> <code>/pb_robots [سایت]</code> (بررسی robots.txt و security.txt)\n"
+        "• 🔄 <b>رهگیری ریدایرکت‌ها:</b> <code>/pb_trace [لینک]</code> (رمزگشایی لینک‌های کوتاه و زنجیره Hops)\n"
+        "• 📟 <b>شناسایی سخت‌افزار MAC/OUI:</b> <code>/pb_mac [مک‌آدرس]</code> (سازنده قطعه و کارت شبکه)\n"
         "• 🌐 <b>پایگاه‌های داده و آرشیو وب:</b> <code>/pb_db [هدف]</code> (آرشیو Wayback Machine، نشت‌های عمومی و CVE)\n"
         "• 🌐 <b>جستجوی چندموتوره وب:</b> <code>/pb_osint [عبارت]</code> یا <code>/pb_search</code>\n"
         "• 🕷 <b>کاوشگر لایه‌های وب و متاداده:</b> <code>/pb_crawl [لینک]</code>\n"
@@ -1392,6 +1403,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "۲. گفتن صریح نام «پرومته» در متن پیام\n"
         "۳. ارسال دستورات با پیشوند اختصاصی (مخفف کلمه اول و آخر Prometheus Bot: <code>pb_</code>)\n\n"
         "🔍 <b>ابزارهای تخصصی اوسینت و وب:</b>\n"
+        "• <code>/pb_tools</code> - جعبه‌ابزار جامع و تفکیک‌شده ۳۰+ ابزار فوق‌پیشرفته اوسینت\n"
+        "• <code>/pb_whois [دامنه]</code> - استعلام رسمی WHOIS و پروتکل RDAP دامنه\n"
+        "• <code>/pb_dmarc [دامنه]</code> یا <code>/pb_spf</code> - ارزیابی ضدجعل SPF، DMARC و BIMI\n"
+        "• <code>/pb_robots [سایت]</code> - کشف مسیرهای پنهان robots.txt، نقشه سایت و security.txt\n"
+        "• <code>/pb_trace [لینک]</code> - رهگیری ریدایرکت‌ها (Hops) و رمزگشایی لینک‌های کوتاه\n"
+        "• <code>/pb_mac [مک‌آدرس]</code> - شناسایی شرکت سازنده تجهیزات سخت‌افزاری و کارت شبکه\n"
         "• <code>/pb_tg [یوزر/آیدی/ریپلای]</code> - استخراج آیدی عددی، پروفایل و ردگیری تلگرام\n"
         "• <code>/pb_db [هدف]</code> - استعلام آرشیو Wayback Machine، نشت‌های عمومی و CVE\n"
         "• <code>/pb_osint [عبارت]</code> یا <code>/pb_search</code> - جستجوی همزمان چندموتوره در وب (مجهز به Tavily AI)\n"
@@ -2278,6 +2295,245 @@ async def hash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     report = format_hash_report(res)
     await _deliver_reply(msg, report)
+
+
+async def whois_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Domain WHOIS & RDAP intelligence lookup: registrar, dates, statuses, nameservers."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = args[0].strip() if args else ""
+    if not target and msg.reply_to_message:
+        r_txt = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+        m = re.search(r"[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", r_txt)
+        if m:
+            target = m.group(0)
+
+    if not target:
+        guide = (
+            "🏛 <b>استعلام رکوردهای ثبتی دامنه (Domain WHOIS & RDAP):</b>\n\n"
+            "استعلام رسمی ثبت‌کننده (Registrar)، تاریخ ایجاد و انقضا، نیم‌سرورها و وضعیت دامنه از مراجع ICANN.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_whois google.com</code>\n"
+            "• <code>/pb_whois target.org</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🏛 <b>در حال دریافت رکوردهای WHOIS/RDAP برای:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    res = await lookup_domain_whois(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"استعلام WHOIS ({target[:15]})")
+
+    report = format_whois_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def email_security_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Email anti-spoofing and deliverability auditor: checks SPF, DMARC, MX, and BIMI."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = args[0].strip() if args else ""
+    if not target and msg.reply_to_message:
+        r_txt = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+        m = re.search(r"(?:[a-zA-Z0-9_.+-]+@)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", r_txt)
+        if m:
+            target = m.group(1)
+
+    if not target:
+        guide = (
+            "🛡 <b>ارزیاب امنیت ایمیل و ضدجعل دامنه (Email Security, SPF & DMARC Audit):</b>\n\n"
+            "بررسی تخصصی رکوردهای SPF و DMARC، ارزیابی سیاست‌های مسدودسازی فیشینگ و محاسبه ریسک جعل هویت دامنه.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_dmarc google.com</code>\n"
+            "• <code>/pb_spf target.org</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🛡 <b>در حال ممیزی رکوردهای احراز هویت ایمیل برای:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    res = audit_domain_email_security(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"ارزیابی ایمیل ({target[:15]})")
+
+    report = format_email_security_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def web_meta_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Web meta and hidden paths explorer: inspects robots.txt, security.txt, and sitemap.xml."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = args[0].strip() if args else ""
+    if not target and msg.reply_to_message:
+        r_txt = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+        m = re.search(r"https?://\S+", r_txt) or re.search(r"[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", r_txt)
+        if m:
+            target = m.group(0)
+
+    if not target:
+        guide = (
+            "🕷 <b>کاوشگر مسیرهای پنهان و متاداده وب (Robots.txt & Security.txt Recon):</b>\n\n"
+            "کشف مسیرهای حساس مستثنی‌شده (Disallow)، بررسی خط‌مشی باگ‌بانتی (security.txt) و ساختار نقشه سایت.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_robots github.com</code>\n"
+            "• <code>/pb_robots https://target.com</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🕷 <b>در حال واکشی و کالبدشکافی ساختار وب:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    res = await inspect_web_meta(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"کاوش متا وب ({target[:15]})")
+
+    report = format_web_meta_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def redirect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """HTTP Redirect chain & link unshortener: exposes hops, destination, and tracking parameters."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    url = args[0].strip() if args else ""
+    if not url and msg.reply_to_message:
+        r_txt = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+        m = re.search(r"https?://\S+", r_txt)
+        if m:
+            url = m.group(0)
+
+    if not url:
+        guide = (
+            "🔄 <b>رهگیری زنجیره ریدایرکت و مقصد نهایی (Redirect Tracer & Link Unshortener):</b>\n\n"
+            "ردگیری تمامی گام‌های انتقال (Hops)، رمزگشایی لینک‌های کوتاه، کشف پارامترهای رهگیری تبلیغاتی و بررسی انتقال‌های مشکوک بین دامنه‌ای.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_trace bit.ly/example</code>\n"
+            "• <code>/pb_trace http://target.com/go/123</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🔄 <b>در حال رهگیری مسیر ریدایرکت:</b> <code>{html.escape(url)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    res = await trace_http_redirect_chain(url)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"رهگیری ریدایرکت ({url[:15]})")
+
+    report = format_redirects_report(res)
+    try:
+        await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, report)
+
+
+async def mac_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """MAC Address & OUI hardware vendor intelligence lookup."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    mac = args[0].strip() if args else ""
+    if not mac and msg.reply_to_message:
+        val = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
+        m = re.search(r"(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}|[0-9a-fA-F]{6,12}", val)
+        if m:
+            mac = m.group(0)
+
+    if not mac:
+        guide = (
+            "📟 <b>شناسایی مشخصات سخت‌افزاری از مک‌آدرس (MAC & OUI Hardware Intelligence):</b>\n\n"
+            "تشخیص شرکت سازنده کارت شبکه، روتر، گوشی، یا تشخیص ماشین‌های مجازی (VMware/VirtualBox) و مک‌آدرس‌های تصادفی حریم خصوصی.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/pb_mac 00:50:56:AB:CD:EF</code>\n"
+            "• <code>/pb_mac B8-27-EB-11-22-33</code>\n"
+            "• <code>/pb_mac 001A2B</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    t0 = time.perf_counter()
+    res = await lookup_mac_vendor(mac)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, "استعلام سخت‌افزار MAC")
+
+    report = format_mac_report(res)
+    await _deliver_reply(msg, report)
+
+
+async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Categorized OSINT Master Toolbox menu."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    text = (
+        "🧰 <b>جعبه‌ابزار جامع و تخصصی اوسینت پرومته (Prometheus OSINT Master Toolbox):</b>\n\n"
+        "⚡️ <i>مجموعه‌ای کامل از ابزارهای فوق‌پیشرفته، دقیق و بلادرنگ برای کشف اطلاعات، شناسایی زیرساخت و بازرسی امنیتی:</i>\n\n"
+        "🌐 <b>۱. کاوش وب و موتورهای جستجو (Web Intelligence):</b>\n"
+        "• <code>/pb_osint [عبارت]</code> - کاوش عمیق وب مجهز به سنتز هوش مصنوعی Tavily\n"
+        "• <code>/pb_search [عبارت]</code> - جستجوی آنلاین چندموتوره وب\n"
+        "• <code>/pb_crawl [لینک]</code> - تحلیل لایه‌های صفحه، کشف ایمیل، تلفن و تکنولوژی‌ها\n"
+        "• <code>/pb_robots [سایت]</code> - کشف مسیرهای حساس robots.txt و فایل security.txt\n"
+        "• <code>/pb_trace [لینک]</code> - رهگیری زنجیره ریدایرکت‌ها (Hops) و رمزگشایی لینک‌های کوتاه\n\n"
+        "🎯 <b>۲. گوگل دورکینگ هوشمند (Google Dorking):</b>\n"
+        "• <code>/pb_dork [هدف]</code> - تولید ۲۷ دورک هدفمند در ۱۲ دسته‌بندی نفوذ و اوسینت\n"
+        "• <code>/pb_dork git [هدف]</code> - کشف مخازن باز .git و محیط‌های Docker\n"
+        "• <code>/pb_dork api [هدف]</code> - کشف اسناد Swagger و پورتال‌های GraphQL\n"
+        "• <code>/pb_dork sql [هدف]</code> - کشف بک‌آپ‌ها و دیتابیس‌های لو رفته\n\n"
+        "📡 <b>۳. شبکه، دامنه و زیرساخت (Network & Infrastructure):</b>\n"
+        "• <code>/pb_whois [دامنه]</code> - استعلام رسمی WHOIS و پروتکل RDAP دامنه\n"
+        "• <code>/pb_dns [دامنه]</code> - تفکیک جامع کلیه رکوردهای DNS دامنه\n"
+        "• <code>/pb_subdomains [دامنه]</code> - کشف تمامی ساب‌دامین‌ها از لاگ‌های گواهی امنیتی\n"
+        "• <code>/pb_ssl [دامنه]</code> - بازرسی گواهی SSL و استخراج ساب‌دامین‌های پنهان SAN\n"
+        "• <code>/pb_headers [سایت]</code> - ممیزی هدرهای امنیتی و محاسبه رتبه OWASP\n"
+        "• <code>/pb_ip [IP/دامنه]</code> - اطلاعات جغرافیایی، کشور، شهر، ISP و شماره AS\n\n"
+        "🛡 <b>۴. امنیت ایمیل و شماره تماس (Email & Phone Intelligence):</b>\n"
+        "• <code>/pb_dmarc [دامنه]</code> یا <code>/pb_spf</code> - ارزیابی ضدجعل SPF، DMARC و BIMI\n"
+        "• <code>/pb_email [ایمیل]</code> - اعتبارسنجی سینتکس، میل‌سرور و پروفایل Gravatar\n"
+        "• <code>/pb_phone [شماره]</code> - اعتبارسنجی ساختار و تشخیص اپراتور تلفن همراه\n\n"
+        "👤 <b>۵. هویت و شبکه‌های اجتماعی (Social & Entity Recon):</b>\n"
+        "• <code>/pb_tg [یوزر/آیدی]</code> - استخراج شناسه عددی، مشخصات و ردگیری تلگرام\n"
+        "• <code>/pb_github [کاربر]</code> - تحلیل اکانت گیت‌هاب، استخراج ایمیل از کامیت‌ها و کلیدها\n"
+        "• <code>/pb_linkedin [نام/شرکت]</code> - کشف پروفایل و ساختار سازمانی لینکدین\n"
+        "• <code>/pb_usercheck [یوزر]</code> - استعلام فوری نام کاربری در ۲۵+ پلتفرم جهانی\n\n"
+        "🔐 <b>۶. رمزنگاری و فارنزیک (Forensics & Cryptography):</b>\n"
+        "• <code>/pb_hash [هش/توکن/متن]</code> - شناسایی ۱۵+ الگوریتم هش و کالبدشکافی توکن JWT\n"
+        "• <code>/pb_mac [مک‌آدرس]</code> - شناسایی شرکت سازنده تجهیزات سخت‌افزاری و کارت شبکه\n"
+        "• <code>/pb_scan [لینک/فایل/هش]</code> - اسکن امنیتی و تحلیل بدافزار با VirusTotal\n\n"
+        "🏛 <b>۷. آرشیو اسناد و پایگاه‌های اطلاعاتی (Public Intel & Archives):</b>\n"
+        "• <code>/pb_db [هدف]</code> - استعلام آرشیو Wayback Machine، نشت‌های عمومی و CVE\n\n"
+        "⚡️ <i>جهت دریافت راهنمای هر ابزار، دستور آن را بدون آرگومان ارسال فرمایید.</i>"
+    )
+    await msg.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5271,6 +5527,12 @@ def build_application():
             bot_commands = [
                 BotCommand("pb_start", "شروع و راهنمای کلی پرومته"),
                 BotCommand("pb_help", "راهنما و دستورات اوسینت و ابزارها"),
+                BotCommand("pb_tools", "جعبه‌ابزار جامع و تخصصی اوسینت"),
+                BotCommand("pb_whois", "استعلام WHOIS و RDAP دامنه"),
+                BotCommand("pb_dmarc", "ممیزی امنیت ایمیل، SPF و DMARC"),
+                BotCommand("pb_robots", "کاوش robots.txt، sitemap و مسیرها"),
+                BotCommand("pb_trace", "رهگیری ریدایرکت‌ها و باز کردن لینک کوتاه"),
+                BotCommand("pb_mac", "شناسایی سخت‌افزار از مک‌آدرس و OUI"),
                 BotCommand("pb_tg", "ردگیری و اوسینت تخصصی تلگرام"),
                 BotCommand("pb_db", "استعلام پایگاه‌های داده و آرشیو عمومی"),
                 BotCommand("pb_osint", "جستجوی عمیق اوسینت در وب"),
@@ -5345,6 +5607,12 @@ def build_application():
     app.add_handler(CommandHandler(make_bot_commands(["ssl", "cert", "tls", "certificate"]), guard(ssl_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["headers", "securityheaders", "audit", "security"]), guard(headers_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["hash", "jwt", "token", "checksum"]), guard(hash_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["tools", "toolbox", "osintbox", "abzarha"]), guard(tools_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["whois", "rdap", "registrar"]), guard(whois_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["dmarc", "spf", "mailsec", "spoofing"]), guard(email_security_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["robots", "sitemap", "securitytxt", "meta"]), guard(web_meta_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["trace", "redirect", "redirects", "unshorten", "hops"]), guard(redirect_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["mac", "oui", "vendor", "hardware"]), guard(mac_command, is_cmd=True)))
 
     # Threat Intelligence & Utilities
     app.add_handler(CommandHandler(make_bot_commands(["scan", "vt", "virustotal", "antivirus"]), guard(scan_command, is_cmd=True)))

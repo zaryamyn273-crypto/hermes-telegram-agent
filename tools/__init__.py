@@ -12,6 +12,7 @@ from .osint_dork import (
     generate_smart_dorks,
     execute_smart_dork,
     format_smart_dorks_report,
+    resolve_category_key,
 )
 from .osint_linkedin import (
     search_linkedin_profile,
@@ -33,6 +34,26 @@ from .osint_network import (
     format_ssl_report,
     format_http_headers_report,
 )
+from .osint_whois import (
+    lookup_domain_whois,
+    format_whois_report,
+)
+from .osint_email_security import (
+    audit_domain_email_security,
+    format_email_security_report,
+)
+from .osint_web_meta import (
+    inspect_web_meta,
+    format_web_meta_report,
+)
+from .osint_redirects import (
+    trace_http_redirect_chain,
+    format_redirects_report,
+)
+from .osint_hardware import (
+    lookup_mac_vendor,
+    format_mac_report,
+)
 from .osint_hash import (
     identify_hash_or_token,
     analyze_jwt_token,
@@ -50,6 +71,7 @@ from .public_db_intel import (
 from .telegram_osint import (
     investigate_telegram_target,
     format_telegram_target_report,
+    format_telegram_osint_report,
 )
 from .virustotal import (
     scan_url_or_domain,
@@ -65,6 +87,7 @@ __all__ = [
     "generate_smart_dorks",
     "execute_smart_dork",
     "format_smart_dorks_report",
+    "resolve_category_key",
     "search_linkedin_profile",
     "search_linkedin_company",
     "investigate_github_user",
@@ -77,6 +100,16 @@ __all__ = [
     "audit_http_security_headers",
     "format_ssl_report",
     "format_http_headers_report",
+    "lookup_domain_whois",
+    "format_whois_report",
+    "audit_domain_email_security",
+    "format_email_security_report",
+    "inspect_web_meta",
+    "format_web_meta_report",
+    "trace_http_redirect_chain",
+    "format_redirects_report",
+    "lookup_mac_vendor",
+    "format_mac_report",
     "identify_hash_or_token",
     "analyze_jwt_token",
     "format_hash_report",
@@ -87,6 +120,7 @@ __all__ = [
     "format_public_intel_report",
     "investigate_telegram_target",
     "format_telegram_target_report",
+    "format_telegram_osint_report",
     "scan_url_or_domain",
     "scan_file_hash",
     "format_virustotal_report",
