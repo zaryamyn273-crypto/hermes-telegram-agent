@@ -326,10 +326,22 @@ async def grant_user_tool(user_id: int, tool_name: str, granted_by: int = 0) -> 
     except Exception as kv_ex:
         logger.debug(f"KV write exception for permissions: {kv_ex}")
 
+    # 4. Log admin audit command
+    try:
+        from tools.moderation import log_admin_command
+        await log_admin_command(
+            admin_id=granted_by,
+            command="grant_tool",
+            args=f"user_id={uid}, tool={canonical}",
+            details=f"Admin granted tool '{canonical}' to user {uid}"
+        )
+    except Exception as e:
+        logger.debug(f"Failed to log admin command for grant_tool: {e}")
+
     return True, canonical
 
 
-async def revoke_user_tool(user_id: int, tool_name: str) -> Tuple[bool, str]:
+async def revoke_user_tool(user_id: int, tool_name: str, revoked_by: int = 0) -> Tuple[bool, str]:
     """
     Revokes a tool permission from a user.
     If tool_name is '*' or 'all', revokes all tools for that user.
@@ -375,6 +387,18 @@ async def revoke_user_tool(user_id: int, tool_name: str) -> Tuple[bool, str]:
             await database.kv_delete(kv_key)
     except Exception as kv_ex:
         logger.debug(f"KV delete exception for permissions: {kv_ex}")
+
+    # 4. Log admin audit command
+    try:
+        from tools.moderation import log_admin_command
+        await log_admin_command(
+            admin_id=revoked_by,
+            command="revoke_tool",
+            args=f"user_id={uid}, tool={canonical}",
+            details=f"Admin revoked tool '{canonical}' from user {uid}"
+        )
+    except Exception as e:
+        logger.debug(f"Failed to log admin command for revoke_tool: {e}")
 
     return True, canonical
 
@@ -599,7 +623,7 @@ async def revoke_tool_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.reply_text(f"❌ نام ابزار «<code>{html.escape(tool_arg)}</code>» نامعتبر است.", parse_mode=ParseMode.HTML)
         return
 
-    success, norm_name = await revoke_user_tool(target_id, canonical)
+    success, norm_name = await revoke_user_tool(target_id, canonical, revoked_by=user.id)
     u_label = f"@{target_uname}" if target_uname else f"<code>{target_id}</code>"
 
     if norm_name == "*":

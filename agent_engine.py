@@ -249,6 +249,16 @@ Operating Directives:
 - Users can run any Python code using `/run [کد]`, `/exec [کد]`, `/py [کد]`, `/python [کد]`, `/sandbox [کد]`, or simply by saying «کد زیر رو اجرا کن:».
 - The sandbox executes scripts in real time, captures stdout/stderr, reports exact runtime metrics in milliseconds, and formats results cleanly with syntax highlighting.
 - When writing Python code, assure users they can execute it instantly right here inside Prometheus using the `/run` command.
+ 
+10. Autonomous Chat Summarization & Historical Context Directive (خلاصه‌سازی تاریخچه چت و دسترسی به پیام‌های پیشین):
+- Prometheus IS FULLY EQUIPPED with direct access to all past chat messages in the database and an autonomous dual-subagent Map-Reduce summarizer (`summarize_group_messages`).
+- You must NEVER, UNDER ANY CIRCUMSTANCES, output refusal phrases such as:
+  ❌ «دسترسی به متن کامل ۱۰۰۰ پیام قبل به دلیل محدودیت پنجره زمینه (Context Window) چت امکان‌پذیر نیست»
+  ❌ «من به پیام‌های قبلی گروه دسترسی ندارم»
+  ❌ «به دلیل محدودیت context window نمی‌توانم پیام‌ها را بخوانم»
+  ❌ «برای بررسی پیام‌ها باید آن‌ها را تک‌تک ریپلای یا فوروارد کنید»
+- Any disclaimer claiming you lack access to past chat messages or cannot summarize 100, 500, 1000, or 3000 messages due to context window limits is completely FALSE and FORBIDDEN.
+- Prometheus automatically queries its database, retrieves the requested message history (up to 3,000 messages), analyzes it, and delivers structured reports.
 """
 
 # =========================================================================
@@ -400,7 +410,55 @@ _JAILBREAK_ATTACK_PATTERNS = [
         "سلب محدودیت‌های رفتاری (Constraint Removal)",
     ),
 
-    # Category C: Persona Overrides & Unrestricted Mode (DAN, Godmode, etc.)
+    # Category C: Fictional & Hypothetical Framing Overrides
+    (
+        re.compile(
+            r"(?:در\s*یک\s*(?:داستان|فیلم|رمان|نمایشنامه|سناریو)|فرض\s*کن|تصور\s*کن)\s*.*(?:هیچ\s*قانونی\s*نداری|بدون\s*(?:فیلتر|سانسور|محدودیت|قانون)|محدودیتی\s*نداری|اخلاق\s*رو\s*کنار\s*بذار|قوانین\s*وجود\s*نداره)",
+            re.IGNORECASE,
+        ),
+        "جیل‌بریک از طریق قالب فرضی یا داستانی (Hypothetical Framing Jailbreak)",
+    ),
+    (
+        re.compile(
+            r"\b(?:in\s+a\s+(?:fictional|hypothetical)\s+(?:scenario|world|story)|pretend\s+in\s+a\s+movie)\s+.*(?:no\s+(?:rules|filters|morals|guidelines)|unrestricted)\b",
+            re.IGNORECASE,
+        ),
+        "جیل‌بریک فرضی (Hypothetical Framing Jailbreak)",
+    ),
+
+    # Category D: Dual-Response & Split-Persona Exploits
+    (
+        re.compile(
+            r"(?:دو\s*(?:تا\s*)?(?:پاسخ|جواب)|دوگانه)\s*.*(?:یکی\s*(?:معمولی|با\s*فیلتر|پرومته|استاندارد).*یکی\s*(?:بدون\s*فیلتر|بدون\s*سانسور|dan|دان|شیطانی)|پاسخ\s*معمولی.*پاسخ\s*(?:بدون\s*سانسور|dan))",
+            re.IGNORECASE,
+        ),
+        "تلاش برای دور زدن فیلتر با پاسخ دوگانه (Dual-Response / Split Persona Attack)",
+    ),
+    (
+        re.compile(
+            r"\b(?:two\s+responses|dual\s+response|respond\s+in\s+two\s+ways)\s*.*(?:standard|dan|unfiltered|jailbroken)\b",
+            re.IGNORECASE,
+        ),
+        "تلاش برای دور زدن فیلتر با پاسخ دوگانه (Dual-Response Attack)",
+    ),
+
+    # Category E: SUDO, Developer & Master Overrides
+    (
+        re.compile(
+            r"\b(?:sudo\s+mode|sudo\s+override|godmode|admin\s+override\s+code|master\s+override)\b",
+            re.IGNORECASE,
+        ),
+        "تلاش برای تغییر غیرمجاز به حالت مدیر (Privilege Escalation Attack)",
+    ),
+    (
+        re.compile(
+            r"(?:حالت|مود)\s*(?:سودو|گادماد|دولوپر|توسعه‌دهنده|عیب‌یابی|دیباگ|تست)\s*(?:بدون\s*محدودیت|رو\s*فعال|را\s*فعال)",
+            re.IGNORECASE,
+        ),
+        "فعال‌سازی حالت غیرمجاز توسعه‌دهنده (Developer Mode Attack)",
+    ),
+
+    # Category F: Persona Overrides & Unrestricted Mode (DAN, Godmode, etc.)
     (
         re.compile(
             r"\b(?:you\s+are\s+now|act\s+as|enable|enter)\s+(?:in\s+)?(?:dan|unrestricted|godmode|developer\s*mode|unfiltered)\b",
@@ -444,13 +502,30 @@ _JAILBREAK_ATTACK_PATTERNS = [
         "تلاش برای سلب محدودیت‌های امنیتی (Unrestricted Persona)",
     ),
 
-    # Category D: Secret Exfiltration & System Prompt Theft
+    # Category G: Secret Exfiltration & System Prompt Theft
     (
         re.compile(
             r"(?:show|print|reveal|leak|repeat|display|output|give|send|tell)\s+(?:me\s+)?(?:your|the)\s+(?:system\s+prompt|initial\s+instructions|system\s+instructions|secret\s+key|bot\s+token|env\s+variables)",
             re.IGNORECASE,
         ),
         "تلاش برای سرقت پرامپت یا کلیدهای سیستمی (Prompt Exfiltration)",
+    ),
+    (
+        re.compile(
+            r"(?:تمام\s*(?:دستورات|فرامین|دستورالعمل[‌\s]*های?)\s*.*(?:سیستمی|اولیه|محرمانه|مخفی|پنهان|داخلی|system)|"
+            r"پرامپت\s*(?:سیستمی|اولیه|اصلی|system)|"
+            r"هر\s*چی\s*(?:قبل|اول)\s*بهت\s*گفتن)"
+            r".*(?:تکرار\s*کن|چاپ\s*کن|بگو|بنویس|بفرست|نمایش\s*بده|لو\s*بده)",
+            re.IGNORECASE,
+        ),
+        "تلاش برای استخراج پرامپت سیستمی (System Prompt Exfiltration)",
+    ),
+    (
+        re.compile(
+            r"(?:پرامپت\s*سیستمت|system\s*prompt)\s*(?:چیه|رو\s*بگو|رو\s*بده|چیست|نشون\s*بده|بفرست)",
+            re.IGNORECASE,
+        ),
+        "تلاش برای استخراج پرامپت سیستمی (System Prompt Exfiltration)",
     ),
     (
         re.compile(
@@ -474,7 +549,7 @@ _JAILBREAK_ATTACK_PATTERNS = [
         "تلاش برای سرقت توکن یا اطلاعات حساس (Credential Theft)",
     ),
 
-    # Category E: Destructive system commands
+    # Category H: Destructive system commands
     (
         re.compile(r"\brm\s+-(?:r|f|rf|fr)\s+(?:/|\*)", re.IGNORECASE),
         "دستور تخریب فایل‌های سیستمی (Destructive Command)",
@@ -497,13 +572,70 @@ def is_educational_jailbreak_query(text: str) -> bool:
     return any(p.search(text) for p in _EDUCATIONAL_JAILBREAK_PATTERNS)
 
 
+def normalize_jailbreak_probe(text: str) -> List[str]:
+    """
+    Normalizes potentially obfuscated, leetspeak, spaced, homoglyph-masked, or base64-encoded
+    jailbreak payloads into multiple canonical plain-text candidate variants for scanning.
+    """
+    if not text:
+        return []
+
+    variants = [text]
+
+    # 1. Strip invisible zero-width characters, soft hyphens, and Arabic tatweel (ـ)
+    clean = re.sub(r"[\u200b\u200c\u200d\ufeff\u200e\u200f\u00ad\u0640]", "", text)
+
+    # 2. Cyrillic and lookalike homoglyphs mapping to Latin / Persian
+    homoglyphs = {
+        'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'х': 'x', 'у': 'y',
+        'і': 'i', 'ј': 'j', 'ي': 'ی', 'ك': 'ک'
+    }
+    clean = "".join(homoglyphs.get(c, c) for c in clean)
+    if clean != text:
+        variants.append(clean)
+
+    # 3. Collapse repeated characters (3+ identical consecutive characters down to 1)
+    # E.g. "جیلللللبریک" -> "جیلبریک", "jjjjjailbreak" -> "jailbreak"
+    collapsed_rep = re.sub(r"(.)\1{2,}", r"\1", clean)
+    if collapsed_rep not in variants:
+        variants.append(collapsed_rep)
+
+    # 4. De-space single characters: e.g. "j a i l b r e a k" -> "jailbreak", "ج ی ل ب ر ی ک" -> "جیلبریک"
+    despaced = re.sub(r"(?<=\b[\w\u0600-\u06FF])\s+(?=[\w\u0600-\u06FF]\b)", "", clean)
+    if despaced not in variants:
+        variants.append(despaced)
+
+    # 5. Decode common leetspeak substitutions: e.g. 'j41lbr34k' -> 'jailbreak'
+    leet_map = {
+        '4': 'a', '@': 'a', '3': 'e', '1': 'i', '!': 'i',
+        '0': 'o', '5': 's', '$': 's', '7': 't'
+    }
+    leet_decoded = "".join(leet_map.get(c, c) for c in clean)
+    if leet_decoded not in variants:
+        variants.append(leet_decoded)
+
+    # 6. Probe and decode base64 blobs (length >= 16)
+    b64_matches = re.findall(r"[A-Za-z0-9+/=]{16,}", text)
+    for b in b64_matches:
+        try:
+            import base64
+            dec = base64.b64decode(b).decode("utf-8", errors="ignore")
+            if dec and len(dec.strip()) > 5:
+                variants.append(dec.strip())
+        except Exception:
+            pass
+
+    return variants
+
+
 def detect_jailbreak_attempt(text: str) -> Optional[str]:
     """
     Scans incoming text for prompt injection, jailbreak attempts, secret exfiltration,
-    or destructive command patterns. Returns violation label if detected, else None.
+    or destructive command patterns across multi-tier normalized variants.
+    Returns violation label if detected, else None.
     
     Protects educational / informational inquiries from being falsely classified as attacks,
-    while strictly intercepting active exploitation and imperative override attempts.
+    while strictly intercepting active exploitation, adversarial framing, and obfuscated overrides.
     """
     if not text or not text.strip():
         return None
@@ -516,10 +648,14 @@ def detect_jailbreak_attempt(text: str) -> Optional[str]:
                 return "دستور مخرب یا سرقت کلید در قالب سوال (Malicious Exploit in Query)"
         return None
 
-    for pattern, label in _JAILBREAK_ATTACK_PATTERNS:
-        if pattern.search(text):
-            logger.warning(f"Jailbreak attempt detected: {label} (pattern: {pattern.pattern})")
-            return label
+    # Scan across all normalized variants
+    variants = normalize_jailbreak_probe(text)
+    for v in variants:
+        for pattern, label in _JAILBREAK_ATTACK_PATTERNS:
+            if pattern.search(v):
+                logger.warning(f"Jailbreak attempt detected: {label} (pattern: {pattern.pattern}) in variant: {v[:80]}")
+                return label
+
     return None
 
 
@@ -984,6 +1120,13 @@ async def execute_hermes_agent(
     if violation:
         return violation
 
+    # 1.5. Intercept Autonomous Conversation Summarization Requests (<1ms)
+    from tools.summary_tool import parse_summary_request, summarize_group_messages
+    is_sum, sum_count = parse_summary_request(user_prompt)
+    if is_sum and chat_id:
+        logger.info(f"Intercepted conversation summary request in execute_hermes_agent for chat {chat_id} (count={sum_count})")
+        return await summarize_group_messages(chat_id=chat_id, count=sum_count)
+
     # 2. Check for URL in prompt and pre-fetch webpage text
     url_match = re.search(r"https?://[^\s<>\"']+", user_prompt)
     augmented_prompt = user_prompt
@@ -1188,6 +1331,12 @@ async def execute_hermes_agent(
             if is_architecture_query(user_prompt) and is_refusal_response(cleaned):
                 logger.info("Intercepted false refusal on architecture query. Replacing with expert technical analysis.")
                 cleaned = generate_architecture_analysis(user_prompt)
+
+            # Intercept false context window refusals on chat history or past messages
+            if any(cw in cleaned.lower() for cw in ["context window", "پنجره زمینه", "محدودیت پنجره", "متن کامل ۱۰۰۰ پیام", "دسترسی به متن کامل", "محدودیت context window"]) and chat_id:
+                logger.info("Intercepted false context window refusal from LLM. Calling summarize_group_messages directly.")
+                from tools.summary_tool import summarize_group_messages
+                cleaned = await summarize_group_messages(chat_id=chat_id, count=100)
 
             if cleaned:
                 final_answer = cleaned

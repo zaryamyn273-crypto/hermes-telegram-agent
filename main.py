@@ -3545,7 +3545,8 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
     if not t:
         return False
 
-    bot_username = (context.bot.username or "").lower() if context and getattr(context, "bot", None) else ""
+    raw_bname = getattr(context.bot, "username", None) if context and getattr(context, "bot", None) else ""
+    bot_username = str(raw_bname).lower() if isinstance(raw_bname, str) else ""
     if bot_username:
         t = re.sub(rf"@{re.escape(bot_username)}", "", t, flags=re.IGNORECASE).strip()
 
@@ -3655,21 +3656,43 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
     if not is_bot_adm:
         return False
 
-    # 14. Register Permanent Admin Directive / Rule
-    dir_m = re.match(
-        r"^(?:/)?(?:ثبت\s+دستور|دستور\s+دائمی|دستور\s+جدید|دستور\s+ادمین|directive|addrule|rule)\s*(?::|-)?\s*(?:([a-zA-Z0-9_\-\u0600-\u06FF]+)\s*[:=]\s*)?(.*)$",
+    # 14. Register Permanent Admin Directive / Rule (Universal Natural Language & Slash Commands)
+    dir_prefix = re.match(
+        r"^(?:/)?(?:ثبت\s+(?:دستورات\s+ادمین|دستورات|دستور|قوانین\s+ادمین|قوانین|قانون)|دستور\s+(?:دائمی|جدید|ادمین)|قانون\s+(?:دائمی|جدید|ادمین)|directive|addrule|rule)\b(?:\s*[:=-])?\s*(.*)$",
         t,
         re.IGNORECASE | re.DOTALL
     )
-    if dir_m:
-        k = (dir_m.group(1) or "").strip()
-        v = (dir_m.group(2) or "").strip()
-        if not k and v:
-            parts = v.split(maxsplit=1)
-            if len(parts) == 2 and parts[0].lower() in ("add", "set", "ثبت", "ایجاد"):
-                sub = parts[1].split(maxsplit=1)
-                if len(sub) == 2:
-                    k, v = sub[0], sub[1]
+    if dir_prefix:
+        rest = (dir_prefix.group(1) or "").strip()
+        if not rest:
+            # Bare command sent without arguments: show helpful guide and active directives
+            active_dirs = get_cached_admin_directives()
+            guide_text = (
+                "ℹ️ <b>راهنمای ثبت دستورات دائمی و قوانین ادمین:</b>\n\n"
+                "برای ثبت دستور دائمی که رفتار پرومته را برای همیشه تغییر دهد، به یکی از روش‌های زیر عمل کنید:\n"
+                "• <code>ثبت دستور: همیشه پاسخ‌ها کوتاه و خلاصه باشد</code>\n"
+                "• <code>دستور دائمی style: پاسخ‌ها بسیار رسمی باشد</code>\n"
+                "• <code>ثبت دستورات ادمین: اولویت با پاسخ‌های علمی است</code>\n"
+                "• <code>/addrule format: markdown</code>\n\n"
+                "🗑 برای حذف: <code>حذف دستور [عنوان/کلید]</code> یا <code>/delrule [key]</code>\n"
+                "📋 برای مشاهده تمام دستورات: <code>دستورات ادمین</code> یا <code>/directives</code>"
+            )
+            if active_dirs:
+                guide_text += f"\n\n📌 <b>دستورات فعال فعلی ({len(active_dirs)} مورد):</b>\n"
+                for d in active_dirs:
+                    guide_text += f"• <b>{html.escape(d.get('key_name', ''))}:</b> <code>{html.escape(d.get('data_value', ''))}</code>\n"
+            await update.effective_message.reply_text(guide_text, parse_mode=ParseMode.HTML)
+            return True
+
+        # Check if there is an explicit key: value structure (e.g. "style: بسیار رسمی باشد")
+        kv_match = re.match(r"^([a-zA-Z0-9_\-\u0600-\u06FF]{2,30})\s*[:=]\s*(.+)$", rest, re.DOTALL)
+        if kv_match:
+            k = kv_match.group(1).strip()
+            v = kv_match.group(2).strip()
+        else:
+            k = ""
+            v = rest
+
         if not k:
             all_s = await get_all_admin_settings()
             existing = [s.get("key_name", "") for s in all_s if s.get("key_name", "").startswith("rule_")]
@@ -3686,9 +3709,9 @@ async def handle_admin_text_command(update: Update, context: ContextTypes.DEFAUL
             )
             return True
 
-    # 14.1 Delete Directive / Setting
+    # 14.1 Delete Directive / Setting (Singular & Plural Support)
     del_m = re.match(
-        r"^(?:/)?(?:delsetting|del_setting|delrule|del_rule|deldirective|del_directive|(?:حذف|پاک\s*کردن)\s+(?:دستور|تنظیم|قانون))\s+([a-zA-Z0-9_\-\u0600-\u06FF]+)$",
+        r"^(?:/)?(?:delsetting|del_setting|delrule|del_rule|deldirective|del_directive|(?:حذف|پاک\s*کردن)\s+(?:دستورات|دستور|تنظیمات|تنظیم|قوانین|قانون))\s+([a-zA-Z0-9_\-\u0600-\u06FF]+)$",
         t,
         re.IGNORECASE
     )
@@ -3859,6 +3882,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
                 except Exception as be:
                     logger.debug(f"Could not ban member from Telegram chat: {be}")
+
+            # 3. Delete the malicious attack message to sanitize the chat room
+            try:
+                await message.delete()
+            except Exception as de:
+                logger.debug(f"Could not delete malicious attack message: {de}")
 
             # 3. Notify chat
             user_mention = f"@{user.username}" if user.username else (user.full_name or f"کاربر {user.id}")
