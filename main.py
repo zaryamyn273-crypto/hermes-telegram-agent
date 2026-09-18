@@ -93,7 +93,6 @@ from agent_engine import (
     detect_jailbreak_attempt,
     is_architecture_query,
 )
-from tools.financial import get_fiat_and_gold_rates, get_crypto_price, start_financial_cache_worker
 from tools.system import (
     get_current_time,
     calculate_math,
@@ -101,14 +100,8 @@ from tools.system import (
     format_last_latency_response,
     run_live_speed_test,
 )
-from tools.weather import get_weather
-from tools.ecommerce import search_digikala, clean_digikala_query
-from tools.web_reader import fetch_webpage_text
-from tools.telegraph import create_telegraph_article, extract_telegraph_args
-from tools.music import handle_music_request, is_music_request, extract_music_query
 from tools.rate_limiter import check_user_rate_limit, get_user_quota_info
 from tools.id_tool import is_id_request, format_id_report
-from tools.barcode_tool import generate_qr_code, generate_barcode, parse_barcode_request
 from tools.vision import (
     analyze_image_with_vision,
     is_reconstruction_query,
@@ -119,15 +112,6 @@ from tools.media_group import (
     get_media_group_photos,
     resolve_media_group_id,
     debounce_incoming_album,
-)
-from tools.twitter import (
-    fetch_tweet_data,
-    format_tweet_report,
-    fetch_twitter_profile,
-    format_profile_report,
-    search_twitter_live,
-    parse_twitter_request,
-    extract_tweet_url_and_id,
 )
 from tools.file_tool import (
     extract_file_content,
@@ -141,20 +125,6 @@ from tools.virustotal import (
     format_virustotal_report,
     is_virustotal_request,
 )
-from tools.sandbox import (
-    run_python_sandbox,
-    run_code_sandbox,
-    format_sandbox_result,
-    is_sandbox_request,
-    extract_code_snippet,
-    sandbox_command_handler,
-)
-from tools.shell_tool import (
-    shell_command_handler,
-    shell_callback_handler,
-    is_shell_request,
-    extract_shell_command,
-)
 from tools.permissions import (
     init_permissions_engine,
     has_tool_permission,
@@ -163,12 +133,13 @@ from tools.permissions import (
     user_tools_command,
     granted_tools_command,
 )
-from tools.apt_tool import (
-    apt_command_handler,
-    apt_callback_handler,
-    is_apt_request,
-    extract_apt_command,
-)
+from tools.osint_search import search_web_osint, crawl_webpage_layers
+from tools.osint_dork import generate_smart_dorks, execute_smart_dork
+from tools.osint_linkedin import search_linkedin_profile, search_linkedin_company
+from tools.osint_github import investigate_github_user, search_github
+from tools.osint_username import search_username_across_platforms
+from tools.osint_network import resolve_dns_records, enumerate_subdomains_crtsh, lookup_ip_intel
+from tools.osint_email_phone import investigate_email, analyze_phone_number
 from utils.formatter import markdown_to_telegram_html, split_message, strip_thinking
 
 # Setup Logging
@@ -278,14 +249,6 @@ async def _check_moderation_guard(update: Update, context: ContextTypes.DEFAULT_
             status = st
             if is_new and not is_admin(uid):
                 await _notify_admin_group_request(context.bot, chat, user)
-                try:
-                    await chat.send_message(
-                        "⏳ <b>درخواست فعال‌سازی پرومته در این گروه برای ادمین ارسال شد.</b>\n"
-                        "پس از بررسی و تایید ادمین، ربات فعال خواهد شد.",
-                        parse_mode=ParseMode.HTML
-                    )
-                except Exception:
-                    pass
 
         if status != "approved":
             # If authorized admin is issuing an administrative command or interacting, permit through
@@ -387,7 +350,12 @@ async def group_approval_callback(update: Update, context: ContextTypes.DEFAULT_
         try:
             await context.bot.send_message(
                 chat_id=target_chat_id,
-                text="✅ <b>ربات توسط ادمین در این گروه تایید شد و هم‌اکنون فعال و آماده خدمت‌رسانی است.</b>",
+                text=(
+                    "⚡️ <b>پرومته فعال شد!</b>\n\n"
+                    "با دستور مستقیم ادمین ارشد، سیستم شناسایی و هوش مصنوعی پرومته در این گروه رسماً تایید و فعال گردید.\n"
+                    "هم‌اکنون تمامی قابلیت‌های OSINT، کاوش عمیق وب، تحلیل لایه‌ها و پاسخگویی هوشمند در دسترس شماست.\n\n"
+                    "▫️ جهت مشاهده راهنما: <code>/phelp</code> یا منشن نام ربات"
+                ),
                 parse_mode=ParseMode.HTML
             )
         except Exception:
@@ -451,14 +419,6 @@ async def chat_member_update_handler(update: Update, context: ContextTypes.DEFAU
                 pass
         elif is_new:
             await _notify_admin_group_request(context.bot, chat, user)
-            try:
-                await chat.send_message(
-                    "⏳ <b>درود! پرومته به گروه افزوده شد.</b>\n"
-                    "درخواست فعال‌سازی برای ادمین ربات ارسال شد. به محض تأیید ادمین، ربات فعال و پاسخگوی شما خواهد بود.",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
 
     elif new_status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
         from tools.moderation import _TRACKED_GROUPS
@@ -673,14 +633,7 @@ async def _process_and_reply(
             except Exception as fe:
                 logger.warning(f"Could not deliver code block as file: {fe}")
 
-    # Check if user requested a music track or song download
-    if is_music_request(prompt):
-        music_q = extract_music_query(prompt) or clean_music_query(prompt)
-        if music_q and len(music_q) >= 2:
-            try:
-                await handle_music_request(update, context, music_q)
-            except Exception as me:
-                logger.warning(f"Could not auto-deliver music in _process_and_reply: {me}")
+
 
 
 # =========================================================================
@@ -808,34 +761,7 @@ def is_latency_query(text: str) -> Optional[str]:
     return None
 
 
-_CRYPTO_MAP = {
-    "بیتکوین": "BTC", "بیت کوین": "BTC", "بیت": "BTC", "btc": "BTC", "bitcoin": "BTC",
-    "اتریوم": "ETH", "اتر": "ETH", "eth": "ETH", "ethereum": "ETH",
-    "سولانا": "SOL", "sol": "SOL", "solana": "SOL",
-    "تون": "TON", "تون کوین": "TON", "ton": "TON",
-    "دوج": "DOGE", "دوج کوین": "DOGE", "doge": "DOGE", "dogecoin": "DOGE",
-    "ریپل": "XRP", "xrp": "XRP", "ripple": "XRP",
-    "کاردانو": "ADA", "ada": "ADA", "cardano": "ADA",
-    "بایننس کوین": "BNB", "بی ان بی": "BNB", "bnb": "BNB",
-    "ترون": "TRX", "trx": "TRX", "tron": "TRX",
-    "شیبا": "SHIB", "shib": "SHIB", "shiba": "SHIB",
-    "اوکس": "AVAX", "avax": "AVAX", "avalanche": "AVAX",
-    "پولکادات": "DOT", "dot": "DOT",
-    "نیر": "NEAR", "near": "NEAR",
-    "لایت کوین": "LTC", "ltc": "LTC", "litecoin": "LTC",
-}
-
-def extract_crypto_query(text: str) -> Optional[str]:
-    """Extracts target cryptocurrency symbol if the query asks about crypto price."""
-    t = text.lower().strip()
-    for kw, sym in _CRYPTO_MAP.items():
-        if t == kw:
-            return sym
-        if re.search(rf"(?<!\w)(?:قیمت|نرخ)\s+{re.escape(kw)}(?!\w)", t):
-            return sym
-        if re.search(rf"(?<!\w){re.escape(kw)}\s+(?:چنده|چند است|چند شد|چند شده)(?!\w)", t):
-            return sym
-    return None
+# Crypto fast paths removed for OSINT engine
 
 
 _TIME_EXCLUSIONS = (
@@ -949,32 +875,25 @@ PROMETHEUS_BASE_COMMANDS: Set[str] = {
     "agent", "research", "hermes",
     "fast", "speed",
     "mode", "setting", "settings",
-    "rates", "dollar", "arz", "gheymat",
-    "crypto",
+    "osint", "search", "web", "find", "jostojoo",
+    "crawl", "scrape", "layers", "read", "url",
+    "dork", "dorks", "googledork",
+    "github", "git", "gh",
+    "linkedin", "in",
+    "usercheck", "username", "user",
+    "dns", "ns", "mx",
+    "subdomains", "subdomain", "subs", "crtsh",
+    "ip", "geo", "asn",
+    "email", "mail",
+    "phone", "tel", "mobile",
     "time", "saat",
-    "weather", "hava",
-    "digikala", "dk",
-    "music", "song", "ahang",
-    "read", "web", "url",
-    "telegraph", "telegra", "article",
-    "calc", "hesab",
     "clear", "clean",
     "id", "myid", "info", "chatid", "whoami",
-    "qr", "qrcode", "barcode", "bar",
-    "twitter", "tweet", "x",
     "delete", "del", "pak", "hazf", "remove",
     "ping", "status",
     "summarize", "recap", "summary", "kholase",
-    "search", "find", "searchdb", "jostojoo",
     "file", "createfile", "makefile",
     "scan", "vt", "virustotal", "antivirus",
-    "run", "exec", "py", "python", "sandbox", "e2b",
-    "sh", "shell", "bash", "terminal", "cmd",
-    "apt", "pkg", "dpkg", "package",
-    "granttool", "grant_tool", "grant",
-    "revoketool", "revoke_tool", "revoke",
-    "usertools", "user_tools", "mytools", "my_tools",
-    "grantedtools", "granted_tools", "toolsaccess", "tools_access",
     # Admin commands
     "ban", "block",
     "unban", "unblock",
@@ -1353,38 +1272,7 @@ def extract_forward_message_context(message) -> str:
     return f"📌 [پیام فوروارد شده از طرف {origin_desc}]:\n\"\"\"\n{body}\n\"\"\""
 
 
-_WEATHER_EXCLUSIONS = (
-    "منو داشته باش", "داشته باش", "جوش آب", "نقطه جوش", "دمای جوش", "اتاق", "بدن",
-    "موتور", "روشن", "خاموش", "دلم", "سرم", "حالم", "کد", "پایتون", "برنامه"
-)
-
-def extract_weather_query(text: str) -> Optional[str]:
-    """Matches natural Persian weather queries and extracts city name."""
-    t = text.strip()
-    if any(ex in t for ex in _WEATHER_EXCLUSIONS):
-        return None
-
-    # 1. Unambiguous weather pattern: "آب و هوای [شهر]", "وضعیت هوای [شهر]"
-    m = re.search(
-        r"(?:آب\s*و\s*هوای|وضعیت\s*(?:آب\s*و\s*)?هوای|آب\s*هوا[ی]?)\s+([آ-یa-zA-Z\s]+?)(?:\s+(?:چطوره|چطوریه|چگونه\s*است|چند\s*درجه\s*است|امروز|الان|\?|؟)|[\?؟]|$)",
-        t
-    )
-    if m:
-        city = m.group(1).strip()
-        if len(city) >= 2 and city not in ("امروز", "فردا", "الان", "اینجا"):
-            return city
-
-    # 2. Pattern with "هوای [شهر]" or "دمای [شهر]" - require weather intent
-    m2 = re.search(
-        r"(?:هوای|دمای)\s+([آ-یa-zA-Z\s]+?)(?:\s+(?:چطوره|چطوریه|چگونه\s*است|چند\s*درجه\s*است|امروز|الان|بارونیه|برفیه|گرمه|سرده)|[\?؟]|$)",
-        t
-    )
-    if m2:
-        candidate = m2.group(1).strip()
-        if len(candidate) >= 2 and candidate not in ("امروز", "فردا", "الان", "اینجا") and not any(v in candidate for v in ("من", "تو", "ما", "او", "کن", "باش", "شد", "رو")):
-            return candidate
-
-    return None
+# Weather helper removed for OSINT engine
 
 
 def is_math_query(text: str) -> bool:
@@ -1403,32 +1291,7 @@ def is_math_query(text: str) -> bool:
     return len(cleaned) == 0
 
 
-_DK_BRAND_PATTERN = re.compile(r"(?:دیجی[\s\u200c]*کالا|دیجیکالا|digikala)", re.IGNORECASE)
-
-_DK_COMPANY_QUESTIONS = (
-    "کیست", "کیه", "کجاست", "چگونه", "چرا", "چیست", "تاسیس", "مالک", "صاحب",
-    "مدیرعامل", "سهامدار", "استخدام", "تاریخچه", "دفتر", "پشتیبانی", "تلفن", "شماره"
-)
-
-
-def extract_digikala_query(text: str) -> Optional[str]:
-    """
-    Matches requests to search or buy products from Digikala across diverse phrasing:
-    e.g. 'قیمت آیفون 16 در دیجی‌کالا', 'توی دیجیکالا سرچ کن گوشی سامسونگ', 'سرچ دیجیکالا کفش نایک'.
-    Excludes informational/knowledge queries about Digikala the company itself.
-    """
-    t = text.strip()
-    if not _DK_BRAND_PATTERN.search(t):
-        return None
-
-    t_lower = t.lower()
-    if any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", t_lower) for w in _DK_COMPANY_QUESTIONS):
-        return None
-
-    candidate = clean_digikala_query(t)
-    if len(candidate) >= 2:
-        return candidate
-    return None
+# Digikala helper removed for OSINT engine
 
 
 # =========================================================================
@@ -1445,32 +1308,25 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u_name = user.first_name if user else "کاربر"
 
     text = (
-        f"⚡ **درود {u_name}! به پرومته (Prometheus AI) خوش آمدید.**\n\n"
-        "من **پرومته** هستم؛ دستیار هوش مصنوعی پیشرفته، پرسرعت و خودمختار شما که ادغام‌شده با **مغز پردازش غول‌آسای هرمس ایجنت**، دیتابیس ابری کلودفلر و ابزارهای تخصصی زنده است:\n\n"
-        "• 🧠 **غول ایجنت خودمختار:** `/agent` یا `/pagent [موضوع تحقیق]` (اجرای تمام ابزارها، وب‌گردی، مرورگر و کدنویسی)\n"
-        "• ⚡ **حالت فوق‌سریع:** `/fast` یا `/pfast [پرسش]` (پاسخ‌دهی زیر ۱ ثانیه با شبکه اختصاصی)\n"
-        "• ⚙️ **تنظیم حالت پاسخ‌دهی:** `/mode` یا `/pmode` (انتخاب بین هوشمند، غول ایجنت و فوق‌سریع)\n"
-        "• 🆔 **استخراج آیدی عددی و مشخصات چت:** `/id` یا `/pid` یا `/pinfo` (کپی فوری با یک لمس)\n"
-        "• 📷 **درک تصویر، OCR و بازسازی بصری:** ارسال مستقیم عکس یا ریپلای روی عکس\n"
-        "• 🏁 **ساخت بارکد و QR Code:** `/qr` یا `/pqr [متن]` یا `/barcode [کد]`\n"
-        "• 🐦 **کاوشگر و خواننده X (توییتر):** `/twitter` یا `/ptwitter` یا ارسال لینک توییت\n"
-        "• 📊 **نرخ لحظه‌ای دلار، تتر، طلا و سکه:** `/rates` یا `/prates` یا `/dollar`\n"
-        "• 🪙 **استعلام زنده رمزارزها:** `/crypto` یا `/pcrypto btc`\n"
-        "• 🎵 **دانلود و آپلود مستقیم موزیک ۳۲۰:** `/music` یا `/pmusic نام ترانه`\n"
-        "• 📝 **انتشار فوری در تلگراف:** `/telegraph عنوان | متن`\n"
-        "• 🛍 **استعلام و قیمت دیجی‌کالا:** `/digikala` یا `/pdk نام کالا`\n"
-        "• 🌦 **پیش‌بینی آب و هوای زنده:** `/weather` یا `/pweather نام شهر`\n"
-        "• 🕒 **ساعت رسمی و تقویم شمسی:** `/time` یا `/ptime`\n"
-        "• 💻 **ساندباکس اجرای کد پایتون:** `/run` یا `/py [کد]` یا `/sandbox` (اجرای زنده و امن کدهای پایتون ۳)\n"
-        "• 🧮 **ماشین حساب و ریاضی:** `/calc` یا `/pcalc [عبارت]`\n"
-        "• 📁 **تولید و خواندن انواع فایل:** `/file` یا ارسال فایل‌های PDF، اکسل، ورد، پایتون، کد و متن\n"
-        "• 🛡️ **پویشگر امنیتی و آنتی‌ویروس:** `/scan` یا `/pvt` (اسکن فایل، لینک و هش با ۷۰ آنتی‌ویروس VirusTotal)\n"
-        "• 🗑 **حذف پیام‌های ارسالی ربات:** `/del` یا `/pdel` با ریپلای روی پیام ربات\n"
-        "• 📌 **درک هوشمند ریپلای:** روی هر پیامی ریپلای بزنید و سوال یا دستور خود را مطرح کنید تا ربات آن را تحلیل کند.\n\n"
-        "💡 *در گروه‌ها جهت جلوگیری از تداخل با سایر ربات‌ها، کلیه دستورات با پیشوند اختصاصی p یا p_ (مانند /pinfo، /pid، /phelp، /pfast، /prates) یا با منشن نام کاربری (@AMZprometheusopenbot) فعال می‌شوند.*"
+        f"⚡️ <b>درود {html.escape(u_name)}! به سامانه پرومته OSINT خوش آمدید.</b>\n\n"
+        "من <b>پرومته</b> هستم؛ دستیار پیشرفته و خودمختار هوش مصنوعی برای <b>پژوهش‌های عمیق، تحلیل اطلاعات وب و هوش سایبری (OSINT)</b>:\n\n"
+        "🔍 <b>مهم‌ترین قابلیت‌های تخصصی پرومته OSINT:</b>\n"
+        "• 🌐 <b>جستجوی چندموتوره وب:</b> <code>/osint [عبارت]</code> یا <code>/search</code>\n"
+        "• 🕷 <b>کاوشگر لایه‌های وب و متاداده:</b> <code>/crawl [لینک]</code> یا <code>/scrape</code> یا <code>/read</code>\n"
+        "• 🔎 <b>دورک‌های هوشمند گوگل:</b> <code>/dork [هدف]</code> (اسناد محرمانه، دایرکتوری باز، لاگین)\n"
+        "• 🐙 <b>کاوشگر امنیتی گیت‌هاب:</b> <code>/github [یوزر/مخزن]</code> (استخراج ایمیل نویسندگان از کامیت‌ها، کلیدهای SSH)\n"
+        "• 💼 <b>هوش سازمانی لینکدین:</b> <code>/linkedin [شخص/شرکت]</code>\n"
+        "• 👤 <b>ردیابی نام‌کاربری:</b> <code>/usercheck [یوزرنیم]</code> در ۲۵+ پلتفرم\n"
+        "• 📡 <b>رکوردهای کامل DNS:</b> <code>/dns [دامنه]</code> (A, AAAA, MX, NS, TXT, SOA)\n"
+        "• 🌐 <b>کشف ساب‌دامین‌ها:</b> <code>/subdomains [دامنه]</code> با Certificate Transparency\n"
+        "• 🌍 <b>شناسایی و مکان‌یابی IP:</b> <code>/ip [آدرس IP یا دامنه]</code>\n"
+        "• 📧 <b>تحلیل ایمیل:</b> <code>/email [ایمیل]</code> (بررسی MX و Gravatar)\n"
+        "• 📞 <b>تحلیل شماره تلفن:</b> <code>/phone [شماره]</code> (تشخیص اپراتور و کشور)\n"
+        "• 🛡️ <b>اسکنر امنیتی VirusTotal:</b> <code>/scan [فایل/لینک/هش]</code> با ۷۰ آنتی‌ویروس\n"
+        "• 🧠 <b>مغز خودمختار OSINT پرومته:</b> <code>/agent [پرسش]</code> یا گفتگوی مستقیم\n\n"
+        "💡 <i>در گروه‌ها کلیه دستورات با پیشوند p یا p_ (مانند <code>/phelp</code>، <code>/posint</code>، <code>/pdork</code>) یا با منشن نام ربات فعال می‌شوند.</i>"
     )
-    formatted = markdown_to_telegram_html(text)
-    await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
+    await msg.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1482,73 +1338,52 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     text = (
-        "📖 **راهنمای جامع دستورات پرومته (Prometheus AI):**\n\n"
-        "💡 **شخصی‌سازی دستورات در گروه‌ها (پیشوند p / p_):**\n"
-        "جهت جلوگیری کامل از تداخل با دستورات سایر ربات‌های حاضر در گروه، کلیه دستورات پرومته در گروه‌ها با پیشوند مخفف نام پرومته (`p` یا `p_`) یا منشن نام کاربری ربات فعال می‌شوند:\n"
-        "• مثال: `/pinfo` ، `/pid` ، `/phelp` ، `/pfast` ، `/prates` ، `/pagent` ، `/pping` یا `/info@AMZprometheusopenbot`\n"
-        "• در گفتگوی خصوصی (پیوی)، دستورات هم به شکل ساده (`/info`) و هم با پیشوند اختصاصی (`/pinfo`) فعال هستند.\n\n"
-        "🧠 **هسته غول‌آسای هرمس ایجنت (Hermes Titan Brain):**\n"
-        "• `/agent [پرسش]` یا `/pagent [موضوع]` - ارجاع مستقیم به غول هرمس ایجنت برای وب‌گردی خودکار با Chromium، پژوهش عمیق، تحلیل چندمرحله‌ای و اجرای کد sandbox\n"
-        "• `/fast [پرسش]` یا `/pfast` - پاسخ‌دهی رعدآسا (زیر ۱ ثانیه) برای مکالمات و سوالات سریع\n"
-        "• `/mode` یا `/pmode` - مشاهده و تغییر حالت کاری (هوشمند خودکار / غول ایجنت / فوق‌سریع)\n\n"
-        "🛠 **ابزارهای اختصاصی و بلادرنگ:**\n"
-        "• `/run [کد پایتون]` یا `/py` یا `/sandbox` یا `/prun` - اجرای امن، زنده و بلادرنگ کدهای پایتون در محیط ساندباکس سرور\n"
-        "• `/sh [دستور]` یا `/psh` یا `/terminal` - شل و ترمینال سرور (دستورات بی‌خطر عمومی، دستورات حساس نیازمند تایید)\n"
-        "• `/apt [دستور]` یا `/papt` یا `/pkg` - مدیریت پکیج‌های لینوکس سرور (جستجو، نصب و به‌روزرسانی بسته‌های دبیان)\n"
-        "• `/usertools` یا `/pusertools` - مشاهده ابزارهای اختصاصی آزادسازی‌شده برای شما\n"
-        "• `/id` یا `/pid` یا `/pinfo` - استخراج کامل آیدی عددی کاربر، چت، پیام، فرستنده فوروارد و مشخصات با کپی یک‌لمسی\n"
-        "• `/file [نام فایل] [محتوا]` یا `/pfile` - ساخت و دانلود انواع اسناد (پایتون، اکسل، ورد، PDF، کد و متن)\n"
-        "• `/scan [فایل/لینک/هش]` یا `/pscan` یا `/pvt` - اسکن فایل و لینک با ۷۰ موتور آنتی‌ویروس مطرح جهان (VirusTotal)\n"
-        "• 📁 **خواندن و تحلیل اسناد:** ارسال هر فایل (PDF، Word، Excel، CSV، کد یا متن) جهت خلاصه، ترجمه و تحلیل محتوا\n"
-        "• `/qr` یا `/pqr [متن/لینک]` - ساخت کیوآر کد اختصاصی با کیفیت فوق‌العاده بالا\n"
-        "• `/barcode [کد]` یا `/pbarcode` - ساخت بارکد میله‌ای استاندارد تجاری (Code128)\n"
-        "• 📷 **بینایی ماشین (Vision):** ارسال هر تصویر یا ریپلای روی تصویر با سوال، استخراج متن (OCR)، تحلیل اشیاء یا درخواست «بازسازی تصویر»\n"
-        "• `/tweet [لینک توییت]` - استخراج متن، آمار، رسانه‌ها و ترجمه توییت از X (توییتر)\n"
-        "• `/twitter [یوزرنیم یا موضوع]` یا `/ptwitter` - مشاهده پروفایل، بیوگرافی و جستجوی زنده در X\n"
-        "• `/rates` یا `/prates` یا `/dollar` - قیمت زنده دلار، تتر، یورو، طلا و سکه در بازار ایران\n"
-        "• `/crypto [نماد]` یا `/pcrypto` - نرخ لحظه‌ای رمزارزها به دلار و تومان (مثال: `/crypto btc` یا `/pcrypto btc`)\n"
-        "• `/music [نام ترانه]` یا `/pmusic` - جستجو و ارسال فایل کامل MP3 با کیفیت اصلی ۳۲۰\n"
-        "• `/telegraph [عنوان | متن]` - انتشار فوری در تلگراف با Instant View\n"
-        "• `/read [لینک]` یا `/pread` - استخراج و خلاصه متن صفحات وب\n"
-        "• `/weather [شهر]` یا `/pweather` - وضعیت آب و هوای زنده شهرها\n"
-        "• `/digikala [کالا]` یا `/pdk` - استعلام قیمت و موجودی دیجی‌کالا\n"
-        "• `/time` یا `/ptime` - ساعت رسمی تهران و تاریخ دقیق شمسی\n"
-        "• `/calc [عبارت]` یا `/pcalc` - محاسبات ریاضی و علمی\n"
-        "• `/del` یا `/pdel` - حذف پیام ارسال شده توسط پرومته (با ریپلای روی پیام یا گفتن «پاکش کن»)\n"
-        "• `/clear` یا `/pclear` - پاکسازی حافظه نشست جاری\n"
-        "• `/ping` یا `/pping` - بررسی بیداری و سرعت پاسخ‌دهی سرور\n\n"
-        "📌 **درک هوشمند ریپلای:** روی هر پیامی ریپلای بزنید و بپرسید «این رو ترجمه کن»، «نظرت چیه؟» یا «خلاصه‌اش کن» تا پرومته محتوای ریپلای‌شده را هوشمندانه بخواند و تحلیل کند.\n\n"
-        "🗣 **مکالمه روان:** هر سوالی بپرسید، پرومته به صورت هوشمند و خودکار بهترین روش پاسخ را انتخاب می‌کند."
+        "📖 <b>راهنمای جامع دستورات سامانه پرومته OSINT:</b>\n\n"
+        "💡 <b>پیشوند اختصاصی در گروه‌ها (p / p_):</b>\n"
+        "جهت جلوگیری از تداخل با سایر ربات‌ها، در گروه‌ها دستورات با پیشوند اختصاصی (مانند <code>/phelp</code>، <code>/posint</code>، <code>/pdork</code>، <code>/pgithub</code>) یا منشن نام ربات عمل می‌کنند.\n\n"
+        "🔍 <b>ابزارهای تخصصی اوسینت و وب:</b>\n"
+        "• <code>/osint [عبارت]</code> یا <code>/search</code> - جستجوی همزمان چندموتوره در وب\n"
+        "• <code>/crawl [لینک]</code> یا <code>/scrape</code> یا <code>/read</code> - کاوش لایه‌های صفحه، کشف ایمیل‌ها، شماره‌ها، ولت‌ها و تکنولوژی‌های وب‌سایت\n"
+        "• <code>/dork [هدف]</code> - تولید و اجرای دورک‌های هدفمند گوگل برای نفوذ، دایرکتوری باز و اسناد\n"
+        "• <code>/github [کاربر]</code> - تحلیل اکانت گیت‌هاب، استخراج ایمیل از کامیت‌ها و کلیدهای SSH\n"
+        "• <code>/linkedin [نام/شرکت]</code> - کشف سوابق و پروفایل‌های لینکدین\n"
+        "• <code>/usercheck [نام کاربری]</code> - استعلام فوری یوزرنیم در ۲۵+ پلتفرم مطرح جهانی\n"
+        "• <code>/dns [دامنه]</code> - تفکیک کلیه رکوردهای DNS دامنه\n"
+        "• <code>/subdomains [دامنه]</code> - استخراج تمامی ساب‌دامین‌ها از لاگ‌های گواهی امنیتی\n"
+        "• <code>/ip [IP/دامنه]</code> - موقعیت جغرافیایی، کشور، شهر، ISP و شماره AS\n"
+        "• <code>/email [ایمیل]</code> - بررسی صحت، رکوردهای میل‌سرور و پروفایل Gravatar\n"
+        "• <code>/phone [شماره]</code> - اعتبارسنجی شماره و تشخیص اپراتور تلفن همراه\n"
+        "• <code>/scan [فایل/لینک/هش]</code> - اسکن امنیتی و تحلیل بدافزار با VirusTotal\n\n"
+        "⚙️ <b>دستورات عمومی:</b>\n"
+        "• <code>/agent [پرسش]</code> - ارجاع به موتور خودمختار پرومته برای تحلیل و پژوهش‌های چندمرحله‌ای\n"
+        "• <code>/fast [پرسش]</code> - پاسخ‌دهی رعدآسا برای گفتگوهای سریع\n"
+        "• <code>/id</code> یا <code>/pinfo</code> - استخراج آیدی عددی و مشخصات چت\n"
+        "• <code>/ping</code> - تست زنده زمان پاسخگویی سرور\n"
+        "• <code>/clear</code> - پاکسازی حافظه نشست جاری\n"
+        "• <code>/del</code> - حذف پیام ربات (با ریپلای روی پیام ربات)"
     )
 
     if user and is_admin(user.id):
         text += (
-            "\n\n👮‍♂️ **دستورات مدیریت و نظارت ادمین (Admin Governance):**\n"
-            "• `/ban [کاربر/ریپلای]` یا `/pban` - مسدودسازی دائم کاربر از ربات\n"
-            "• `/unban [کاربر/ریپلای]` یا `/punban` - رفع مسدودیت کاربر و ثبت در دیتابیس\n"
-            "• `/mute [کاربر/ریپلای]` یا `/pmute [مدت]` - سکوت کاربر (مثال: `/mute 30m` یا `/pmute 2h`)\n"
-            "• `/unmute [کاربر/ریپلای]` یا `/punmute` - لغو سکوت کاربر\n"
-            "• `/bangroup [شناسه گروه]` یا `/pbangroup` - مسدودسازی کامل ربات در گروه\n"
-            "• `/unbangroup [شناسه گروه]` یا `/punbangroup` - رفع مسدودیت گروه\n"
-            "• `/mutegroup [مدت]` یا `/pmutegroup` - میوت کردن ربات در گروه\n"
-            "• `/unmutegroup` یا `/punmutegroup` - لغو سکوت ربات در گروه\n"
-            "• `/banlist` یا `/pbanlist` - لیست دائم افراد و گروه‌های بن‌شده با یوزرنیم و آیدی عددی\n"
-            "• `/mutelist` یا `/pmutelist` - لیست فعال افراد و گروه‌های میوت‌شده با زمان باقیمانده\n"
-            "• `/groups` یا `/pgroups` - فهرست تمامی گروه‌های ثبت‌شده، فعال، مسدود و وضعیت آن‌ها\n"
-            "• `/pendinggroups` یا `/ppendinggroups` - لیست گروه‌های جدید در انتظار تایید ادمین\n"
-            "• `/approvegroup [شناسه]` یا `/papprovegroup` - تایید دستی فعال‌سازی ربات در گروه\n"
-            "• `/rejectgroup [شناسه]` یا `/prejectgroup` - رد فعال‌سازی و خروج ربات از گروه\n"
-            "• `/set [کلید] [مقدار]` یا `/pset` - ثبت دائم دستور و تنظیمات در دیتابیس\n"
-            "• `/get [کلید]` یا `/pget` - خواندن تنظیمات از دیتابیس\n"
-            "• `/adminsettings` یا `/padminsettings` - مشاهده تمامی تنظیمات ذخیره‌شده\n"
-            "• `/adminlogs` یا `/padminlogs` - تاریخچه و لاگ دائم تمامی دستورات ادمین‌ها\n"
-            "• `/grant_tool [کاربر/ریپلای] [ابزار]` - اعطای دسترسی گزینشی به ابزارهای حساس (apt, shell, sandbox, ...)\n"
-            "• `/revoke_tool [کاربر/ریپلای] [ابزار]` - سلب دسترسی گزینشی ابزارها از کاربر\n"
-            "• `/granted_tools` - مشاهده فهرست و گزارش کاربران مجاز به ابزارهای گزینشی"
+            "\n\n👮‍♂️ <b>دستورات مدیریت و نظارت ادمین (Admin Governance):</b>\n"
+            "• <code>/ban [کاربر/ریپلای]</code> - مسدودسازی دائم کاربر\n"
+            "• <code>/unban [کاربر/ریپلای]</code> - رفع مسدودیت کاربر\n"
+            "• <code>/mute [کاربر/ریپلای] [مدت]</code> - سکوت موقت کاربر\n"
+            "• <code>/unmute [کاربر/ریپلای]</code> - لغو سکوت کاربر\n"
+            "• <code>/bangroup [شناسه گروه]</code> - مسدودسازی گروه\n"
+            "• <code>/unbangroup [شناسه گروه]</code> - رفع مسدودیت گروه\n"
+            "• <code>/mutegroup [مدت]</code> - میوت کردن ربات در گروه\n"
+            "• <code>/unmutegroup</code> - لغو سکوت ربات در گروه\n"
+            "• <code>/banlist</code> - لیست کاربران و گروه‌های بن‌شده\n"
+            "• <code>/mutelist</code> - لیست افراد و گروه‌های میوت‌شده\n"
+            "• <code>/groups</code> - فهرست گروه‌های ثبت‌شده و وضعیت آن‌ها\n"
+            "• <code>/pendinggroups</code> - لیست گروه‌های در انتظار تایید\n"
+            "• <code>/approvegroup [شناسه]</code> - تایید دستی گروه و فعال‌سازی ربات\n"
+            "• <code>/rejectgroup [شناسه]</code> - رد درخواست گروه و خروج ربات\n"
+            "• <code>/adminlogs</code> - مشاهده لاگ دستورات مدیریتی"
         )
 
-    formatted = markdown_to_telegram_html(text)
-    await msg.reply_text(formatted, parse_mode=ParseMode.HTML)
+    await msg.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1670,32 +1505,628 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _deliver_reply(update.effective_message, res)
 
 
-async def rates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct fiat & gold rates lookup (supports /dollar or specific asset arguments)."""
-    if update.effective_chat:
-        await update.effective_chat.send_action(ChatAction.TYPING)
+async def osint_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Multi-engine OSINT web intelligence search command (/osint or /search)."""
     msg = update.effective_message
-    cmd = msg.text.split()[0].lower() if msg and msg.text else "/rates"
-    target = None
-    if "dollar" in cmd or "dolar" in cmd:
-        target = "usd"
-    elif context.args:
-        target = extract_fiat_target(" ".join(context.args))
-    t0 = time.perf_counter()
-    res = await get_fiat_and_gold_rates(target=target)
-    if update.effective_chat:
-        record_chat_latency(update.effective_chat.id, time.perf_counter() - t0, f"دستور استعلام نرخ ({target or 'جامع'})")
-    await _deliver_reply(msg, res)
-
-
-async def crypto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct crypto price lookup."""
-    if update.effective_chat:
-        await update.effective_chat.send_action(ChatAction.TYPING)
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
     args = context.args or []
-    sym = args[0].strip().upper() if args else "BTC"
-    res = await get_crypto_price(sym)
-    await _deliver_reply(update.effective_message, res)
+    query = " ".join(args).strip()
+    if not query:
+        guide = (
+            "🔍 <b>راهنمای موتور جستجوی پیشرفته اوسینت (OSINT Web Intelligence):</b>\n\n"
+            "جستجوی همزمان در چند موتور جستجوگر و تار عنکبوتی وب با اولویت Tavily و DuckDuckGo.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/osint [عبارت جستجو]</code>\n"
+            "• <code>/search [عبارت جستجو]</code>\n\n"
+            "مثال: <code>/osint شرکت فناوری امنیتی تهران</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    t0 = time.perf_counter()
+    results = await search_web_osint(query, max_results=5)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"جستجوی وب OSINT ({query[:15]})")
+
+    if not results:
+        await msg.reply_text(f"🔍 هیچ نتیجه‌ای برای «{html.escape(query)}» یافت نشد.", parse_mode=ParseMode.HTML)
+        return
+
+    lines = [f"🌐 <b>نتایج کاوش وب برای:</b> <code>{html.escape(query)}</code>\n"]
+    for i, r in enumerate(results, 1):
+        title = html.escape(r.get("title") or "بدون عنوان")
+        url = r.get("url") or "#"
+        snippet = html.escape(r.get("snippet") or "")
+        lines.append(f"<b>{i}. <a href=\"{url}\">{title}</a></b>\n{snippet}\n")
+
+    report = "\n".join(lines)
+    await _deliver_reply(msg, report)
+
+
+async def crawl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deep webpage layer analyzer: metadata, tech stack, email, phone, crypto wallet, subdomain extraction."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    url = ""
+    args = context.args or []
+    if args:
+        url = args[0].strip()
+    elif msg.reply_to_message:
+        r_txt = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+        u_match = re.search(r"https?://\S+", r_txt)
+        if u_match:
+            url = u_match.group(0).strip()
+
+    if not url:
+        guide = (
+            "🕷 <b>کاوشگر لایه‌های وب و تحلیل عمیق صفحه (Deep Web Crawler):</b>\n\n"
+            "تحلیل متاداده، فناوری‌های مورد استفاده (CMS، CDN، فریم‌ورک)، استخراج ایمیل‌ها، شماره‌ها، کیف‌پول‌های کریپتو، ساب‌دامین‌ها و لینک‌های صفحه.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/crawl https://example.com</code>\n"
+            "• <code>/layers https://example.com</code>\n"
+            "• <code>/scrape https://example.com</code>\n"
+            "• <code>/read https://example.com</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text("🕷 <b>در حال کاوش و استخراج لایه‌های صفحه وب...</b>", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    data = await crawl_webpage_layers(url)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, "کاوشگر لایه‌های وب")
+
+    if data.get("error"):
+        await status_msg.edit_text(f"❌ خطا در تحلیل صفحه: <code>{html.escape(str(data.get('error')))}</code>", parse_mode=ParseMode.HTML)
+        return
+
+    title = html.escape(data.get("title") or "بدون عنوان")
+    status_code = data.get("status_code", 0)
+    tech = data.get("technologies") or []
+    emails = data.get("emails") or data.get("extracted_emails") or []
+    phones = data.get("phones") or data.get("extracted_phones") or []
+    wallets = data.get("crypto") or data.get("extracted_crypto_wallets") or {}
+    subdomains = data.get("subdomains") or data.get("extracted_subdomains") or []
+    internal_links = data.get("internal_links") or []
+    external_links = data.get("external_links") or []
+
+    lines = [
+        f"🎯 <b>گزارش کاوش عمیق وب (Webpage Layer Analysis)</b>\n",
+        f"🔗 <b>آدرس:</b> <code>{html.escape(data.get('final_url', url))}</code>",
+        f"📄 <b>عنوان:</b> {title}",
+        f"📡 <b>کد وضعیت:</b> <code>{status_code}</code> | ⏱ <b>زمان پاسخ:</b> <code>{data.get('response_time_ms', 0)}ms</code>",
+    ]
+
+    if tech:
+        lines.append(f"\n⚙️ <b>فناوری‌های شناسایی‌شده:</b> {html.escape(', '.join(tech))}")
+
+    if emails:
+        lines.append(f"\n📧 <b>ایمیل‌های کشف‌شده ({len(emails)}):</b>")
+        for em in emails[:8]:
+            lines.append(f"  • <code>{html.escape(em)}</code>")
+
+    if phones:
+        lines.append(f"\n📞 <b>شماره‌های تماس ({len(phones)}):</b>")
+        for ph in phones[:8]:
+            lines.append(f"  • <code>{html.escape(ph)}</code>")
+
+    active_wallets = {k: v for k, v in wallets.items() if v}
+    if active_wallets:
+        lines.append("\n💰 <b>آدرس‌های کیف‌پول رمزارز:</b>")
+        for wtype, wlist in active_wallets.items():
+            for w in wlist[:3]:
+                lines.append(f"  • {wtype.upper()}: <code>{html.escape(w)}</code>")
+
+    if subdomains:
+        lines.append(f"\n🌐 <b>ساب‌دامین‌های استخراج‌شده ({len(subdomains)}):</b>")
+        for s in subdomains[:6]:
+            lines.append(f"  • <code>{html.escape(s)}</code>")
+
+    lines.append(f"\n🔗 <b>آمار لینک‌ها:</b> داخلی: <code>{len(internal_links)}</code> | خارجی: <code>{len(external_links)}</code>")
+
+    text = "\n".join(lines)
+    try:
+        await status_msg.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, text)
+
+
+async def dork_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Google Dorking intelligence suite: generates targeted dorks and executes live queries."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = " ".join(args).strip()
+    if not target:
+        guide = (
+            "🔎 <b>موتور تخصصی دورک‌های گوگل (Smart Google Dorking Engine):</b>\n\n"
+            "تولید و اجرای دورک‌های نفوذ و اوسینت برای کشف فایل‌های حساس، اطلاعات محرمانه، پورتال‌های ورود و دایرکتوری‌های باز.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/dork example.com</code> (دورک‌های جامع دامنه)\n"
+            "• <code>/dork admin example.com</code> (پورتال‌های ورود و پنل مدیریت)\n"
+            "• <code>/dork files example.com</code> (دایرکتوری‌های باز و ایندکس‌ها)\n"
+            "• <code>/dork docs example.com</code> (اسناد محرمانه PDF, XLSX, DOCX)\n"
+            "• <code>/dork creds example.com</code> (فایل‌های کانفیگ، پسورد و .env)"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🔎 <b>در حال تولید و تحلیل دورک‌های هوشمند برای:</b> <code>{html.escape(target)}</code>...", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+
+    category = None
+    target_clean = target
+    parts = target.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() in ("sensitive", "admin", "dirs", "files", "docs", "creds", "subdomains", "cloud"):
+        category = parts[0].lower()
+        target_clean = parts[1]
+
+    dorks = generate_smart_dorks(target_clean, category=category)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, "تولید دورک گوگل")
+
+    lines = [
+        f"🎯 <b>دورک‌های هوشمند گوگل برای هدف:</b> <code>{html.escape(target_clean)}</code>\n"
+    ]
+    for i, d in enumerate(dorks[:6], 1):
+        name = html.escape(d.get("category_title", ""))
+        dork_query = html.escape(d.get("query", ""))
+        google_url = d.get("google_url", "")
+        lines.append(f"<b>{i}. {name}</b>\n▫️ <code>{dork_query}</code>\n▫️ <a href=\"{google_url}\">جستجوی مستقیم در Google</a>\n")
+
+    text = "\n".join(lines)
+    try:
+        await status_msg.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, text)
+
+
+async def github_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """GitHub OSINT investigator: scans public & commit history for hidden author emails, SSH keys, top repos."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = " ".join(args).strip()
+    if not target:
+        guide = (
+            "🐙 <b>کاوشگر امنیتی گیت‌هاب (GitHub OSINT Suite):</b>\n\n"
+            "شناسایی دقیق هویت توسعه‌دهندگان، تحلیل تاریخچه کامیت‌ها برای **استخراج ایمیل‌های مخفی نویسنده**، کلیدهای عمومی SSH، مخازن برتر و سازمان‌ها.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/github [نام کاربری]</code> (پروفایل و استخراج ایمیل از کامیت‌ها)\n"
+            "• <code>/github search [عبارت]</code> (جستجوی سورس‌کد و مخازن)\n\n"
+            "مثال: <code>/github torvalds</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🐙 <b>در حال استخراج اطلاعات OSINT از گیت‌هاب برای «{html.escape(target)}»...</b>", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+
+    if target.startswith("search "):
+        q = target[7:].strip()
+        data = await search_github(q)
+        elapsed = time.perf_counter() - t0
+        record_chat_latency(chat.id, elapsed, "جستجوی گیت‌هاب")
+        repos = data.get("repositories", [])
+        if not repos:
+            await status_msg.edit_text(f"🔍 نتیجه‌ای در مخازن گیت‌هاب برای «{html.escape(q)}» یافت نشد.", parse_mode=ParseMode.HTML)
+            return
+        lines = [f"🐙 <b>مخازن یافت شده برای:</b> <code>{html.escape(q)}</code>\n"]
+        for r in repos[:5]:
+            lines.append(f"• <b><a href=\"{r.get('url')}\">{html.escape(r.get('name', ''))}</a></b> (⭐ {r.get('stars')} | {r.get('language') or 'N/A'})\n  {html.escape(r.get('description') or '')}\n")
+        await status_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        return
+
+    username = target.replace("https://github.com/", "").strip("/").split()[0]
+    data = await investigate_github_user(username)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"بررسی OSINT گیت‌هاب (@{username})")
+
+    if not data.get("success"):
+        await status_msg.edit_text(f"❌ کاربر «{html.escape(username)}» در گیت‌هاب یافت نشد.", parse_mode=ParseMode.HTML)
+        return
+
+    name = html.escape(data.get("name") or username)
+    bio = html.escape(data.get("bio") or "ندارد")
+    company = html.escape(data.get("company") or "ندارد")
+    location = html.escape(data.get("location") or "ندارد")
+    created = (data.get("created_at") or "")[:10]
+    followers = data.get("followers", 0)
+    public_repos = data.get("public_repos_count", 0)
+    html_url = data.get("profile_url", f"https://github.com/{username}")
+
+    lines = [
+        f"🐙 <b>اطلاعات OSINT کاربر گیت‌هاب:</b> <a href=\"{html_url}\">@{html.escape(username)}</a>",
+        f"👤 <b>نام:</b> {name}",
+        f"📝 <b>بیو:</b> {bio}",
+        f"🏢 <b>سازمان/شرکت:</b> {company} | 📍 <b>موقعیت:</b> {location}",
+        f"👥 <b>دنبال‌کنندگان:</b> <code>{followers}</code> | 📁 <b>مخازن عمومی:</b> <code>{public_repos}</code>",
+        f"📅 <b>تاریخ عضویت:</b> <code>{created}</code>",
+    ]
+
+    emails = data.get("discovered_emails") or []
+    if emails:
+        lines.append(f"\n📧 <b>ایمیل‌های استخراج‌شده از تاریخچه کامیت‌ها ({len(emails)}):</b>")
+        for em in emails:
+            lines.append(f"  • <code>{html.escape(em)}</code>")
+    else:
+        lines.append("\n📧 <b>ایمیل کامیت:</b> <i>هیچ ایمیل عمومی در کامیت‌های اخیر یافت نشد.</i>")
+
+    top_repos = data.get("top_repos") or []
+    if top_repos:
+        lines.append("\n⭐ <b>مخازن برتر:</b>")
+        for r in top_repos[:4]:
+            lines.append(f"  • <a href=\"{r.get('url')}\">{html.escape(r.get('name'))}</a> (⭐ {r.get('stars')} | {r.get('language') or 'N/A'})")
+
+    text = "\n".join(lines)
+    try:
+        await status_msg.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, text)
+
+
+async def linkedin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """LinkedIn OSINT reconnaissance: profiles, companies, and roles."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = " ".join(args).strip()
+    if not target:
+        guide = (
+            "💼 <b>کاوشگر اطلاعات لینکدین (LinkedIn OSINT Recon):</b>\n\n"
+            "شناسایی موقعیت‌های شغلی، سوابق حرفه‌ای، پروفایل‌های اشخاص و اطلاعات سازمانی شرکت‌ها بدون نیاز به لاگین.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/linkedin [نام شخص] [عنوان شغلی اختیاری]</code>\n"
+            "• <code>/linkedin company [نام شرکت]</code>\n\n"
+            "مثال:\n"
+            "• <code>/linkedin مهرداد فلاحی امنیت شبکه</code>\n"
+            "• <code>/linkedin company دیجی کالا</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"💼 <b>در حال جستجوی اطلاعات در لینکدین برای «{html.escape(target)}»...</b>", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+
+    if target.lower().startswith("company ") or target.lower().startswith("شرکت "):
+        cname = re.sub(r"^(?:company|شرکت)\s+", "", target, flags=re.IGNORECASE).strip()
+        data = await search_linkedin_company(cname)
+        elapsed = time.perf_counter() - t0
+        record_chat_latency(chat.id, elapsed, f"جستجوی شرکت لینکدین ({cname[:15]})")
+
+        companies = data.get("companies", [])
+        if not companies:
+            await status_msg.edit_text(f"❌ اطلاعات شرکتی برای «{html.escape(cname)}» در لینکدین یافت نشد.", parse_mode=ParseMode.HTML)
+            return
+
+        lines = [f"🏢 <b>اطلاعات سازمان در لینکدین برای:</b> <code>{html.escape(cname)}</code>\n"]
+        for c in companies[:4]:
+            lines.append(f"• <b><a href=\"{c.get('url')}\">{html.escape(c.get('name', ''))}</a></b>\n  {html.escape(c.get('snippet', ''))}\n")
+        await status_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        return
+
+    data = await search_linkedin_profile(target)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"جستجوی پروفایل لینکدین ({target[:15]})")
+
+    profiles = data.get("profiles", [])
+    if not profiles:
+        await status_msg.edit_text(f"❌ پروفایلی مطابق با «{html.escape(target)}» در لینکدین یافت نشد.", parse_mode=ParseMode.HTML)
+        return
+
+    lines = [f"💼 <b>پروفایل‌های یافت‌شده در لینکدین برای:</b> <code>{html.escape(target)}</code>\n"]
+    for p in profiles[:5]:
+        lines.append(f"• <b><a href=\"{p.get('url')}\">{html.escape(p.get('title', ''))}</a></b>\n  {html.escape(p.get('snippet', ''))}\n")
+
+    text = "\n".join(lines)
+    try:
+        await status_msg.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, text)
+
+
+async def usercheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Asynchronous 25+ platform username reconnaissance checker."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    username = (args[0] if args else "").lstrip("@").strip()
+    if not username:
+        guide = (
+            "👤 <b>ردیابی نام‌کاربری در ۲۵+ پلتفرم جهان (Username OSINT):</b>\n\n"
+            "پویش موازی و لحظه‌ای نام‌کاربری در شبکه‌های اجتماعی، پلتفرم‌های توسعه‌دهندگان، هاستینگ کد، پایگاه‌های رمزنگاری و گیمینگ.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/usercheck [نام کاربری]</code>\n"
+            "• <code>/username [نام کاربری]</code>\n\n"
+            "مثال: <code>/usercheck SatoshiNakamoto</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"👤 <b>در حال ردیابی نام‌کاربری @{html.escape(username)} در ۲۵+ پلتفرم...</b>", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    data = await search_username_across_platforms(username)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"ردیابی نام‌کاربری (@{username})")
+
+    found_count = data.get("total_found", data.get("found_count", 0))
+    total_checked = data.get("total_scanned", data.get("total_checked", 0))
+    found_profiles = data.get("profiles", data.get("found", []))
+
+    lines = [
+        f"🎯 <b>نتایج ردیابی نام‌کاربری:</b> <code>@{html.escape(username)}</code>",
+        f"📊 <b>وضعیت:</b> کشف‌شده در <b>{found_count}</b> از <b>{total_checked}</b> پلتفرم بررسی‌شده (در <code>{elapsed:.2f}s</code>)\n"
+    ]
+
+    if not found_profiles:
+        lines.append("<i>این نام کاربری در پلتفرم‌های اصلی عمومی یافت نشد یا ثبت نگردیده است.</i>")
+    else:
+        for p in found_profiles:
+            pname = html.escape(p.get("platform", ""))
+            cat = html.escape(p.get("category", ""))
+            url = p.get("url", "#")
+            cat_str = f" ({cat})" if cat else ""
+            lines.append(f"  ✅ <b>{pname}</b>{cat_str}: <a href=\"{url}\">مشاهده پروفایل</a>")
+
+    text = "\n".join(lines)
+    try:
+        await status_msg.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        await _deliver_reply(msg, text)
+
+
+async def dns_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """DNS intelligence command: resolves A, AAAA, MX, NS, TXT, SOA records."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    domain = (args[0] if args else "").strip()
+    if not domain:
+        guide = (
+            "📡 <b>تحلیل رکوردهای DNS دامنه (DNS Records Intelligence):</b>\n\n"
+            "استخراج جامع رکوردهای DNS از جمله A، AAAA، MX، NS، TXT و SOA دامنه.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/dns [دامنه]</code>\n\n"
+            "مثال: <code>/dns google.com</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    domain = re.sub(r"^https?://", "", domain).split("/")[0]
+    await chat.send_action(ChatAction.TYPING)
+    t0 = time.perf_counter()
+    data = await resolve_dns_records(domain)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"بررسی DNS ({domain})")
+
+    lines = [f"📡 <b>گزارش رکوردهای DNS برای:</b> <code>{html.escape(domain)}</code>\n"]
+    records = data.get("records", {})
+    for rtype in ["A", "AAAA", "MX", "NS", "TXT", "SOA"]:
+        vals = records.get(rtype, [])
+        if vals:
+            lines.append(f"<b>📌 رکوردهای {rtype}:</b>")
+            for v in vals[:6]:
+                lines.append(f"  • <code>{html.escape(str(v))}</code>")
+            lines.append("")
+
+    if not any(records.values()):
+        lines.append("<i>هیچ رکورد DNS فعالی برای این دامنه دریافت نشد.</i>")
+
+    await _deliver_reply(msg, "\n".join(lines))
+
+
+async def subdomains_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Certificate Transparency subdomain discovery via crt.sh."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    domain = (args[0] if args else "").strip()
+    if not domain:
+        guide = (
+            "🌐 <b>کشف ساب‌دامین‌های فعال با Certificate Transparency (crt.sh):</b>\n\n"
+            "پویش لاگ‌های شفافیت گواهی SSL/TLS برای کشف تمامی ساب‌دامین‌های ثبت‌شده دامنه.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/subdomains [دامنه]</code>\n"
+            "• <code>/subs [دامنه]</code>\n\n"
+            "مثال: <code>/subdomains github.com</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    domain = re.sub(r"^https?://", "", domain).split("/")[0]
+    await chat.send_action(ChatAction.TYPING)
+    status_msg = await msg.reply_text(f"🌐 <b>در حال استخراج ساب‌دامین‌های <code>{html.escape(domain)}</code> از crt.sh...</b>", parse_mode=ParseMode.HTML)
+    t0 = time.perf_counter()
+    data = await enumerate_subdomains_crtsh(domain)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"استخراج ساب‌دامین ({domain})")
+
+    subs = data.get("subdomains", [])
+    count = data.get("count", 0)
+
+    lines = [
+        f"🌐 <b>ساب‌دامین‌های کشف‌شده برای:</b> <code>{html.escape(domain)}</code>",
+        f"📊 <b>تعداد کل:</b> <code>{count}</code> ساب‌دامین یکتا\n"
+    ]
+
+    if not subs:
+        lines.append("<i>هیچ ساب‌دامینی در لاگ‌های گواهی یافت نشد.</i>")
+    else:
+        for s in subs[:25]:
+            lines.append(f"  • <code>{html.escape(s)}</code>")
+        if count > 25:
+            lines.append(f"\n<i>... و {count - 25} ساب‌دامین دیگر</i>")
+
+    text = "\n".join(lines)
+    try:
+        await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
+    except Exception:
+        await _deliver_reply(msg, text)
+
+
+async def ip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """IP / Hostname Geolocation, ASN, and network intelligence lookup."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    target = (args[0] if args else "").strip()
+    if not target:
+        guide = (
+            "🌍 <b>اطلاعات شبکه و موقعیت جغرافیایی IP (IP Intel & Geo):</b>\n\n"
+            "تحلیل آدرس IP یا دامنه، موقعیت مکانی، کشور، شهر، رساننده خدمات (ISP)، سازمان و شماره AS.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/ip [آدرس IP یا دامنه]</code>\n\n"
+            "مثال: <code>/ip 1.1.1.1</code> یا <code>/ip telegram.org</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    target_clean = re.sub(r"^https?://", "", target).split("/")[0]
+    await chat.send_action(ChatAction.TYPING)
+    t0 = time.perf_counter()
+    data = await lookup_ip_intel(target_clean)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, f"تحلیل IP ({target_clean})")
+
+    if data.get("error"):
+        await msg.reply_text(f"❌ خطا در استعلام IP: <code>{html.escape(str(data.get('error')))}</code>", parse_mode=ParseMode.HTML)
+        return
+
+    ip = html.escape(data.get("ip") or target_clean)
+    country = html.escape(data.get("country") or "نامشخص")
+    region = html.escape(data.get("region") or "نامشخص")
+    city = html.escape(data.get("city") or "نامشخص")
+    isp = html.escape(data.get("isp") or "نامشخص")
+    org = html.escape(data.get("org") or "نامشخص")
+    asn = html.escape(data.get("asn") or "نامشخص")
+    coords = html.escape(data.get("coordinates") or "نامشخص")
+    timezone = html.escape(data.get("timezone") or "نامشخص")
+
+    lines = [
+        f"🌍 <b>اطلاعات شبکه و موقعیت IP:</b> <code>{ip}</code>\n",
+        f"📍 <b>موقعیت:</b> {country}، {region}، {city}",
+        f"🏢 <b>ارائه‌دهنده (ISP):</b> {isp}",
+        f"🏛 <b>سازمان:</b> {org}",
+        f"🔢 <b>سیستم خودمختار (ASN):</b> <code>{asn}</code>",
+        f"🌐 <b>مختصات جغرافیایی:</b> <code>{coords}</code>",
+        f"⏰ <b>منطقه زمانی:</b> <code>{timezone}</code>",
+    ]
+
+    await _deliver_reply(msg, "\n".join(lines))
+
+
+async def email_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Email validation, domain MX records, and Gravatar profile investigator."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    email = (args[0] if args else "").strip()
+    if not email:
+        guide = (
+            "📧 <b>بررسی هویت و اعتبار ایمیل (Email OSINT Suite):</b>\n\n"
+            "صحت‌سنجی ساختار، بررسی رکوردهای MX سرور ایمیل و کشف پروفایل‌های متصل در Gravatar.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/email user@example.com</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    t0 = time.perf_counter()
+    data = await investigate_email(email)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, "بررسی ایمیل OSINT")
+
+    is_valid = data.get("syntax_valid", False)
+    domain = html.escape(data.get("domain", ""))
+    mx_records = data.get("mx_records", [])
+    gravatar = data.get("gravatar", {})
+
+    lines = [
+        f"📧 <b>گزارش OSINT ایمیل:</b> <code>{html.escape(email)}</code>\n",
+        f"✔️ <b>فرمت معتبر:</b> {'بله ✅' if is_valid else 'خیر ❌'}",
+        f"🌐 <b>دامنه:</b> <code>{domain}</code>",
+    ]
+
+    if mx_records:
+        lines.append(f"📬 <b>سرورهای میل (MX):</b> <code>{html.escape(', '.join(str(m) for m in mx_records[:3]))}</code>")
+    else:
+        lines.append("📬 <b>سرور میل (MX):</b> <i>رکوردی یافت نشد (احتمالاً دامنه فاقد میل‌سرور است).</i>")
+
+    if gravatar.get("has_gravatar"):
+        lines.append(f"🖼 <b>پروفایل Gravatar:</b> <a href=\"{gravatar.get('profile_url')}\">مشاهده پروفایل</a>")
+        gname = gravatar.get("display_name")
+        if gname:
+            lines.append(f"👤 <b>نام نمایشی:</b> {html.escape(gname)}")
+
+    await _deliver_reply(msg, "\n".join(lines))
+
+
+async def phone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Phone number intelligence: carrier detection, country, and valid format."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    args = context.args or []
+    number = (args[0] if args else "").strip()
+    if not number:
+        guide = (
+            "📞 <b>شناسایی و تحلیل شماره تلفن (Phone OSINT):</b>\n\n"
+            "تحلیل فرمت شماره، تشخیص اپراتور (همراه اول، ایرانسل، رایتل، شاتل و...)، کشور و اعتبارسنجی ساختاری.\n\n"
+            "📌 <b>نحوه استفاده:</b>\n"
+            "• <code>/phone 09121234567</code>\n"
+            "• <code>/phone +14155552671</code>"
+        )
+        await msg.reply_text(guide, parse_mode=ParseMode.HTML)
+        return
+
+    await chat.send_action(ChatAction.TYPING)
+    t0 = time.perf_counter()
+    data = await analyze_phone_number(number)
+    elapsed = time.perf_counter() - t0
+    record_chat_latency(chat.id, elapsed, "تحلیل شماره تلفن")
+
+    lines = [
+        f"📞 <b>اطلاعات شماره تلفن:</b> <code>{html.escape(number)}</code>\n",
+        f"✔️ <b>وضعیت اعتبار:</b> {'معتبر ✅' if data.get('valid') else 'نامعتبر ❌'}",
+        f"🌍 <b>کشور:</b> {html.escape(data.get('country', 'نامشخص'))}",
+        f"📡 <b>اپراتور شناسایی‌شده:</b> {html.escape(data.get('carrier', 'نامشخص'))}",
+        f"🔢 <b>فرمت استاندارد بین‌المللی:</b> <code>{html.escape(data.get('international_format', 'N/A'))}</code>",
+        f"📱 <b>فرمت ملی:</b> <code>{html.escape(data.get('national_format', 'N/A'))}</code>",
+    ]
+
+    await _deliver_reply(msg, "\n".join(lines))
 
 
 async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1703,29 +2134,6 @@ async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat:
         await update.effective_chat.send_action(ChatAction.TYPING)
     res = get_current_time()
-    await _deliver_reply(update.effective_message, res)
-
-
-async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct weather lookup."""
-    if update.effective_chat:
-        await update.effective_chat.send_action(ChatAction.TYPING)
-    args = context.args or []
-    city = " ".join(args).strip() if args else "تهران"
-    res = await get_weather(city)
-    await _deliver_reply(update.effective_message, res)
-
-
-async def digikala_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Digikala product search command."""
-    args = context.args or []
-    if not args:
-        await update.effective_message.reply_text("ℹ️ لطفاً نام محصول مورد نظر را وارد کنید. مثال: `/digikala آیفون 16`", parse_mode=ParseMode.MARKDOWN)
-        return
-    if update.effective_chat:
-        await update.effective_chat.send_action(ChatAction.TYPING)
-    query = " ".join(args).strip()
-    res = await search_digikala(query)
     await _deliver_reply(update.effective_message, res)
 
 
@@ -1738,97 +2146,6 @@ async def calc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     expr = " ".join(args).strip()
     res = calculate_math(expr)
     await _deliver_reply(update.effective_message, res)
-
-
-async def read_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct webpage reader command."""
-    args = context.args or []
-    if not args:
-        await update.effective_message.reply_text("ℹ️ لطفاً آدرس اینترنتی (URL) مورد نظر را وارد کنید. مثال: `/read https://example.com`", parse_mode=ParseMode.MARKDOWN)
-        return
-    url = args[0].strip()
-    res = await fetch_webpage_text(url)
-    await _deliver_reply(update.effective_message, res)
-
-
-async def telegraph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct Telegraph article publishing command with AI generation support."""
-    msg = update.effective_message
-    if not msg:
-        return
-
-    chat = update.effective_chat
-    user = update.effective_user
-
-    # Check if this command is a reply to another message
-    reply_msg = msg.reply_to_message
-    args_text = " ".join(context.args or []).strip()
-
-    if reply_msg and (reply_msg.text or reply_msg.caption):
-        if chat:
-            await chat.send_action(ChatAction.TYPING)
-        content = reply_msg.text or reply_msg.caption or ""
-        title = args_text if args_text else "مستند تلگراف پرومته"
-    elif "|" in args_text:
-        if chat:
-            await chat.send_action(ChatAction.TYPING)
-        title, content = extract_telegraph_args(args_text)
-    elif "\n" in args_text or len(args_text) >= 120:
-        if chat:
-            await chat.send_action(ChatAction.TYPING)
-        title, content = extract_telegraph_args(args_text)
-    elif args_text:
-        # User provided a topic to research, generate, and publish as an article
-        topic = args_text.strip()
-        status_msg = await msg.reply_text(
-            f"✍️ <b>پرومته در حال نگارش مقاله تخصصی درباره «{html.escape(topic)}» و انتشار در تلگراف است...</b>",
-            parse_mode=ParseMode.HTML
-        )
-        article_prompt = (
-            f"یک مقاله تخصصی، عمیق و جامع به زبان فارسی با ساختار مارک‌داون حرفه‌ای، "
-            f"تیتربندی استاندارد، چکیده اجرایی، جدول و نکات کلیدی درباره «{topic}» بنویس."
-        )
-        article_body = await execute_hermes_agent(
-            chat_id=chat.id if chat else 0,
-            user_prompt=article_prompt,
-            user_id=user.id if user else 0,
-            username=user.username or "" if user else "",
-            force_agent=True
-        )
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-        res = await create_telegraph_article(title=topic, content=article_body)
-        await _deliver_reply(msg, res)
-        return
-    else:
-        guide = (
-            "📝 **راهنمای انتشار مقالات در تلگراف (Telegra.ph):**\n\n"
-            "برای انتشار مقاله با نمایش فوری (Instant View) می‌توانید از روش‌های زیر استفاده کنید:\n\n"
-            "۱. **تولید خودکار مقاله با هوش مصنوعی:**\n"
-            "`/article هوش مصنوعی در سال 2026`\n"
-            "`/telegraph ترندهای فناوری کوانتومی`\n\n"
-            "۲. **فرمت مستقیم عنوان و متن:**\n"
-            "`/telegraph عنوان مقاله | متن کامل مقاله`\n\n"
-            "۳. **ریپلای روی پیام:**\n"
-            "روی هر پیام بلندی ریپلای بزنید و دستور `/telegraph [عنوان اختیاری]` را ارسال کنید.\n\n"
-            "۴. **گفتگوی آزاد با پرومته:**\n"
-            "*«یک مقاله کامل در مورد بلاکچین بنویس و در تلگراف منتشر کن»*"
-        )
-        await msg.reply_text(guide, parse_mode=ParseMode.MARKDOWN)
-        return
-
-    res = await create_telegraph_article(title=title, content=content)
-    await _deliver_reply(msg, res)
-
-
-async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct music search, download & upload command."""
-    args = context.args or []
-    query = " ".join(args).strip()
-    await handle_music_request(update, context, query)
 
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1933,39 +2250,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-async def barcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generates QR codes and barcodes directly in Telegram."""
-    msg = update.effective_message
-    if not msg:
-        return
 
-    cmd = (msg.text or "").split()[0].lower()
-    args = context.args or []
-    data_text = " ".join(args).strip()
-
-    if not data_text:
-        guide = (
-            "🏁 **راهنمای ساخت بارکد و کد QR (پرومته):**\n\n"
-            "• برای ساخت QR Code:\n"
-            "`/qr [متن یا لینک یا شماره]`\n"
-            "مثال: `/qr https://google.com`\n\n"
-            "• برای ساخت بارکد میله‌ای استاندارد:\n"
-            "`/barcode [اعداد یا حروف انگلیسی]`\n"
-            "مثال: `/barcode 9789643110291`\n\n"
-            "💡 همچنین می‌توانید در گفتگو بنویسید: *«برای شماره 09123456789 کیوآر کد بساز»*"
-        )
-        await msg.reply_text(guide, parse_mode=ParseMode.MARKDOWN)
-        return
-
-    is_qr = ("qr" in cmd or "کیو" in cmd)
-    if is_qr:
-        buf = generate_qr_code(data_text)
-        caption = f"🏁 <b>کیوآر کد اختصاصی پرومته</b>\n📄 محتوا: <code>{html.escape(data_text)}</code>"
-    else:
-        buf = generate_barcode(data_text)
-        caption = f"🏁 <b>بارکد استاندارد پرومته (Code128)</b>\n📄 داده: <code>{html.escape(data_text)}</code>"
-
-    await msg.reply_photo(photo=buf, caption=caption, parse_mode=ParseMode.HTML)
 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2179,70 +2464,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-async def twitter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles /twitter, /tweet, /x commands for reading tweets, profiles, or searching."""
-    msg = update.effective_message
-    chat = update.effective_chat
-    if not msg or not chat:
-        return
 
-    args = context.args or []
-    query = " ".join(args).strip()
-
-    if not query:
-        guide = (
-            "🐦 **راهنمای کاوشگر و خواننده X (توییتر) پرومته:**\n\n"
-            "• **خواندن و تحلیل کامل یک توییت:**\n"
-            "`/tweet https://x.com/username/status/123456...`\n\n"
-            "• **مشاهده پروفایل و آمار یک کاربر:**\n"
-            "`/twitter @elonmusk`\n\n"
-            "• **جستجو در جدیدترین توییت‌ها و مباحث:**\n"
-            "`/twitter هوش مصنوعی جدید`\n\n"
-            "💡 *همچنین می‌توانید لینک هر توییت را مستقیماً در چت بفرستید یا بپرسید «این توییت چی میگه؟»*"
-        )
-        await msg.reply_text(guide, parse_mode=ParseMode.MARKDOWN)
-        return
-
-    await chat.send_action(ChatAction.TYPING)
-    t0 = time.perf_counter()
-
-    is_m, act, target = parse_twitter_request(query)
-    if not is_m or not target:
-        target = query
-        act = "search"
-
-    if act == "tweet":
-        sn, tid = target.split(":", 1)
-        tweet_data = await fetch_tweet_data(sn, tid)
-        if tweet_data:
-            report = format_tweet_report(tweet_data)
-            record_chat_latency(chat.id, time.perf_counter() - t0, f"استخراج توییت (@{sn})")
-            await _deliver_reply(msg, report)
-            return
-        else:
-            await msg.reply_text("❌ متأسفانه دریافت اطلاعات این توییت میسر نشد (ممکن است توییت خصوصی، حذف‌شده یا آدرس نادرست باشد).")
-            return
-
-    elif act == "profile":
-        profile_data = await fetch_twitter_profile(target)
-        if profile_data:
-            report = format_profile_report(profile_data)
-            record_chat_latency(chat.id, time.perf_counter() - t0, f"پروفایل توییتر (@{target})")
-            await _deliver_reply(msg, report)
-            return
-        else:
-            await msg.reply_text(f"❌ پروفایل کاربری @{target} در توییتر/X یافت نشد یا در دسترس نیست.")
-            return
-
-    elif act == "search":
-        search_res = await search_twitter_live(target, max_results=4)
-        if search_res:
-            record_chat_latency(chat.id, time.perf_counter() - t0, f"جستجوی زنده توییتر ({target})")
-            await _deliver_reply(msg, search_res)
-            return
-        else:
-            await msg.reply_text(f"🔍 نتیجه‌ای برای جستجوی «{query}» در شبکه X یافت نشد.")
-            return
 
 
 # =========================================================================
@@ -4079,43 +4301,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _deliver_reply(message, res)
         return
 
-    # Fast-Path 3: Fiat & Gold Rates (<50ms)
-    if is_fiat_or_gold_query(cleaned_lower):
-        t0 = time.perf_counter()
-        target = extract_fiat_target(cleaned_lower)
-        res = await get_fiat_and_gold_rates(target=target)
-        elapsed = time.perf_counter() - t0
-        asset_label = f"استعلام لحظه‌ای {target.upper()}" if target else "جدول جامع نرخ ارز و طلا"
-        record_chat_latency(chat.id, elapsed, f"ابزار اختصاصی {asset_label}")
-        await _deliver_reply(message, res)
-        return
 
-    # Fast-Path 4: Crypto Rates (<100ms)
-    crypto_sym = extract_crypto_query(cleaned_lower)
-    if crypto_sym:
-        t0 = time.perf_counter()
-        res = await get_crypto_price(crypto_sym)
-        record_chat_latency(chat.id, time.perf_counter() - t0, f"استعلام لحظه‌ای رمزارز {crypto_sym}")
-        await _deliver_reply(message, res)
-        return
-
-    # Fast-Path 5: Weather (<150ms)
-    weather_city = extract_weather_query(cleaned_prompt)
-    if weather_city:
-        t0 = time.perf_counter()
-        res = await get_weather(weather_city)
-        record_chat_latency(chat.id, time.perf_counter() - t0, f"هواشناسی زنده ({weather_city})")
-        await _deliver_reply(message, res)
-        return
-
-    # Fast-Path 6: Digikala E-Commerce (<1s)
-    dk_query = extract_digikala_query(cleaned_prompt)
-    if dk_query:
-        t0 = time.perf_counter()
-        res = await search_digikala(dk_query)
-        record_chat_latency(chat.id, time.perf_counter() - t0, f"جستجوی فروشگاهی دیجی‌کالا ({dk_query})")
-        await _deliver_reply(message, res)
-        return
 
     # Fast-Path 7: Safe Math Evaluation (<1ms)
     if is_math_query(cleaned_prompt):
@@ -4126,19 +4312,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _deliver_reply(message, res)
         return
 
-    # Fast-Path 7.5: Barcode & QR Code Generator (<10ms)
-    is_bc, bc_type, bc_content = parse_barcode_request(cleaned_prompt)
-    if is_bc and bc_content:
-        t0 = time.perf_counter()
-        if bc_type == "qr":
-            buf = generate_qr_code(bc_content)
-            caption = f"🏁 <b>کیوآر کد اختصاصی پرومته</b>\n📄 محتوا: <code>{html.escape(bc_content)}</code>"
-        else:
-            buf = generate_barcode(bc_content)
-            caption = f"🏁 <b>بارکد استاندارد پرومته (Code128)</b>\n📄 داده: <code>{html.escape(bc_content)}</code>"
-        record_chat_latency(chat.id, time.perf_counter() - t0, f"تولید کننده {bc_type.upper()}")
-        await message.reply_photo(photo=buf, caption=caption, parse_mode=ParseMode.HTML)
-        return
+
 
     # Fast-Path 7.8: Multimodal Vision on Replied Photo or Album (Media Group)
     if message.reply_to_message and message.reply_to_message.photo:
@@ -4264,120 +4438,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error in file creation fast-path: {e}")
 
-    # Fast-Path 7.9: Twitter / X Explorer & Tweet Reader (<500ms)
-    is_tw, tw_act, tw_target = parse_twitter_request(cleaned_prompt)
-    if is_tw and tw_target:
-        t0 = time.perf_counter()
-        if tw_act == "tweet":
-            sn, tid = tw_target.split(":", 1)
-            tweet_data = await fetch_tweet_data(sn, tid)
-            if tweet_data:
-                # If user asked for translation / summary / analysis
-                if any(k in cleaned_lower for k in ["ترجمه", "خلاصه", "تحلیل", "نظرت", "معنی"]):
-                    agent_prompt = f"این توییت از طرف @{sn} در شبکه X (توییتر) منتشر شده است:\n\"\"\"\n{tweet_data.get('text')}\n\"\"\"\n\nدستور کاربر: {cleaned_prompt}"
-                    await _process_and_reply(update, context, agent_prompt)
-                    return
-                report = format_tweet_report(tweet_data)
-                record_chat_latency(chat.id, time.perf_counter() - t0, f"استخراج توییت (@{sn})")
-                await _deliver_reply(message, report)
-                return
-        elif tw_act == "profile":
-            profile_data = await fetch_twitter_profile(tw_target)
-            if profile_data:
-                report = format_profile_report(profile_data)
-                record_chat_latency(chat.id, time.perf_counter() - t0, f"پروفایل توییتر (@{tw_target})")
-                await _deliver_reply(message, report)
-                return
-        elif tw_act == "search":
-            search_res = await search_twitter_live(tw_target, max_results=4)
-            if search_res:
-                record_chat_latency(chat.id, time.perf_counter() - t0, f"جستجوی زنده توییتر ({tw_target})")
-                await _deliver_reply(message, search_res)
-                return
 
-    # Fast-Path 7.95: Check if user replied to a message containing a Tweet link
-    if message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
-        reply_raw = message.reply_to_message.text or message.reply_to_message.caption or ""
-        r_sn, r_tid = extract_tweet_url_and_id(reply_raw)
-        if r_sn and r_tid and any(k in cleaned_lower for k in ["توییت", "چی میگه", "بخون", "ترجمه", "خلاصه", "tweet", "تحلیل", "معنی"]):
-            t0 = time.perf_counter()
-            tweet_data = await fetch_tweet_data(r_sn, r_tid)
-            if tweet_data:
-                if any(k in cleaned_lower for k in ["ترجمه", "خلاصه", "تحلیل", "نظرت", "معنی"]):
-                    agent_prompt = f"این توییت از طرف @{r_sn} در شبکه X (توییتر) منتشر شده است:\n\"\"\"\n{tweet_data.get('text')}\n\"\"\"\n\nدستور کاربر: {cleaned_prompt}"
-                    await _process_and_reply(update, context, agent_prompt)
-                    return
-                report = format_tweet_report(tweet_data)
-                record_chat_latency(chat.id, time.perf_counter() - t0, f"استخراج توییت ریپلای‌شده (@{r_sn})")
-                await _deliver_reply(message, report)
-                return
-
-    # Fast-Path 8: Telegraph Article Publishing
-    if any(k in cleaned_lower for k in ["تلگراف", "telegraph", "telegra.ph"]):
-        # Case A: Reply to another message asking to publish to telegraph
-        if message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
-            reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
-            t_title = cleaned_prompt
-            for rem in [
-                "تلگرافش کن", "توی تلگراف بذار", "توی تلگراف بزار", "در تلگراف منتشر کن",
-                "توی تلگراف منتشر کن", "تلگراف کن", "تلگراف بفرست", "تلگراف", "telegraph"
-            ]:
-                t_title = t_title.replace(rem, "")
-            t_title = t_title.strip() or "مستند تلگراف پرومته"
-            res = await create_telegraph_article(title=t_title, content=reply_text)
-            await _deliver_reply(message, res)
-            return
-
-        # Case B: Direct "تلگراف: عنوان | متن" or "عنوان | متن" with telegraph intent
-        if "|" in cleaned_prompt and any(a in cleaned_lower for a in ["بساز", "منتشر", "صفحه", "پست", "publish", "create", "بذار", "بزار", "کن"]):
-            t_title, t_content = extract_telegraph_args(cleaned_prompt)
-            for rem in ["تلگراف:", "تلگراف", "telegraph:", "telegraph"]:
-                t_title = t_title.replace(rem, "").strip()
-            if t_content:
-                res = await create_telegraph_article(title=t_title or "مستند تلگراف پرومته", content=t_content)
-                await _deliver_reply(message, res)
-                return
-
-    # Fast-Path 8.5: Python & E2B Cloud Sandbox Code Execution
-    if is_sandbox_request(cleaned_prompt) or is_sandbox_request(raw_text):
-        code_to_run = extract_code_snippet(cleaned_prompt) or extract_code_snippet(raw_text)
-        if not code_to_run and message.reply_to_message:
-            rep_m = message.reply_to_message
-            code_to_run = extract_code_snippet(rep_m.text or rep_m.caption or "")
-        if code_to_run:
-            res = await run_code_sandbox(code_to_run)
-            images = res.get("images", [])
-            for img_bytes in images:
-                try:
-                    await message.reply_photo(
-                        photo=io.BytesIO(img_bytes),
-                        caption="📊 <b>نمودار / خروجی تصویری ساندباکس E2B</b>",
-                        parse_mode=ParseMode.HTML
-                    )
-                except Exception as pe:
-                    logger.warning(f"Could not send E2B plot image: {pe}")
-            formatted = format_sandbox_result(res, code_to_run)
-            await message.reply_text(formatted, parse_mode=ParseMode.HTML)
-            return
-        elif any(w in cleaned_lower for w in ["/run", "/exec", "/py", "/python", "/sandbox", "/e2b"]):
-            await sandbox_command_handler(update, context)
-            return
-
-    # Fast-Path 8.6: Shell & Terminal Command Execution
-    if is_shell_request(cleaned_prompt) or is_shell_request(raw_text):
-        await shell_command_handler(update, context)
-        return
-
-    # Fast-Path 8.7: APT Package Manager (Debian Linux Packages)
-    if is_apt_request(cleaned_prompt) or is_apt_request(raw_text):
-        await apt_command_handler(update, context)
-        return
-
-    # Fast-Path 9: Music Search, Download & Upload (Direct Native Telegram MP3 Delivery)
-    if is_music_request(cleaned_lower) or is_music_request(raw_text):
-        music_q = extract_music_query(cleaned_prompt) or extract_music_query(raw_text) or clean_music_query(cleaned_prompt) or "آهنگ جدید پرطرفدار"
-        await handle_music_request(update, context, music_q)
-        return
 
     # Process all queries through autonomous agent brain (zero typing animations)
     replied_context = extract_replied_message_context(message)
@@ -4671,7 +4732,12 @@ async def approvegroup_command(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await context.bot.send_message(
             chat_id=cid,
-            text="✅ <b>ربات توسط ادمین در این گروه تایید شد و هم‌اکنون فعال و آماده خدمت‌رسانی است.</b>",
+            text=(
+                "⚡️ <b>پرومته فعال شد!</b>\n\n"
+                "با دستور مستقیم ادمین ارشد، سیستم شناسایی و هوش مصنوعی پرومته در این گروه رسماً تایید و فعال گردید.\n"
+                "هم‌اکنون تمامی قابلیت‌های OSINT، کاوش عمیق وب، تحلیل لایه‌ها و پاسخگویی هوشمند در دسترس شماست.\n\n"
+                "▫️ جهت مشاهده راهنما: <code>/phelp</code> یا منشن نام ربات"
+            ),
             parse_mode=ParseMode.HTML
         )
     except Exception:
@@ -4885,8 +4951,6 @@ def build_application():
         logger.info("Prometheus moderation engine loaded in post_init.")
         await init_permissions_engine()
         logger.info("Prometheus granular permissions engine loaded in post_init.")
-        start_financial_cache_worker()
-        logger.info("Prometheus real-time financial cache worker started in post_init.")
 
     app = (
         ApplicationBuilder()
@@ -4906,45 +4970,38 @@ def build_application():
             return await handler_func(update, context)
         return wrapper
 
-    # Core Commands & Aliases (Personalized with p / p_ / pro / pro_ prefixes)
+    # Core OSINT Commands & Aliases (Personalized with p / p_ / pro / pro_ prefixes)
     app.add_handler(CommandHandler(make_bot_commands(["start"]), guard(start_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["help"]), guard(help_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["agent", "research", "hermes"]), guard(agent_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["agent", "research", "hermes", "osintagent"]), guard(agent_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["fast", "speed"]), guard(fast_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["mode", "setting", "settings"]), guard(mode_command, is_cmd=True)))
     app.add_handler(CallbackQueryHandler(guard(mode_callback, is_cmd=False), pattern=r"^setmode_"))
-    app.add_handler(CommandHandler(make_bot_commands(["rates", "dollar", "arz", "gheymat"]), guard(rates_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["crypto"]), guard(crypto_command, is_cmd=True)))
+
+    # OSINT Reconnaissance Suite
+    app.add_handler(CommandHandler(make_bot_commands(["osint", "search", "web", "find", "jostojoo"]), guard(osint_search_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["crawl", "scrape", "layers", "read", "url"]), guard(crawl_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["dork", "dorks", "googledork"]), guard(dork_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["github", "git", "gh"]), guard(github_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["linkedin", "in"]), guard(linkedin_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["usercheck", "username", "user"]), guard(usercheck_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["dns", "ns", "mx"]), guard(dns_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["subdomains", "subdomain", "subs", "crtsh"]), guard(subdomains_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["ip", "geo", "asn"]), guard(ip_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["email", "mail"]), guard(email_command, is_cmd=True)))
+    app.add_handler(CommandHandler(make_bot_commands(["phone", "tel", "mobile"]), guard(phone_command, is_cmd=True)))
+
+    # Threat Intelligence & Utilities
+    app.add_handler(CommandHandler(make_bot_commands(["scan", "vt", "virustotal", "antivirus"]), guard(scan_command, is_cmd=True)))
+    app.add_handler(CallbackQueryHandler(virustotal_callback, pattern=r"^vt_scan:"))
     app.add_handler(CommandHandler(make_bot_commands(["time", "saat"]), guard(time_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["weather", "hava"]), guard(weather_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["digikala", "dk"]), guard(digikala_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["music", "song", "ahang"]), guard(music_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["read", "web", "url"]), guard(read_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["telegraph", "telegra", "article"]), guard(telegraph_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["calc", "hesab"]), guard(calc_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["clear", "clean"]), guard(clear_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["id", "myid", "info", "chatid", "whoami"]), guard(id_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["qr", "qrcode"]), guard(barcode_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["barcode", "bar"]), guard(barcode_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["twitter", "tweet", "x"]), guard(twitter_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["delete", "del", "pak", "hazf", "remove"]), guard(delete_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["ping", "status"]), guard(ping_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["summarize", "recap", "summary", "kholase"]), guard(summarize_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["search", "find", "searchdb", "jostojoo"]), guard(search_command, is_cmd=True)))
     app.add_handler(CommandHandler(make_bot_commands(["file", "createfile", "makefile"]), guard(file_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["scan", "vt", "virustotal", "antivirus"]), guard(scan_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["run", "exec", "py", "python", "sandbox", "e2b"]), guard(sandbox_command_handler, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["sh", "shell", "bash", "terminal", "cmd"]), guard(shell_command_handler, is_cmd=True)))
-    app.add_handler(CallbackQueryHandler(shell_callback_handler, pattern=r"^sh_(exec|cancel):"))
-    app.add_handler(CommandHandler(make_bot_commands(["apt", "pkg", "dpkg", "package"]), guard(apt_command_handler, is_cmd=True)))
-    app.add_handler(CallbackQueryHandler(apt_callback_handler, pattern=r"^apt_(exec|cancel):"))
-    app.add_handler(CallbackQueryHandler(virustotal_callback, pattern=r"^vt_scan:"))
-
-    # Granular Permissions Governance (Personalized with p / p_ / pro / pro_ prefixes)
-    app.add_handler(CommandHandler(make_bot_commands(["granttool", "grant_tool", "grant"]), guard(grant_tool_command, is_admin_cmd=True, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["revoketool", "revoke_tool", "revoke"]), guard(revoke_tool_command, is_admin_cmd=True, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["usertools", "user_tools", "mytools", "my_tools"]), guard(user_tools_command, is_cmd=True)))
-    app.add_handler(CommandHandler(make_bot_commands(["grantedtools", "granted_tools", "toolsaccess", "tools_access"]), guard(granted_tools_command, is_admin_cmd=True, is_cmd=True)))
 
 
     # Admin Governance & Moderation Commands (Personalized with p / p_ / pro / pro_ prefixes)

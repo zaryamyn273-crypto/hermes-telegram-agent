@@ -1,10 +1,11 @@
 """
-Configuration manager for Hermes Telegram Agent.
+Configuration manager for Prometheus OSINT Telegram Agent.
 Loads configuration from environment variables with zero hardcoded secrets.
 Uses Pydantic if available, otherwise falls back seamlessly to standard dataclasses.
 """
 
 import os
+import re
 from typing import Set, Optional, List, Tuple
 
 try:
@@ -22,11 +23,7 @@ try:
         ROUTER_MODEL: str = Field(default="ag/gemini-3.8-flash-low", env="ROUTER_MODEL")
         ROUTER_FAST_MODEL: str = Field(default="ag/gemini-3.8-flash-low", env="ROUTER_FAST_MODEL")
 
-        HERMES_ENDPOINT: str = Field(default="", env="HERMES_ENDPOINT")
-        HERMES_API_KEY: str = Field(default="", env="HERMES_API_KEY")
-        HERMES_MODEL: str = Field(default="hermes-agent", env="HERMES_MODEL")
-        HERMES_PUBLIC_URL: str = Field(default="", env="HERMES_PUBLIC_URL")
-
+        GITHUB_TOKEN: str = Field(default="", env="GITHUB_TOKEN")
         TAVILY_API_KEYS: str = Field(default="", env="TAVILY_API_KEYS")
         TAVILY_API_KEY: str = Field(default="", env="TAVILY_API_KEY")
         TAVILY_KEY: str = Field(default="", env="TAVILY_KEY")
@@ -70,11 +67,7 @@ except ImportError:
         ROUTER_MODEL: str = os.getenv("ROUTER_MODEL", "ag/gemini-3.8-flash-low")
         ROUTER_FAST_MODEL: str = os.getenv("ROUTER_FAST_MODEL", "ag/gemini-3.8-flash-low")
 
-        HERMES_ENDPOINT: str = os.getenv("HERMES_ENDPOINT", "")
-        HERMES_API_KEY: str = os.getenv("HERMES_API_KEY", "")
-        HERMES_MODEL: str = os.getenv("HERMES_MODEL", "hermes-agent")
-        HERMES_PUBLIC_URL: str = os.getenv("HERMES_PUBLIC_URL", "")
-
+        GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
         TAVILY_API_KEYS: str = os.getenv("TAVILY_API_KEYS", "")
         TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
         TAVILY_KEY: str = os.getenv("TAVILY_KEY", "")
@@ -127,51 +120,26 @@ def is_admin(user_id: Optional[int]) -> bool:
         return False
 
 
-def get_candidate_endpoints(force_hermes: bool = False, force_fast: bool = False) -> List[Tuple[str, str, str]]:
+def get_candidate_endpoints() -> List[Tuple[str, str, str]]:
     """
-    Returns ordered list of (base_url, api_key, model) candidates for resilient failover.
-    - If force_hermes=True: Prioritizes autonomous Hermes Agent first (model='hermes-agent'), then 9router failover.
-    - If force_fast=True: Prioritizes ultra low-latency internal 9router first, then public 9router, then Hermes.
-    - If default: Prioritizes internal 9router for sub-second responses, backed by Hermes Agent and public mirrors.
+    Returns ordered list of (base_url, api_key, model) candidates for resilient 9router connection.
+    Prioritizes ultra low-latency internal 9router first, then public 9router.
     """
     fast_model = settings.ROUTER_FAST_MODEL or "ag/gemini-3.8-flash-low"
-    hermes_model = getattr(settings, "HERMES_MODEL", "hermes-agent") or "hermes-agent"
+    candidates: List[Tuple[str, str, str]] = []
 
-    hermes_candidates: List[Tuple[str, str, str]] = []
-    if settings.HERMES_ENDPOINT:
-        hermes_candidates.append((
-            settings.HERMES_ENDPOINT.rstrip("/"),
-            settings.HERMES_API_KEY or settings.ROUTER_API_KEY,
-            hermes_model
-        ))
-    pub_hermes = getattr(settings, "HERMES_PUBLIC_URL", "")
-    if pub_hermes and pub_hermes != settings.HERMES_ENDPOINT:
-        hermes_candidates.append((
-            pub_hermes.rstrip("/"),
-            settings.HERMES_API_KEY or settings.ROUTER_API_KEY,
-            hermes_model
-        ))
-
-    fast_candidates: List[Tuple[str, str, str]] = []
     if settings.ROUTER_INTERNAL_BASE_URL:
-        fast_candidates.append((
+        candidates.append((
             settings.ROUTER_INTERNAL_BASE_URL.rstrip("/"),
             settings.ROUTER_API_KEY,
             fast_model
         ))
     if settings.ROUTER_BASE_URL:
-        fast_candidates.append((
+        candidates.append((
             settings.ROUTER_BASE_URL.rstrip("/"),
             settings.ROUTER_API_KEY,
             fast_model
         ))
-
-    if force_hermes:
-        candidates = hermes_candidates + fast_candidates
-    elif force_fast:
-        candidates = fast_candidates + hermes_candidates
-    else:
-        candidates = fast_candidates + hermes_candidates
 
     if not candidates:
         candidates.append(("https://api.openai.com/v1", settings.ROUTER_API_KEY, fast_model))
@@ -185,18 +153,16 @@ def get_effective_router_url() -> str:
         return settings.ROUTER_INTERNAL_BASE_URL.rstrip("/")
     if settings.ROUTER_BASE_URL:
         return settings.ROUTER_BASE_URL.rstrip("/")
-    if settings.HERMES_ENDPOINT:
-        return settings.HERMES_ENDPOINT.rstrip("/")
     return "https://api.openai.com/v1"
 
 
 def get_effective_api_key() -> str:
     """Returns the effective API key for LLM requests."""
-    return settings.HERMES_API_KEY or settings.ROUTER_API_KEY or os.getenv("HERMES_API_KEY", "") or os.getenv("ROUTER_API_KEY", "")
+    return settings.ROUTER_API_KEY or os.getenv("ROUTER_API_KEY", "")
 
 
 def get_effective_model() -> str:
-    """Returns the effective fast LLM model name."""
+    """Returns the effective LLM model name."""
     if settings.ROUTER_FAST_MODEL:
         return settings.ROUTER_FAST_MODEL
     model = os.getenv("ROUTER_MODEL") or settings.ROUTER_MODEL
@@ -205,10 +171,14 @@ def get_effective_model() -> str:
     return model
 
 
+def get_github_token() -> str:
+    """Returns the GitHub token for OSINT lookups."""
+    return getattr(settings, "GITHUB_TOKEN", "") or os.getenv("GITHUB_TOKEN", "")
+
+
 def get_tavily_api_keys() -> List[str]:
     """Returns parsed list of Tavily API keys from configuration or environment."""
     keys: List[str] = []
-    import re
     candidates = [
         getattr(settings, "TAVILY_API_KEYS", ""),
         getattr(settings, "TAVILY_API_KEY", ""),
@@ -226,4 +196,3 @@ def get_tavily_api_keys() -> List[str]:
                 if k and k not in keys:
                     keys.append(k)
     return keys
-
