@@ -548,6 +548,11 @@ async def persist_message_to_d1(chat_id: int, user_id: int, role: str, content: 
     await persist_message(chat_id=chat_id, user_id=user_id, role=role, content=content, username=username)
 
 
+async def save_message_to_d1(chat_id: int, role: str, content: str, user_id: int = 0, username: str = ""):
+    """Helper wrapper for saving message to D1."""
+    await persist_message(chat_id=chat_id, user_id=user_id, role=role, content=content, username=username)
+
+
 async def load_session_history_from_d1(chat_id: int, limit: int = 15) -> List[Dict[str, Any]]:
     """Loads recent messages for a specific chat_id with strict chat isolation."""
     sql = """

@@ -120,7 +120,7 @@ def is_admin(user_id: Optional[int]) -> bool:
         return False
 
 
-def get_candidate_endpoints() -> List[Tuple[str, str, str]]:
+def get_candidate_endpoints(force_hermes: bool = False, force_fast: bool = False, *args, **kwargs) -> List[Tuple[str, str, str]]:
     """
     Returns ordered list of (base_url, api_key, model) candidates for resilient 9router connection.
     Prioritizes ultra low-latency internal 9router first, then public 9router.
