@@ -1077,6 +1077,10 @@ def is_command_addressed_to_bot(update: Update, context: ContextTypes.DEFAULT_TY
     if is_prometheus_prefixed_command(cmd_name):
         return True
 
+    # Unique Prometheus AI commands that never collide with moderation bots
+    if cmd_name in ("summarize", "recap", "summary", "kholase"):
+        return True
+
     # Otherwise in group chats, generic bare commands (like bare /info, /help, /id, /ping) are ignored
     # to avoid collisions with other bots in the same group!
     logger.info(f"Command collision guard: ignoring generic un-prefixed command '/{cmd_name}' in group {chat.id}")
@@ -1157,6 +1161,10 @@ def is_direct_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE, ra
 
         # Prefixed command name: p[command] or pro[command]
         if is_prometheus_prefixed_command(cmd_name):
+            return True, text
+
+        # Unique Prometheus AI commands that never collide with moderation bots
+        if cmd_name in ("summarize", "recap", "summary", "kholase"):
             return True, text
 
         # Authorized bot administrator issuing a known bot command

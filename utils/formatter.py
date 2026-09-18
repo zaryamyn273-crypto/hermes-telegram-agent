@@ -105,8 +105,10 @@ def get_display_width(s: str) -> int:
 
 
 def _clean_cell_text(cell: str) -> str:
-    """Strips markdown bold, italic, inline code, strike, and link syntax from table cells."""
+    """Strips markdown bold, italic, inline code, strike, link syntax, and raw HTML from table cells."""
     s = cell.strip()
+    s = re.sub(r"<\s*br\s*/?>", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"<[^>]+>", "", s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)
     s = re.sub(r"__([^_]+)__", r"\1", s)
     s = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", s)
@@ -114,6 +116,37 @@ def _clean_cell_text(cell: str) -> str:
     s = re.sub(r"~~([^~]+)~~", r"\1", s)
     s = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", s)
     return s.strip()
+
+
+def format_table_as_cards(rows: List[List[str]]) -> str:
+    """
+    Renders wide or multi-column tables into beautiful, mobile-friendly Telegram cards.
+    Each row becomes a clean visual card with bold item header and bulleted attributes.
+    Prevents horizontal scrolling and border corruption on mobile devices.
+    """
+    if not rows or len(rows) < 2:
+        return ""
+
+    headers = rows[0]
+    data_rows = rows[1:]
+    cards = []
+
+    for r in data_rows:
+        if not any(c.strip() for c in r):
+            continue
+        first_cell = r[0].strip() if r else ""
+        card_lines = []
+        if first_cell:
+            card_lines.append(f"🔹 **{first_cell}**")
+        for idx in range(1, len(r)):
+            hdr = headers[idx].strip() if idx < len(headers) else f"ویژگی {idx+1}"
+            val = r[idx].strip()
+            if val:
+                card_lines.append(f"▫️ **{hdr}:** {val}")
+        if card_lines:
+            cards.append("\n".join(card_lines))
+
+    return "\n\n".join(cards)
 
 
 def pad_display_cell(text: str, target_width: int, align: str = "center") -> str:
@@ -188,15 +221,17 @@ def format_table_as_box(
 
 
 TABLE_REGEX = re.compile(
-    r"((?:^[ \t]*\|?[^\n|]+\|[^\n]+\|?[ \t]*\n)"
-    r"(?:^[ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*:?-+:?[ \t]*\|?[ \t]*\n)"
-    r"(?:^[ \t]*\|?[^\n|]+\|[^\n]+\|?[ \t]*(?:\n|$))+)",
+    r"((?:^[ \t]*(?:>[ \t]*)?\|?[^\n|]+\|[^\n]+\|?[ \t]*\n)"
+    r"(?:^[ \t]*(?:>[ \t]*)?\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*:?-+:?[ \t]*\|?[ \t]*\n)"
+    r"(?:^[ \t]*(?:>[ \t]*)?\|?[^\n|]+\|[^\n]+\|?[ \t]*(?:\n|$))+)",
     re.MULTILINE
 )
 
 
 def _split_table_row(line: str) -> List[str]:
     clean = line.strip()
+    if clean.startswith(">"):
+        clean = clean[1:].strip()
     if clean.startswith("|") and clean.endswith("|"):
         clean = clean[1:-1]
     elif clean.startswith("|"):
@@ -208,6 +243,8 @@ def _split_table_row(line: str) -> List[str]:
 
 def _detect_alignments(separator_line: str, num_cols: int) -> List[str]:
     clean = separator_line.strip()
+    if clean.startswith(">"):
+        clean = clean[1:].strip()
     if clean.startswith("|") and clean.endswith("|"):
         clean = clean[1:-1]
     elif clean.startswith("|"):
@@ -233,7 +270,8 @@ def _detect_alignments(separator_line: str, num_cols: int) -> List[str]:
 def convert_markdown_tables_to_box(text: str) -> str:
     """
     Detects Markdown pipe tables (with or without outer boundary pipes) and converts them
-    into mathematically aligned Unicode box-drawing tables enclosed in monospace blocks.
+    into mathematically aligned Unicode box-drawing tables enclosed in monospace blocks (for compact tables),
+    or into clean, mobile-responsive visual cards (for wide tables).
     Respects existing code blocks to avoid broken nested backticks.
     """
     if not text or "|" not in text:
@@ -262,11 +300,28 @@ def convert_markdown_tables_to_box(text: str) -> str:
         if len(rows) < 2:
             return raw_table
 
+        # Normalize column counts across all rows
+        num_cols = max(len(r) for r in rows)
+        for r in rows:
+            while len(r) < num_cols:
+                r.append("")
+
+        is_inside_code = (text[:match.start()].count("```") % 2 == 1)
+
+        # Check if table exceeds typical mobile screen limits (~36-40 chars monospace)
+        col_w = [max(get_display_width(r[i]) for r in rows) for i in range(num_cols)]
+        total_w = sum(col_w) + (num_cols * 3) + 1
+        is_wide = (num_cols > 3) or (total_w > 42) or any(len(c) > 22 for r in rows for c in r)
+
+        if is_wide and not is_inside_code:
+            cards = format_table_as_cards(rows)
+            if cards:
+                return f"\n{cards}\n"
+
         box_table = format_table_as_box(rows, alignments)
         if not box_table:
             return raw_table
 
-        is_inside_code = (text[:match.start()].count("```") % 2 == 1)
         if is_inside_code:
             return box_table + "\n"
         return f"\n```\n{box_table}\n```\n"
@@ -305,11 +360,26 @@ def convert_html_tables_to_box(text: str) -> str:
         if len(rows) < 2:
             return match.group(0)
 
+        num_cols = max(len(r) for r in rows)
+        for r in rows:
+            while len(r) < num_cols:
+                r.append("")
+
+        is_inside_code = (text[:match.start()].count("```") % 2 == 1)
+
+        col_w = [max(get_display_width(r[i]) for r in rows) for i in range(num_cols)]
+        total_w = sum(col_w) + (num_cols * 3) + 1
+        is_wide = (num_cols > 3) or (total_w > 42) or any(len(c) > 22 for r in rows for c in r)
+
+        if is_wide and not is_inside_code:
+            cards = format_table_as_cards(rows)
+            if cards:
+                return f"\n{cards}\n"
+
         box_table = format_table_as_box(rows)
         if not box_table:
             return match.group(0)
 
-        is_inside_code = (text[:match.start()].count("```") % 2 == 1)
         if is_inside_code:
             return box_table + "\n"
         return f"\n```\n{box_table}\n```\n"

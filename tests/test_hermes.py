@@ -1198,6 +1198,39 @@ def test_markdown_table_converter():
     assert "┌" in pre_nodes[0]["children"][0]
     assert "طلا" in pre_nodes[0]["children"][0]
 
+    # 7. Wide table converted to clean responsive visual cards for mobile
+    wide_table = (
+        "| زبان | شرکت سازنده | کاربرد اصلی | مزیت کلیدی |\n"
+        "|---|---|---|---|\n"
+        "| پایتون | بنیاد پایتون | هوش مصنوعی و وب | سادگی و کتابخانه‌های بسیار غنی |\n"
+        "| راست | موزیلا | برنامه‌نویسی سیستم | ایمنی حافظه بدون نیاز به گاربیج کالکتور |\n"
+    )
+    cards_out = markdown_to_telegram_html(wide_table)
+    assert "🔹" in cards_out
+    assert "▫️" in cards_out
+    assert "<b>پایتون</b>" in cards_out
+    assert "<b>کاربرد اصلی:</b>" in cards_out
+    assert "<pre>" not in cards_out  # Wide table avoided broken pre overflow
+
+    # 8. Table inside blockquotes (> | ... |)
+    bq_table = (
+        "> | ویژگی | مقدار |\n"
+        "> |---|---|\n"
+        "> | سرعت | عالی |\n"
+    )
+    bq_out = markdown_to_telegram_html(bq_table)
+    assert "┌" in bq_out or "سرعت" in bq_out
+
+    # 9. HTML tags inside table cells are cleanly stripped
+    html_cell_table = (
+        "| نام | سن |\n"
+        "|---|---|\n"
+        "| <b>علی</b><br>تهران | 25 |\n"
+    )
+    html_cell_out = markdown_to_telegram_html(html_cell_table)
+    assert "&lt;b&gt;" not in html_cell_out
+    assert "&lt;br&gt;" not in html_cell_out
+
 
 def test_twitter_tool():
     from tools.twitter import (
@@ -1761,6 +1794,13 @@ async def test_summary_parser_and_subagent_logic():
     assert parse_summary_request("/summarize") == (True, 100)        # Default 100
     assert parse_summary_request("خلاصه ۲۵۰ پیام اخیر گروه") == (True, 250)
     assert parse_summary_request("گزارش ۱۰۰۰ پیام اخیر") == (True, 1000)
+    assert parse_summary_request("خلاصه کن") == (True, 100)
+    assert parse_summary_request("خلاصه بکن") == (True, 100)
+    assert parse_summary_request("چت ها رو خلاصه کن") == (True, 100)
+    assert parse_summary_request("چت‌ها رو خلاصه کن") == (True, 100)
+    assert parse_summary_request("پیام‌ها رو خلاصه کن") == (True, 100)
+    assert parse_summary_request("خلاصه کننده چت ها") == (True, 100)
+    assert parse_summary_request("۵۰ پیام اخیر رو خلاصه کن") == (True, 50)
     assert parse_summary_request("سلام چطوری؟") == (False, 0)
 
     # 2. Multi-subagent execution mock for large message batch (>150)

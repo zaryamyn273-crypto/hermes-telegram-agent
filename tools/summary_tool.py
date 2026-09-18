@@ -40,37 +40,48 @@ def parse_summary_request(text: str) -> Tuple[bool, int]:
         return False, 0
 
     t = _normalize_persian_digits(text.strip().lower())
+    t = t.replace("ي", "ی").replace("ك", "ک").replace("\u200c", " ")
 
     # 1. Slash commands: /summarize [N], /summary [N], /recap [N], /kholase [N], /خلاصه [N]
-    slash_match = re.match(r"^(?:/)?(?:summarize|summary|recap|kholase|خلاصه|گزارش)(?:\s+(\d+))?$", t)
+    slash_match = re.match(r"^/(?:summarize|summary|recap|kholase|خلاصه|گزارش)(?:@\w+)?(?:\s+(\d+))?$", t)
     if slash_match:
         cnt_str = slash_match.group(1)
         cnt = int(cnt_str) if cnt_str else 100
         return True, min(3000, max(10, cnt))
 
-    # 2. Persian natural query patterns
+    # Standalone exact keywords
+    exact_triggers = {
+        "خلاصه", "خلاصه کن", "خلاصه بکن", "خلاصه بده", "خلاصه بگو", "گزارش بده",
+        "خلاصه چت", "خلاصه گفتگو", "خلاصه پیام‌ها", "خلاصه پیام ها",
+        "recap", "summary", "summarize", "خلاصه ساز", "خلاصه کننده"
+    }
+    if t in exact_triggers:
+        return True, 100
+
+    # Extract count if explicitly mentioned in text (e.g. "۵۰ پیام", "100 تا پیام", "خلاصه 200 پیام")
+    cnt = 100
+    num_m = re.search(r"(\d+)\s*(?:پیام|چت|مسیج|تا|مورد)?", t)
+    if num_m and num_m.group(1):
+        try:
+            val = int(num_m.group(1))
+            if 10 <= val <= 3000:
+                cnt = val
+        except ValueError:
+            pass
+
+    # 2. Comprehensive Persian natural patterns
     patterns = [
-        r"(?:خلاصه|سامری|recap|گزارش)\s+(?:از\s+)?(\d+)?\s*(?:پیام|چت|گفتگو|مسیج)",
-        r"(?:خلاصه|سامری|گزارش)\s+(?:گروه|چت|کانال|گفتگو|روم|بحث)",
-        r"(?:گروه|چت|روم)\s+رو\s+(?:خلاصه|سامری)\s+کن",
-        r"(?:چی\s+گفتن|بحث\s+سر\s+چی\s+بود|کی\s+چی\s+گفت|موضوع\s+چی\s+بود)",
-        r"یک\s+(?:گزارش|خلاصه)\s+(?:از\s+)?(?:چت‌های|پیام‌های|گفتگوهای)?\s*اخیر",
-        r"(\d+)\s*(?:پیام|چت|گفتگو)\s*اخیر\s*(?:رو\s+)?خلاصه\s*کن",
+        r"(?:خلاصه|سامری|recap|گزارش)\s*(?:کن|بکن|بده|بگو|بفرست|ساز|کننده)?",
+        r"(?:چت|پیام|مسیج|گفتگو|گروه|روم|کانال|بحث)\s*(?:ها|های)?\s*(?:اخیر)?\s*(?:رو|را)?\s*(?:خلاصه|سامری)\s*(?:کن|بکن|بده|بگو|بفرست)",
+        r"(?:خلاصه|سامری|گزارش)\s+(?:از\s+)?(?:\d+\s+)?(?:چت|پیام|مسیج|گفتگو|گروه|روم|کانال|بحث)",
+        r"(?:یک\s+)?(?:خلاصه|گزارش|سامری)\s+(?:از\s+)?(?:چت|پیام|گفتگو|بحث)",
+        r"(?:چی\s+گفتن|بحث\s+سر\s+چی\s+بود|کی\s+چی\s+گفت|موضوع\s+چی\s+بود|چه\s+خبر\s+بود|از\s+چی\s+صحبت\s+شد)",
+        r"(\d+)\s*(?:پیام|چت|گفتگو)\s*(?:اخیر)?\s*(?:رو|را)?\s*خلاصه\s*(?:کن|بکن|بده)",
+        r"(?:خلاصه|گزارش)\s+(?:امروز|دیشب|اخیر|گروه|چت)",
     ]
 
     for pat in patterns:
-        m = re.search(pat, t)
-        if m:
-            # Extract number if present in regex groups
-            cnt = 100
-            for g in m.groups():
-                if g and g.isdigit():
-                    cnt = int(g)
-                    break
-            # Check if text mentions an explicit number anywhere
-            num_search = re.search(r"(\d+)\s*(?:پیام|مسیج|تا)", t)
-            if num_search:
-                cnt = int(num_search.group(1))
+        if re.search(pat, t):
             return True, min(3000, max(10, cnt))
 
     return False, 0
@@ -79,10 +90,14 @@ def parse_summary_request(text: str) -> Tuple[bool, int]:
 async def _call_fast_subagent(messages: List[Dict[str, str]], max_tokens: int = 1200) -> Optional[str]:
     """Dispatches a lightweight prompt to fast model endpoints for high-speed sub-agent execution."""
     from agent_engine import get_http_client
+    from utils.formatter import strip_thinking
     client = get_http_client()
-    candidate_endpoints = get_candidate_endpoints(force_fast=True)
 
-    for api_url, api_key, model in candidate_endpoints:
+    candidate_endpoints = get_candidate_endpoints(force_fast=True)
+    hermes_candidates = get_candidate_endpoints(force_hermes=True)
+    all_endpoints = candidate_endpoints + [ep for ep in hermes_candidates if ep not in candidate_endpoints]
+
+    for api_url, api_key, model in all_endpoints:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
@@ -106,8 +121,9 @@ async def _call_fast_subagent(messages: List[Dict[str, str]], max_tokens: int = 
                 choices = data.get("choices") or []
                 if choices:
                     content = (choices[0].get("message") or {}).get("content") or ""
-                    if content.strip():
-                        return content.strip()
+                    clean_content = strip_thinking(content).strip()
+                    if clean_content:
+                        return clean_content
         except Exception as e:
             logger.debug(f"Fast subagent call to {api_url} failed: {e}")
             continue
@@ -146,6 +162,25 @@ async def summarize_group_messages(
     # 1. Fetch messages strictly scoped to chat_id
     raw_msgs = await database.get_chat_messages_for_summary(chat_id, limit=clean_count)
     total_found = len(raw_msgs)
+
+    if total_found == 0:
+        from agent_engine import get_session_history
+        session_msgs = get_session_history(chat_id)
+        if session_msgs:
+            raw_msgs = [
+                {
+                    "full_name": m.get("username") or ("پرومته" if m.get("role") == "assistant" else "کاربر"),
+                    "username": m.get("username") or "",
+                    "user_id": m.get("user_id") or 0,
+                    "role": m.get("role") or "user",
+                    "content": m.get("content") or "",
+                    "created_at": "",
+                    "is_bot": 1 if m.get("role") == "assistant" else 0
+                }
+                for m in session_msgs[-clean_count:]
+                if (m.get("content") or "").strip()
+            ]
+            total_found = len(raw_msgs)
 
     if total_found == 0:
         return (
@@ -257,15 +292,14 @@ async def summarize_group_messages(
         sample_text = "\n".join(sample_snippets)
         summary_body = (
             "💡 <b>خلاصه اجمالی پیام‌ها:</b>\n"
-            f"در این بازه، گفتگو بین اعضا ({top_users}) جریان داشته و آخرین پیام‌های تبادل‌شده به شرح زیر است:\n\n"
+            f"در این بازه، گفتگو بین اعضا ({html.escape(top_users)}) جریان داشته و آخرین پیام‌های تبادل‌شده به شرح زیر است:\n\n"
             f"{sample_text}"
         )
 
     # Format output with Telegram native Expandable Blockquote (<blockquote expandable>)
-    formatted_body = html.escape(summary_body)
-    # Re-allow bold and bullet markers from model output
-    formatted_body = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", formatted_body)
-    formatted_body = re.sub(r"&lt;b&gt;(.*?)&lt;/b&gt;", r"<b>\1</b>", formatted_body)
+    from utils.formatter import markdown_to_telegram_html, strip_thinking
+    clean_summary = strip_thinking(summary_body).strip()
+    formatted_body = markdown_to_telegram_html(clean_summary)
 
     final_report = (
         f"{header_box}\n\n"

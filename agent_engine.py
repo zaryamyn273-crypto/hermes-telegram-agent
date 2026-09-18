@@ -203,20 +203,27 @@ Operating Directives:
   5. 📋 BULLETS & VISUAL LISTS:
      - Use structured bullet indicators (`• `, `🔹 `, `▫️ `) with bold leading phrases (`• **مورد اول:** توضیحات`).
      - Avoid messy raw asterisks or unspaced dashes.
-  6. 📊 TABULAR DATA & MATRICES:
-     - The Prometheus engine features a specialized Unicode box-table converter that automatically converts Markdown tables and HTML tables into pixel-perfect, mathematically aligned monospace box tables (<pre>)!
-     - When presenting tabular data or comparisons:
-       • Standard Tables (up to 3-4 columns): Use clean Markdown tables:
-         | شاخص / ویژگی | پایتون | گو |
-         |:---|:---:|---:|
-         | تایپینگ | داینامیک | استاتیک |
-         | سرعت | بالا | فوق‌العاده |
-         (The engine automatically renders this into a beautiful Unicode box table for Telegram clients).
-       • Wide Multi-Column Data (>3-4 columns): On mobile screens, wide tables require horizontal scrolling. Use visual Card Format for best mobile readability:
-         🔹 **[نام دارایی / آیتم]**
-         ▫️ **مشخصه ۱:** مقدار
-         ▫️ **مشخصه ۲:** مقدار
-       • For comprehensive reports or large tables, you can publish directly to Telegraph via `/telegraph [عنوان]`.
+  6. 📊 TABULAR DATA & COMPARISONS (قواعد طلایی ساخت جدول و مقایسه در تلگرام):
+      - Telegram messages are primarily read on mobile screens with limited horizontal width (~35-38 monospaced characters).
+      - When presenting tables:
+        • Compact Tables (2 to 3 columns with concise values): Use clean Markdown tables.
+          Keep cell contents very concise (1-3 words or numbers, e.g. `10ms`, `فعال`, `۹۵,۰۰۰`):
+          | ارز | قیمت | تغییر |
+          |:---|:---:|---:|
+          | تتر | ۶۵,۰۰۰ | ۰.۰٪ |
+          | بیت‌کوین | ۹۵,۰۰۰ | +۲.۱٪ |
+          (The engine automatically converts compact tables into mathematically aligned Unicode box tables).
+        • Multi-Attribute Comparisons & Wide Data (items with sentences, explanations, or >3 columns):
+          NEVER stuff long sentences into markdown table cells! Instead, ALWAYS use Structured Visual Cards for seamless mobile readability:
+          🔹 **[نام آیتم یا محصول اول]**
+          ▫️ **مشخصه ۱:** توضیح روان و کامل
+          ▫️ **مشخصه ۲:** توضیح روان و کامل
+          ▫️ **مشخصه ۳:** توضیح روان و کامل
+
+          🔹 **[نام آیتم یا محصول دوم]**
+          ▫️ **مشخصه ۱:** توضیح روان و کامل
+          ▫️ **مشخصه ۲:** توضیح روان و کامل
+        • For massive multi-column matrices or huge data sheets, publish directly to Telegraph via `/telegraph [عنوان]`.
   7. ⎯ SECTION SEPARATION:
      - Do NOT use raw `---` or `***`. Use a clean line like `⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯` or clean double newlines.
   8. 🙈 SPOILERS:
@@ -830,18 +837,37 @@ def should_search_web(prompt: str) -> bool:
 
 
 def extract_search_query(prompt: str) -> str:
-    """Extracts clean, targeted search keywords from user prompt."""
+    """Extracts clean, targeted search keywords from user prompt, stripping reply metadata."""
     p = prompt.strip()
+    replied_body = ""
+    if "دستور یا پرسش کاربر درباره پیام بالا:\n" in p:
+        parts = p.split("دستور یا پرسش کاربر درباره پیام بالا:\n")
+        user_part = parts[-1].strip()
+        m = re.search(r"\"\"\"(.*?)\"\"\"", parts[0], re.DOTALL)
+        if m:
+            replied_body = m.group(1).strip()
+        p = user_part
+    elif "دستور یا پرسش کاربر درباره پیام فوروارد شده:\n" in p:
+        p = p.split("دستور یا پرسش کاربر درباره پیام فوروارد شده:\n")[-1].strip()
+
     remove_words = [
         "پرومته", "prometheus", "پرومتئوس", "لطفاً", "لطفا", "بی زحمت", "بی‌زحمت", "میشه",
-        "بگو", "برام بگو", "توضیح بده", "سرچ کن", "جستجو کن", "بگرد دنبال", "پیدا کن",
-        "چیست", "چیه", "هستند", "است", "درباره", "در مورد", "رو برام", "برام",
+        "بگو", "برام بگو", "توضیح بده", "سرچ بکن", "سرچ کن", "سرچ", "جستجو بکن", "جستجو کن", "جستجو",
+        "بگرد دنبال", "پیدا کن", "چیست", "چیه", "هستند", "است", "درباره", "در مورد", "رو برام", "برام",
         "به من", "رو بفرست"
     ]
     for rw in remove_words:
         p = re.sub(rf"(?<!\w){re.escape(rw)}(?!\w)", " ", p, flags=re.IGNORECASE)
     cleaned = re.sub(r"[\?؟!,،:؛]", " ", p)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    # If user prompt is ultra short (e.g. "سرچ کن" / "درباره این") and replied text exists, append replied text keywords
+    if len(cleaned.split()) <= 2 and replied_body:
+        cleaned_rep = re.sub(r"[\?؟!,،:؛\"\x27\n\r]", " ", replied_body)
+        rep_tokens = [w for w in cleaned_rep.split() if len(w) > 2][:8]
+        if rep_tokens:
+            cleaned = (cleaned + " " + " ".join(rep_tokens)).strip()
+
     return cleaned if len(cleaned) >= 3 else prompt.strip()
 
 

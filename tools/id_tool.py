@@ -11,22 +11,32 @@ from typing import Optional, Dict, Any
 from telegram import Update, Message, User, Chat
 from telegram.constants import ChatType
 
-_ID_EXCLUSIONS = ("کالا", "محصول", "دیجیکالا", "دیجی کالا", "سفارش", "تراکنش", "خرید")
+_ID_EXCLUSIONS = (
+    # E-commerce and shopping
+    "کالا", "محصول", "دیجیکالا", "دیجی کالا", "سفارش", "تراکنش", "خرید",
+    # External social platforms / sites
+    "اینستاگرام", "توییتر", "یوتیوب", "فیسبوک", "تیک‌تاک", "گیت‌هاب", "github", "instagram", "twitter",
+    # Conversational & analytical question keywords (should be routed to AI reasoning / search)
+    "چرا باید", "چرا", "هدف چیه", "هدف از", "دلیل", "علت",
+    "سرچ بکن", "سرچ کن", "سرچ", "جستجو بکن", "جستجو کن", "جستجو", "google", "search",
+    "تحلیل", "بررسی", "توضیح", "مقایسه", "نظرت", "دیدگاه", "فکر می‌کنی",
+    "لو بده", "لو بره", "لو دادن", "افشا", "نشت",
+    "امنیت", "آسیب‌پذیری", "باگ", "نفوذ", "هک",
+    "میرور بات", "میرور", "ربات تلگرامی", "اسکریپت", "پایتون",
+    "دیتایی", "دیتا", "پایگاه داده", "دیتابیس"
+)
 
 
 def is_id_request(text: str) -> bool:
     """
     Matches natural Persian and English queries asking for Telegram numeric IDs,
     user/chat info, whois diagnostics, or sender identification.
+    Strictly prevents false positives on conversational, analytical, or search inquiries.
     """
     if not text:
         return False
     t = text.lower().strip()
     t = t.replace("ي", "ی").replace("ك", "ک")
-
-    # Exclude e-commerce product / store ID queries
-    if any(ex in t for ex in _ID_EXCLUSIONS):
-        return False
 
     # 1. Exact command or short keyword triggers
     exact_triggers = {
@@ -45,15 +55,28 @@ def is_id_request(text: str) -> bool:
     if re.match(r"^/(?:id|myid|info|chatid|whoami|whois|userinfo)(?:@\w+)?(?:\s+.*)?$", t):
         return True
 
-    # 3. Intent match: contains ID / identity keyword
-    id_root = r"(?:آیدی|ایدی|شناسه|user\s*id|\bid\b|whois|userinfo|مشخصات|اطلاعات)"
-    if not re.search(id_root, t):
+    # Guard: Natural conversational ID requests are never long paragraphs or complex essays.
+    # Telegram ID commands are concise (<= 12 words and <= 85 characters).
+    words = t.split()
+    if len(words) > 12 or len(t) > 85:
         return False
+
+    # Exclude e-commerce, external sites, and analytical questions
+    if any(ex in t for ex in _ID_EXCLUSIONS):
+        return False
+
+    # 3. Intent match: contains explicit Telegram ID / identity keyword
+    # Note: "اطلاعات" is generic Persian for information/data and must NOT match Telegram IDs.
+    id_root = r"(?:\b(?:آیدی|ایدی|user\s*id|\bid\b|whois|userinfo)\b|شناسه\s*عددی|آیدی\s*عددی|مشخصات\s+(?:من|کاربر|کاربری|اکانت|حساب|فرستنده|چت|گروه|کانال|این|طرف))"
+    if not re.search(id_root, t):
+        # Also check compound "شناسه" with target or action
+        if not (re.search(r"\bشناسه\b", t) and re.search(r"(?:عددی|این|طرف|کاربر|فرستنده|پیام|چت|من)", t)):
+            return False
 
     # Action / Extraction verbs
     actions = r"(?:استخراج|بده|بگو|چیه|چند\s*است|چنده|درار|پیدا\s*کن|نمایش|بفرست|کپی|اعلام\s*کن|ارسال\s*کن)"
     # Target entities
-    targets = r"(?:عددی|این|اون|طرف|شخص|یک\s*نفر|کاربر|فرستنده|ایشون|پیام|چت|گروه|کانال|من|ما|اکانت|حساب)"
+    targets = r"(?:عددی|این|اون|طرف|یک\s*نفر|کاربر|فرستنده|ایشون|پیام|چت|گروه|کانال|من|ما|اکانت|حساب)"
 
     if re.search(actions, t) or re.search(targets, t):
         return True
